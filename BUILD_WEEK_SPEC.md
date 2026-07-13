@@ -909,6 +909,14 @@ Its honest fallback is **Claim Packet Reviewer**: three photos and a statement b
 
 # 3. Submission strategy
 
+## Build Week operating guardrails
+
+- **Problem before model:** begin every product explanation with the real user pain and measurable outcome. Use GPT-5.6 only where the task requires semantic understanding, adaptation, or verification; remove decorative model calls.
+- **Find people early:** browse the [Build Week participants](https://openai.devpost.com/participants) and [#build-week-chat in the OpenAI Discord](https://discord.com/channels/974519864045756446/1415384556521132134) before deep implementation. Recruit at least one outside tester early enough to change the product.
+- **Record continuously:** save short captures of every stable end-to-end milestone instead of relying on one last-day recording. The final three-minute video must show the product working and include voiceover explaining the use of Codex and GPT-5.6.
+- **Keep the repository testable:** ship clean setup instructions, pinned dependencies, non-sensitive sample data, sandbox reset steps, expected results, and a reproducible main-demo path. Validate the instructions from a clean checkout.
+- **Watch credits:** check the credit meter daily, use deterministic fixtures and bounded retries during development, and reserve expensive full runs for meaningful milestones. Usage beyond free or granted credits is a deliberate personal expense.
+
 ## Show, do not explain
 
 The demo video should begin with the user’s one-sentence request and the visible real-world action. Architecture comes only after the result and fault/recovery moment.
