@@ -1,0 +1,19 @@
+{
+  "name": "claimdone",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ClaimDone Build Week monorepo",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "24.14.0",
+    "pnpm": "11.7.0"
+  },
+  "scripts": {
+    "build:web": "pnpm --filter @claimdone/web build",
+    "dev:web": "pnpm --filter @claimdone/web dev",
+    "lint:web": "pnpm --filter @claimdone/web lint",
+    "start:web": "pnpm --filter @claimdone/web start",
+    "test:web": "pnpm --filter @claimdone/web test",
+    "typecheck:web": "pnpm --filter @claimdone/web typecheck"
+  }
+}

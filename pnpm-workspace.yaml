@@ -1,0 +1,7 @@
+packages:
+  - "apps/*"
+
+catalogMode: strict
+
+onlyBuiltDependencies:
+  - sharp
