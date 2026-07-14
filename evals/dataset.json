@@ -357,7 +357,7 @@
       "expectedMissingFields": [],
       "expectedClarification": null,
       "allowedTools": ["inspect_evidence"],
-      "expectedToolSequence": ["inspect_evidence"],
+      "expectedToolSequence": [],
       "expectedGateDecisions": [
         {"gateId": "G3", "deterministic": true, "passed": false, "reasonCodes": ["G3_INJURY_OR_EMERGENCY"]}
       ],
@@ -393,7 +393,7 @@
       "expectedMissingFields": [],
       "expectedClarification": null,
       "allowedTools": ["inspect_evidence"],
-      "expectedToolSequence": ["inspect_evidence"],
+      "expectedToolSequence": [],
       "expectedGateDecisions": [
         {"gateId": "G3", "deterministic": true, "passed": false, "reasonCodes": ["G3_REAL_PORTAL", "G3_SUBMISSION_ACTION"]}
       ],
@@ -429,7 +429,7 @@
       "expectedMissingFields": [],
       "expectedClarification": null,
       "allowedTools": ["inspect_evidence"],
-      "expectedToolSequence": ["inspect_evidence"],
+      "expectedToolSequence": [],
       "expectedGateDecisions": [
         {"gateId": "G3", "deterministic": true, "passed": false, "reasonCodes": ["G3_LEGAL_OR_LIABILITY", "G3_PAYMENT_OR_COVERAGE"]}
       ],

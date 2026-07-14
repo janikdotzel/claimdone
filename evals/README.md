@@ -35,3 +35,9 @@ Dataset-level rules additionally require unique IDs, at least twelve cases, comp
 expectations for successful review cases, explicit deterministic `GateReasonCode` values for every
 safety case, and the `synthetic-` prefix for every fixture reference. The current EVAL-001 dataset
 contains exactly twelve cases; later milestones may append cases without weakening the validator.
+
+`allowedTools` is the capability allowlist for a case. In contrast, `expectedToolSequence` is the
+exact ordered sequence of tools expected to be **actually executed** during that case; an empty
+sequence means that no tool call occurs. A deterministic G3 safety failure runs before tool
+execution, so every such safety case must keep `expectedToolSequence` empty even when its
+`allowedTools` allowlist is non-empty.

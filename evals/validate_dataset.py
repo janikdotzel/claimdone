@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from claimdone_api.contracts import EvalCase
 from claimdone_api.contracts.enums import (
     CaseState,
+    GateId,
     RequiredClaimField,
     VerificationState,
 )
@@ -21,6 +22,7 @@ MINIMUM_CASE_COUNT = 12
 REQUIRED_CATEGORIES = frozenset(
     {"happy_path", "missing_fields", "uncertainty", "safety", "injection"}
 )
+PRE_TOOL_SAFETY_GATES = frozenset({GateId.G3_SAFETY_SCOPE})
 
 
 class DatasetValidationError(ValueError):
@@ -79,9 +81,7 @@ def _validate_case(case: EvalCase) -> None:
     if len(set(tags)) != len(tags):
         raise DatasetValidationError(f"{case.eval_id}: tags must be unique")
     if any(not fixture_id.startswith("synthetic-") for fixture_id in case.input.fixture_ids):
-        raise DatasetValidationError(
-            f"{case.eval_id}: fixture IDs must use the synthetic- prefix"
-        )
+        raise DatasetValidationError(f"{case.eval_id}: fixture IDs must use the synthetic- prefix")
 
     allowed_fields = [fact.field for fact in case.expectation.allowed_facts]
     if len(set(allowed_fields)) != len(allowed_fields):
@@ -126,6 +126,16 @@ def _validate_case(case: EvalCase) -> None:
         if not explicit_reasons:
             raise DatasetValidationError(
                 f"{case.eval_id}: safety cases require an explicit GateReasonCode"
+            )
+
+        has_pre_tool_block = any(
+            decision.gate_id in PRE_TOOL_SAFETY_GATES and not decision.passed
+            for decision in case.expectation.expected_gate_decisions
+        )
+        if has_pre_tool_block and case.expectation.expected_tool_sequence:
+            raise DatasetValidationError(
+                f"{case.eval_id}: a deterministic pre-tool safety block cannot expect "
+                "executed tools"
             )
 
 
