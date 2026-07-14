@@ -17,6 +17,9 @@ class PortalPort(Protocol):
     ) -> tuple[str, RenderedPortalValues]:
         """Reset, fill, stop at review, and freshly read rendered values."""
 
+    def cleanup_case(self, case_id: str) -> None:
+        """Idempotently remove one owned sandbox portal session."""
+
 
 class HttpPortalPort:
     """Strict adapter for the local Next.js sandbox API; never submits."""
@@ -80,6 +83,22 @@ class HttpPortalPort:
             raise PortalUnavailableError("Sandbox portal request failed") from error
         review_url = f"{self._base_url}/sandbox/A/cases/{encoded_case_id}"
         return review_url, rendered_values
+
+    def cleanup_case(self, case_id: str) -> None:
+        encoded_case_id = quote(case_id, safe="")
+        try:
+            response = self._client.request(
+                "DELETE",
+                f"/api/sandbox/cases/{encoded_case_id}?variant=A",
+            )
+        except httpx.HTTPError as error:
+            raise PortalUnavailableError("Sandbox portal cleanup failed") from error
+        if response.status_code == 404:
+            return
+        if not 200 <= response.status_code < 300:
+            raise PortalUnavailableError(
+                f"Sandbox portal cleanup returned HTTP {response.status_code}"
+            )
 
     def _request(
         self,

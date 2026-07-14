@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
 from threading import Barrier
@@ -28,6 +28,7 @@ from claimdone_api.media import (
     ImageUpload,
     IntakeConsents,
     IntakeRequest,
+    MediaStorageError,
     PersistentCaseMediaCleaner,
 )
 from claimdone_api.persistence import SqliteCaseRepository
@@ -45,6 +46,8 @@ class RecordingPortal:
     fail: bool = False
     mismatch: bool = False
     calls: int = 0
+    cleanup_calls: int = 0
+    review_cases: set[str] = field(default_factory=set)
 
     def fill_to_review(
         self,
@@ -54,6 +57,7 @@ class RecordingPortal:
         self.calls += 1
         if self.fail:
             raise PortalUnavailableError("expected portal failure")
+        self.review_cases.add(case_id)
         rendered_fields = fields.model_dump(mode="json", by_alias=True)
         if self.mismatch:
             rendered_fields["narrative"] = "A mismatching rendered value."
@@ -69,6 +73,10 @@ class RecordingPortal:
                 strict=False,
             ),
         )
+
+    def cleanup_case(self, case_id: str) -> None:
+        self.cleanup_calls += 1
+        self.review_cases.discard(case_id)
 
 
 @dataclass(frozen=True)
@@ -388,6 +396,29 @@ def test_directly_negated_injury_and_danger_do_not_false_positive(
 
 
 @pytest.mark.parametrize(
+    "statement",
+    (
+        "No injuries and danger remains at the staged scene.",
+        "Keine Verletzungen und Gefahr besteht weiterhin am Demo-Ort.",
+    ),
+)
+def test_each_combined_safety_term_requires_its_own_negator(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    harness = make_harness(tmp_path)
+
+    with pytest.raises(FlowError) as captured:
+        begin(harness, text=statement)
+
+    assert captured.value.gate_decision is not None
+    assert captured.value.gate_decision.reason_codes == (
+        GateReasonCode.G3_INJURY_OR_EMERGENCY,
+    )
+    assert harness.cases.get_case(harness.case_id).state is CaseState.EMERGENCY_STOPPED
+
+
+@pytest.mark.parametrize(
     ("statement", "expected_reasons"),
     (
         (
@@ -505,6 +536,81 @@ def test_terminalization_fault_cannot_skip_gate_media_cleanup(
     assert harness.portal.calls == 0
 
 
+def test_media_delete_failure_retains_mapping_for_later_owned_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_harness(tmp_path)
+    intake = begin(harness)
+    assert intake.clarification is not None
+    storage_name = harness.repository.get_case_media_handle(harness.case_id)
+    assert storage_name is not None
+    case_path = harness.store.root / storage_name
+    original_delete = harness.store.delete_case
+    original_safety = walking_safety_module.deterministic_safety_input
+
+    def forced_injury(*args: Any, **kwargs: Any) -> Any:
+        return replace(original_safety(*args, **kwargs), injury_reported=True)
+
+    def failed_delete(*args: Any, **kwargs: Any) -> Any:
+        raise MediaStorageError(f"injected media delete failure: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(
+        walking_service_module,
+        "deterministic_safety_input",
+        forced_injury,
+    )
+    monkeypatch.setattr(harness.store, "delete_case", failed_delete)
+
+    with pytest.raises(FlowError) as captured:
+        harness.service.answer(
+            harness.case_id,
+            intake.clarification.clarification_id,
+            expected_version=intake.case.version,
+            answer="14:30",
+        )
+
+    assert captured.value.code == "DETERMINISTIC_GATE_BLOCKED"
+    assert isinstance(captured.value.__cause__, MediaStorageError)
+    assert harness.cases.get_case(harness.case_id).state is CaseState.EMERGENCY_STOPPED
+    assert harness.repository.get_case_media_handle(harness.case_id) == storage_name
+    assert case_path.is_dir()
+
+    monkeypatch.setattr(harness.store, "delete_case", original_delete)
+    harness.cases.delete_case(harness.case_id)
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not case_path.exists()
+
+
+def test_initial_g3_delete_failure_keeps_case_specific_media_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_harness(tmp_path)
+    original_delete = harness.store.delete_case
+
+    def failed_delete(*args: Any, **kwargs: Any) -> Any:
+        raise MediaStorageError(f"injected media delete failure: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(harness.store, "delete_case", failed_delete)
+
+    with pytest.raises(FlowError) as captured:
+        begin(harness, text="Someone may be injured at the staged scene.")
+
+    assert captured.value.code == "DETERMINISTIC_GATE_BLOCKED"
+    assert isinstance(captured.value.__cause__, MediaStorageError)
+    assert harness.cases.get_case(harness.case_id).state is CaseState.EMERGENCY_STOPPED
+    storage_name = harness.repository.get_case_media_handle(harness.case_id)
+    assert storage_name is not None
+    case_path = harness.store.root / storage_name
+    assert case_path.is_dir()
+
+    monkeypatch.setattr(harness.store, "delete_case", original_delete)
+    harness.cases.delete_case(harness.case_id)
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not case_path.exists()
+
+
 @pytest.mark.parametrize("failure", ["unavailable", "mismatch"])
 def test_portal_failure_never_reaches_verifying_and_clears_clarification(
     tmp_path: Path,
@@ -529,6 +635,47 @@ def test_portal_failure_never_reaches_verifying_and_clears_clarification(
     assert failed.snapshot.active_clarification is None
     assert failed.snapshot.claim_packet is None
     assert failed.snapshot.intake_summary is None
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
+    assert harness.portal.cleanup_calls == 1
+    assert harness.portal.review_cases == set()
+
+
+def test_post_review_persistence_failure_compensates_portal_backend_and_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_harness(tmp_path)
+    intake = begin(harness)
+    assert intake.clarification is not None
+    original_transition = harness.cases.transition_case
+
+    def persisted_then_failed(*args: Any, **kwargs: Any) -> Any:
+        transitioned = original_transition(*args, **kwargs)
+        if kwargs.get("target") is CaseState.VERIFYING:
+            raise RuntimeError("injected failure after verifying persistence")
+        return transitioned
+
+    monkeypatch.setattr(harness.cases, "transition_case", persisted_then_failed)
+
+    with pytest.raises(FlowError) as captured:
+        harness.service.answer(
+            harness.case_id,
+            intake.clarification.clarification_id,
+            expected_version=intake.case.version,
+            answer="14:30",
+        )
+
+    assert captured.value.code == "PORTAL_COMMIT_FAILED"
+    assert captured.value.status_code == 502
+    failed = harness.cases.get_case(harness.case_id)
+    assert failed.state is CaseState.FAILED
+    assert failed.snapshot.claim_packet is None
+    assert failed.snapshot.active_clarification is None
+    assert failed.snapshot.intake_summary is None
+    assert harness.portal.calls == 1
+    assert harness.portal.cleanup_calls == 1
+    assert harness.portal.review_cases == set()
     assert harness.repository.get_case_media_handle(harness.case_id) is None
     assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
 

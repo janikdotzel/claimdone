@@ -25,16 +25,6 @@ _DANGER = re.compile(rf"\b{_DANGER_TERM}\b", re.IGNORECASE)
 # "not sure whether someone was injured" deliberately remains blocking.
 _NEGATED_SAFETY_PHRASES = (
     re.compile(
-        rf"\b(?:no|without)\s+(?:one\s+|any\s+)?{_INJURY_TERM}"
-        rf"\s+(?:and|or)\s+(?:no\s+)?{_DANGER_TERM}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        rf"\bkein(?:e|en|er|em|es)?\s+{_INJURY_TERM}"
-        rf"\s+(?:und|oder)\s+(?:kein(?:e|en|er|em|es)?\s+)?{_DANGER_TERM}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
         rf"\b(?:nobody|no\s+one)\s+(?:was\s+|is\s+|got\s+)?{_INJURY_TERM}\b",
         re.IGNORECASE,
     ),

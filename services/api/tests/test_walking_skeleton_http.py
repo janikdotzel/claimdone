@@ -33,6 +33,7 @@ WEB_ORIGIN = "http://127.0.0.1:3000"
 @dataclass
 class HttpTestPortal:
     calls: int = 0
+    cleanup_calls: int = 0
 
     def fill_to_review(
         self,
@@ -52,6 +53,10 @@ class HttpTestPortal:
                 strict=False,
             ),
         )
+
+    def cleanup_case(self, case_id: str) -> None:
+        del case_id
+        self.cleanup_calls += 1
 
 
 def image_bytes(image_format: str) -> bytes:
@@ -483,7 +488,7 @@ def test_malformed_and_duplicate_content_length_are_blocked_before_app() -> None
     assert duplicate[0]["status"] == 400
 
 
-def test_http_portal_adapter_uses_only_reset_draft_review_and_rendered_routes() -> None:
+def test_http_portal_adapter_uses_narrow_fill_and_idempotent_delete_routes() -> None:
     fields = PortalDraftFields.model_validate(
         {
             "incidentDate": "2026-07-14",
@@ -533,18 +538,23 @@ def test_http_portal_adapter_uses_only_reset_draft_review_and_rendered_routes() 
             assert request.url.path.endswith("/review")
             assert json.loads(request.content) == {"expectedVersion": 2}
             return httpx.Response(200, json=portal_view(state="review", version=3))
-        assert index == 4
-        assert request.method == "GET"
-        assert request.url.path.endswith("/rendered-values")
-        return httpx.Response(
-            200,
-            json={
-                "caseId": "case-adapter-001",
-                "state": "review",
-                "fields": fields.model_dump(mode="json", by_alias=True),
-                "renderedAt": "2026-07-14T12:00:01Z",
-            },
-        )
+        if index == 4:
+            assert request.method == "GET"
+            assert request.url.path.endswith("/rendered-values")
+            return httpx.Response(
+                200,
+                json={
+                    "caseId": "case-adapter-001",
+                    "state": "review",
+                    "fields": fields.model_dump(mode="json", by_alias=True),
+                    "renderedAt": "2026-07-14T12:00:01Z",
+                },
+            )
+        assert index in {5, 6}
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/sandbox/cases/case-adapter-001"
+        assert request.url.query == b"variant=A"
+        return httpx.Response(204 if index == 5 else 404)
 
     client = httpx.Client(
         base_url=WEB_ORIGIN,
@@ -553,10 +563,12 @@ def test_http_portal_adapter_uses_only_reset_draft_review_and_rendered_routes() 
     adapter = HttpPortalPort(WEB_ORIGIN, client=client)
 
     review_url, rendered = adapter.fill_to_review("case-adapter-001", fields)
+    adapter.cleanup_case("case-adapter-001")
+    adapter.cleanup_case("case-adapter-001")
 
     assert review_url == f"{WEB_ORIGIN}/sandbox/A/cases/case-adapter-001"
     assert rendered.fields == fields
-    assert len(calls) == 4
+    assert len(calls) == 6
 
 
 @pytest.mark.parametrize(

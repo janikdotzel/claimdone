@@ -223,6 +223,11 @@ class WalkingSkeletonService:
                 target=CaseState.ANALYZING,
                 actor=ActorType.SYSTEM,
             )
+            self._repository.bind_case_media_handle(
+                case_id=case_id,
+                storage_name=session.handle.storage_name,
+                created_at=self._aware_now(),
+            )
             statement_ref, statement = self._statement_for_initial(
                 session,
                 privacy.prepared,
@@ -250,11 +255,6 @@ class WalkingSkeletonService:
                     finalization_error or blocked
                 )
             record = self._record_decisions(record, decisions[2:])
-            self._repository.bind_case_media_handle(
-                case_id=case_id,
-                storage_name=session.handle.storage_name,
-                created_at=self._aware_now(),
-            )
             summary = persisted_intake(
                 session,
                 statement=statement_ref,
@@ -533,6 +533,7 @@ class WalkingSkeletonService:
                     "Rendered portal fields differ from the authoritative draft"
                 )
         except PortalUnavailableError as error:
+            portal_cleanup_error = self._cleanup_portal_case(case_id)
             failed, finalization_error = self._terminalize_and_release(
                 record,
                 CaseState.FAILED,
@@ -543,37 +544,51 @@ class WalkingSkeletonService:
                 "The sandbox portal could not reach review.",
                 502,
                 current_version=failed.version,
-            ) from (finalization_error or error)
+            ) from (portal_cleanup_error or finalization_error or error)
 
-        verifying_packet = self._packet_state(
-            filling_packet,
-            CaseState.VERIFYING,
-            PortalState.REVIEW,
-        )
-        record = self._cases.transition_case(
-            case_id,
-            expected_version=record.version,
-            target=CaseState.VERIFYING,
-            claim_packet=verifying_packet,
-        )
-        portal = PortalView.model_validate(
-            {
-                "reviewUrl": review_url,
-                "renderedValues": rendered.model_dump(mode="json", by_alias=True),
-                "verificationState": VerificationState.PENDING,
-            }
-        )
-        return FlowResponse.model_validate(
-            {
-                "requestId": self._request_id_factory(),
-                "case": CaseView.from_record(record),
-                "draftRevision": record.version,
-                "gateHistory": decisions,
-                "phase": FlowPhase.REVIEW,
-                "clarification": None,
-                "portal": portal,
-            }
-        )
+        try:
+            verifying_packet = self._packet_state(
+                filling_packet,
+                CaseState.VERIFYING,
+                PortalState.REVIEW,
+            )
+            record = self._cases.transition_case(
+                case_id,
+                expected_version=record.version,
+                target=CaseState.VERIFYING,
+                claim_packet=verifying_packet,
+            )
+            portal = PortalView.model_validate(
+                {
+                    "reviewUrl": review_url,
+                    "renderedValues": rendered.model_dump(mode="json", by_alias=True),
+                    "verificationState": VerificationState.PENDING,
+                }
+            )
+            return FlowResponse.model_validate(
+                {
+                    "requestId": self._request_id_factory(),
+                    "case": CaseView.from_record(record),
+                    "draftRevision": record.version,
+                    "gateHistory": decisions,
+                    "phase": FlowPhase.REVIEW,
+                    "clarification": None,
+                    "portal": portal,
+                }
+            )
+        except Exception as error:
+            portal_cleanup_error = self._cleanup_portal_case(case_id)
+            failed, finalization_error = self._terminalize_and_release(
+                record,
+                CaseState.FAILED,
+                handle,
+            )
+            raise FlowError(
+                "PORTAL_COMMIT_FAILED",
+                "The sandbox review could not be committed safely.",
+                502,
+                current_version=failed.version,
+            ) from (portal_cleanup_error or finalization_error or error)
 
     def _run_g2_to_g5(
         self,
@@ -829,18 +844,15 @@ class WalkingSkeletonService:
         )
 
     def _release_media_handle(self, case_id: str, handle: CaseHandle) -> None:
-        delete_error: Exception | None = None
+        self._media_store.delete_case(handle)
+        self._repository.unbind_case_media_handle(case_id, handle.storage_name)
+
+    def _cleanup_portal_case(self, case_id: str) -> Exception | None:
         try:
-            self._media_store.delete_case(handle)
+            self._portal.cleanup_case(case_id)
         except Exception as error:
-            delete_error = error
-        try:
-            self._repository.unbind_case_media_handle(case_id, handle.storage_name)
-        except Exception:
-            if delete_error is None:
-                raise
-        if delete_error is not None:
-            raise delete_error
+            return error
+        return None
 
     def _terminalize_and_release(
         self,
@@ -854,6 +866,10 @@ class WalkingSkeletonService:
             current = self._terminalize_case(record, target)
         except Exception as error:
             finalization_error = error
+            with suppress(Exception):
+                current = self._cases.get_case(record.case_id)
+                current = self._terminalize_case(current, target)
+                finalization_error = None
         try:
             self._release_media_handle(record.case_id, handle)
         except Exception as error:
