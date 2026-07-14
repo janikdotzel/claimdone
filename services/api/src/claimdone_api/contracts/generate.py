@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from pydantic.json_schema import JsonSchemaMode, models_json_schema
 
 from .base import CONTRACT_VERSION
+from .eval_results import EvalCaseResult, EvalCheckResult, EvalRunSummary
 from .evals import EvalCase
 from .models import (
     AuditEvent,
@@ -26,8 +27,19 @@ from .models import (
     ToolPlan,
     VerificationReport,
 )
+from .portal import (
+    PortalDraftFields,
+    PortalReviewFields,
+    PortalSessionView,
+    RenderedPortalSnapshot,
+    SandboxReceipt,
+)
 from .release import ReleaseDecision
 from .state_machine import CASE_TRANSITIONS, TERMINAL_CASE_STATES
+from .tooling import ToolInvocation
+from .transcript import TranscriptConfirmationRequest, TranscriptConfirmationView
+from .verification_attempts import VerificationAttempt, VerificationAttemptSeries
+from .workflow import WorkflowEventEnvelope
 
 PUBLIC_MODELS: tuple[type[BaseModel], ...] = (
     ClaimPacket,
@@ -41,6 +53,20 @@ PUBLIC_MODELS: tuple[type[BaseModel], ...] = (
     GateDecision,
     VerificationReport,
     AuditEvent,
+    TranscriptConfirmationView,
+    TranscriptConfirmationRequest,
+    ToolInvocation,
+    PortalDraftFields,
+    PortalReviewFields,
+    PortalSessionView,
+    RenderedPortalSnapshot,
+    SandboxReceipt,
+    WorkflowEventEnvelope,
+    VerificationAttempt,
+    VerificationAttemptSeries,
+    EvalCheckResult,
+    EvalCaseResult,
+    EvalRunSummary,
     EvalCase,
     ReleaseDecision,
 )
@@ -158,6 +184,8 @@ def _typescript_type(schema: Mapping[str, Any]) -> str:
                 )
             return "{ " + " ".join(members) + " }"
         additional = schema.get("additionalProperties")
+        if additional is False:
+            return "Readonly<Record<string, never>>"
         if isinstance(additional, dict):
             return f"Readonly<Record<string, {_typescript_type(additional)}>>"
         return "Readonly<Record<string, unknown>>"
@@ -167,6 +195,8 @@ def _typescript_type(schema: Mapping[str, Any]) -> str:
 def _render_definition(name: str, definition: Mapping[str, Any]) -> str:
     if definition.get("type") == "object" or "properties" in definition:
         properties = cast(Mapping[str, Mapping[str, Any]], definition.get("properties", {}))
+        if not properties and definition.get("additionalProperties") is False:
+            return f"export type {name} = Readonly<Record<string, never>>;"
         required = set(cast(Sequence[str], definition.get("required", [])))
         lines = [f"export interface {name} {{"]
         for property_name, property_schema in properties.items():

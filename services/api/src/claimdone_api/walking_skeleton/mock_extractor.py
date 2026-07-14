@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 
 from claimdone_api.contracts import (
+    CONTRACT_VERSION,
     CounterpartyKnown,
     EvidenceFact,
     EvidenceField,
@@ -226,7 +227,7 @@ def deterministic_extraction(
     )
     return ModelExtraction.model_validate(
         {
-            "contractVersion": "1.0.0",
+            "contractVersion": CONTRACT_VERSION,
             "evidence": evidence,
             "provenance": provenance,
             "facts": facts,

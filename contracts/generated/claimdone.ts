@@ -3,7 +3,7 @@
 /* eslint-disable */
 
 
-export const CONTRACT_VERSION = "1.0.0" as const;
+export const CONTRACT_VERSION = "2.0.0" as const;
 
 export const AGENT_CAN_SUBMIT = false as const;
 
@@ -12,17 +12,11 @@ export type ActorType = "system" | "agent" | "human";
 
 export type AllowedTool = "inspect_evidence" | "check_required_fields" | "ask_clarification" | "inspect_form" | "fill_until_review" | "verify_rendered_fields" | "read_receipt";
 
-export interface AuditDetail {
-  readonly key: string;
-  readonly redacted: true;
-  readonly valueSummary: string;
-}
-
 export interface AuditEvent {
   readonly actor: ActorType;
   readonly caseId: string;
-  readonly contractVersion: "1.0.0";
-  readonly details: ReadonlyArray<AuditDetail>;
+  readonly contractVersion: "2.0.0";
+  readonly details: readonly [];
   readonly eventId: string;
   readonly eventType: AuditEventType;
   readonly fromState: CaseState | null;
@@ -31,9 +25,9 @@ export interface AuditEvent {
   readonly toState: CaseState | null;
 }
 
-export type AuditEventType = "case_state_changed" | "gate_decision" | "plan_step" | "tool_call" | "verification" | "human_approval" | "receipt" | "reset";
+export type AuditEventType = "case_state_changed" | "gate_decision" | "plan_step" | "tool_call" | "clarification" | "portal_fill" | "verification" | "retry" | "operational_failure" | "provider_call" | "human_approval" | "receipt" | "reset";
 
-export type CaseState = "created" | "disclosed" | "analyzing" | "awaiting_clarification" | "ready_to_fill" | "filling" | "verifying" | "review" | "blocked" | "human_approved" | "receipt" | "emergency_stopped" | "abandoned" | "failed";
+export type CaseState = "created" | "disclosed" | "analyzing" | "awaiting_transcript_confirmation" | "awaiting_clarification" | "ready_to_fill" | "filling" | "verifying" | "review" | "blocked" | "human_approved" | "receipt" | "emergency_stopped" | "abandoned" | "failed";
 
 export type CheckpointStatus = "pending" | "passed" | "failed";
 
@@ -54,7 +48,7 @@ export interface ClaimData {
 export interface ClaimPacket {
   readonly caseId: string;
   readonly claim: ClaimData;
-  readonly contractVersion: "1.0.0";
+  readonly contractVersion: "2.0.0";
   readonly evidence: ReadonlyArray<EvidenceItem>;
   readonly facts: ReadonlyArray<EvidenceFact>;
   readonly gateDecisions: ReadonlyArray<GateDecision>;
@@ -73,6 +67,15 @@ export interface ClaimScope {
   readonly scenario: "two_vehicle_rear_end_no_injury";
 }
 
+export type ClarificationStatus = "requested" | "confirmed" | "exhausted";
+
+export interface ClarificationWorkflowEvent {
+  readonly field: RequiredClaimField;
+  readonly kind: "clarification";
+  readonly round: 1 | 2 | 3;
+  readonly status: ClarificationStatus;
+}
+
 export type CounterpartyKnown = "yes" | "no" | "unknown";
 
 export interface DeterministicEvalExpectation {
@@ -83,7 +86,7 @@ export interface DeterministicEvalExpectation {
 }
 
 export interface EvalCase {
-  readonly contractVersion: "1.0.0";
+  readonly contractVersion: "2.0.0";
   readonly evalId: string;
   readonly evaluationMode: EvaluationMode;
   readonly expectation: EvalExpectation;
@@ -92,6 +95,29 @@ export interface EvalCase {
   readonly releaseBlocking: boolean;
   readonly tags: ReadonlyArray<string>;
   readonly title: string;
+}
+
+export interface EvalCaseResult {
+  readonly checks: ReadonlyArray<EvalCheckResult>;
+  readonly contractVersion: "2.0.0";
+  readonly deterministicPassed: boolean;
+  readonly durationMs: number;
+  readonly evalId: string;
+  readonly evaluationMode: EvaluationMode;
+  readonly passed: boolean;
+  readonly providerCallCount: number;
+  readonly providerFailure: ProviderFailure | null;
+}
+
+export interface EvalCheckResult {
+  readonly contractVersion: "2.0.0";
+  readonly failureCode: EvalFailureCode | null;
+  readonly graderType: EvalGraderType;
+  readonly metricId: EvalMetricId;
+  readonly observedGateId: GateId | null;
+  readonly observedGateReasonCodes: ReadonlyArray<GateReasonCode>;
+  readonly passed: boolean;
+  readonly score: number | null;
 }
 
 export interface EvalExpectation {
@@ -109,6 +135,10 @@ export interface EvalExpectation {
   readonly modelGraderThresholds: ReadonlyArray<ModelGraderExpectation>;
 }
 
+export type EvalFailureCode = "expectation_mismatch" | "missing_observation" | "provider_failure" | "grader_failed";
+
+export type EvalGraderType = "deterministic" | "model" | "human";
+
 export interface EvalInput {
   readonly completedClarificationRounds: number;
   readonly fixtureIds: ReadonlyArray<string>;
@@ -118,7 +148,39 @@ export interface EvalInput {
   readonly transcript: string | null;
 }
 
+export interface EvalMetricAggregate {
+  readonly contractVersion: "2.0.0";
+  readonly denominator: number;
+  readonly metricId: EvalMetricId;
+  readonly numerator: number;
+  readonly score: number | null;
+  readonly status: EvalMetricStatus;
+}
+
+export type EvalMetricId = "schema_validity" | "provenance_coverage" | "forbidden_facts" | "required_field_completion" | "safety_blocking" | "tool_policy" | "portal_value_match" | "mismatch_detection" | "approval_authority" | "receipt_redaction";
+
+export type EvalMetricStatus = "passed" | "failed" | "not_applicable";
+
 export type EvalPriority = "P0" | "P1" | "P2";
+
+export interface EvalRunSummary {
+  readonly caseResults: ReadonlyArray<EvalCaseResult>;
+  readonly commitSha: string;
+  readonly completedAt: string;
+  readonly contractVersion: "2.0.0";
+  readonly datasetSha256: string;
+  readonly datasetVersion: string;
+  readonly deterministicPassed: boolean;
+  readonly evaluationMode: EvaluationMode;
+  readonly failedCases: number;
+  readonly metrics: readonly [EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate, EvalMetricAggregate];
+  readonly passed: boolean;
+  readonly passedCases: number;
+  readonly providerCallCount: number;
+  readonly runId: string;
+  readonly startedAt: string;
+  readonly totalCases: number;
+}
 
 export type EvaluationMode = "deterministic" | "live" | "hybrid";
 
@@ -141,6 +203,7 @@ export interface EvidenceItem {
   readonly modelCopyApproved: boolean;
   readonly sha256: string;
   readonly text: string | null;
+  readonly transcriptConfirmed?: boolean | null;
 }
 
 export type EvidenceKind = "image" | "user_statement" | "transcript" | "clarification";
@@ -167,7 +230,7 @@ export interface FieldProvenance {
 }
 
 export interface GateDecision {
-  readonly contractVersion: "1.0.0";
+  readonly contractVersion: "2.0.0";
   readonly decidedAt: string;
   readonly deterministicPassed: boolean;
   readonly evidenceRefs: ReadonlyArray<string>;
@@ -180,6 +243,11 @@ export interface GateDecision {
 export type GateId = "G0" | "G1" | "G2" | "G3" | "G4" | "G5" | "G6" | "G7" | "G8" | "G9" | "G10" | "G11";
 
 export type GateReasonCode = "G0_IMAGE_COUNT_INVALID" | "G0_IMAGE_TYPE_INVALID" | "G0_IMAGE_TOO_LARGE" | "G0_INPUT_MODE_INVALID" | "G0_AUDIO_TOO_LONG" | "G0_CONSENT_MISSING" | "G1_EXIF_UNREVIEWED" | "G1_MODEL_COPY_NOT_APPROVED" | "G1_SENSITIVE_LOG_DATA" | "G2_SCHEMA_INVALID" | "G2_REFUSAL" | "G2_OUTPUT_TRUNCATED" | "G2_REFERENCE_MISSING" | "G2_RETRY_EXHAUSTED" | "G3_INJURY_OR_EMERGENCY" | "G3_REAL_PORTAL" | "G3_LEGAL_OR_LIABILITY" | "G3_PAYMENT_OR_COVERAGE" | "G3_SUBMISSION_ACTION" | "G3_MODEL_UNCERTAIN" | "G4_PROVENANCE_MISSING" | "G4_SENSITIVE_IMAGE_INFERENCE" | "G4_FACT_NOT_WRITABLE" | "G4_CONFIDENCE_BELOW_THRESHOLD" | "G4_CONFLICTING_SOURCES" | "G4_NARRATIVE_UNSUPPORTED" | "G5_REQUIRED_FIELD_MISSING" | "G5_QUESTION_INVALID" | "G5_CLARIFICATION_LIMIT" | "G6_TOOL_UNKNOWN" | "G6_ARGUMENTS_INVALID" | "G6_STATE_INVALID" | "G6_URL_NOT_ALLOWED" | "G6_LIMIT_EXCEEDED" | "G6_FORBIDDEN_ACTION" | "G7_FIELD_NOT_ALLOWED" | "G7_VALUE_NOT_FROM_PACKET" | "G7_PROVENANCE_MISSING" | "G7_FIELD_NOT_EDITABLE" | "G7_ATTACHMENT_MISMATCH" | "G8_FIELD_MISMATCH" | "G8_ATTACHMENT_MISMATCH" | "G8_REQUIRED_FIELD_MISSING" | "G8_MODEL_MISMATCH" | "G9_AGENT_FORBIDDEN" | "G9_ROLE_INVALID" | "G9_TOKEN_INVALID" | "G10_BEFORE_APPROVAL" | "G10_REDACTION_FAILED" | "G11_DETERMINISTIC_TESTS_FAILED" | "G11_SAFETY_EVAL_FAILED" | "G11_THRESHOLD_FAILED" | "G11_PORTAL_SUCCESS_FAILED" | "G11_APPROVAL_ATTACK_FAILED" | "G11_CLEAN_CHECKOUT_FAILED" | "G11_DOCUMENTATION_MISSING" | "G11_LICENSE_MISSING" | "G11_FIXTURES_MISSING" | "G11_TEST_REPORT_MISSING" | "G11_HUMAN_CHECKPOINT_MISSING";
+
+export interface GateWorkflowEvent {
+  readonly decision: GateDecision;
+  readonly kind: "gate";
+}
 
 export interface HumanCheckpoint {
   readonly checkpointId: HumanCheckpointId;
@@ -203,10 +271,64 @@ export interface ModelGraderExpectation {
   readonly minimumScore: number;
 }
 
+export interface OperationalFailureWorkflowEvent {
+  readonly failure: ProviderFailure;
+  readonly kind: "operational_failure";
+  readonly operation: WorkflowOperation;
+}
+
 export interface PlanStep {
   readonly reason: string;
   readonly sequence: number;
   readonly tool: AllowedTool;
+}
+
+export interface PlanStepWorkflowEvent {
+  readonly kind: "plan_step";
+  readonly sequence: number;
+  readonly tool: AllowedTool;
+}
+
+export interface PortalDraftFields {
+  readonly attachments: ReadonlyArray<string>;
+  readonly claimantName: string;
+  readonly counterpartyKnown: "" | CounterpartyKnown;
+  readonly incidentDate: string;
+  readonly incidentTime: string;
+  readonly location: string;
+  readonly narrative: string;
+  readonly policyReference: string;
+  readonly vehicleRegistration: string;
+}
+
+export interface PortalFillWorkflowEvent {
+  readonly kind: "portal_fill";
+  readonly portalVersion: number;
+  readonly variant: PortalVariant;
+  readonly writtenFields: ReadonlyArray<RequiredClaimField>;
+}
+
+export interface PortalReviewFields {
+  readonly attachments: readonly [string, string, string];
+  readonly claimantName: string;
+  readonly counterpartyKnown: CounterpartyKnown;
+  readonly incidentDate: string;
+  readonly incidentTime: string;
+  readonly location: string;
+  readonly narrative: string;
+  readonly policyReference: string;
+  readonly vehicleRegistration: string;
+}
+
+export interface PortalSessionView {
+  readonly auditCount?: number | null;
+  readonly caseId: string;
+  readonly contractVersion: "2.0.0";
+  readonly fields: PortalDraftFields;
+  readonly state: "draft" | "review";
+  readonly updatedAt: string;
+  readonly variant: PortalVariant;
+  readonly version: number;
 }
 
 export type PortalState = "draft" | "review" | "human_approved" | "receipt";
@@ -217,11 +339,48 @@ export interface PortalValueExpectation {
   readonly value: string | number | boolean | null;
 }
 
+export type PortalVariant = "A" | "B";
+
 export interface ProvenanceRef {
   readonly evidenceId: string;
   readonly locator: string | null;
   readonly provenanceId: string;
   readonly userConfirmed: boolean;
+}
+
+export interface ProviderCallWorkflowEvent {
+  readonly callSequence: number;
+  readonly cost?: ProviderCostSnapshot | null;
+  readonly durationMs: number;
+  readonly kind: "provider_call";
+  readonly modelId: ProviderModelId;
+  readonly operation: WorkflowOperation;
+  readonly providerMode: "mock" | "live";
+  readonly retryAttempt: 0 | 1;
+  readonly status: "succeeded";
+  readonly usage?: ProviderUsageSnapshot | null;
+}
+
+export interface ProviderCostSnapshot {
+  readonly currency: "USD";
+  readonly estimatedCostMicros: number;
+  readonly pricingSnapshotId: string;
+}
+
+export interface ProviderFailure {
+  readonly category: ProviderFailureCategory;
+  readonly retryable: boolean;
+  readonly terminal: boolean;
+}
+
+export type ProviderFailureCategory = "quota_exhausted" | "billing_limit" | "rate_limited" | "timeout" | "provider_unavailable" | "model_not_found" | "invalid_response" | "authentication_failed" | "permission_denied" | "invalid_request" | "cancelled";
+
+export type ProviderModelId = "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-4o-transcribe" | "claimdone-deterministic-mock";
+
+export interface ProviderUsageSnapshot {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
 }
 
 export interface ReleaseCheck {
@@ -235,7 +394,7 @@ export type ReleaseCheckId = "deterministic_tests" | "safety_evals" | "eval_thre
 
 export interface ReleaseDecision {
   readonly commitSha: string;
-  readonly contractVersion: "1.0.0";
+  readonly contractVersion: "2.0.0";
   readonly deterministicChecks: ReadonlyArray<ReleaseCheck>;
   readonly deterministicPassed: boolean;
   readonly evaluatedAt: string;
@@ -248,11 +407,117 @@ export interface ReleaseDecision {
   readonly releaseId: string;
 }
 
+export interface RenderedPortalSnapshot {
+  readonly caseId: string;
+  readonly contractVersion: "2.0.0";
+  readonly fields: PortalDraftFields;
+  readonly renderedAt: string;
+  readonly state: "review";
+  readonly variant: PortalVariant;
+  readonly version: number;
+}
+
 export type RequiredClaimField = "incident_date" | "incident_time" | "location" | "claimant_name" | "policy_reference" | "vehicle_registration" | "counterparty_known" | "narrative" | "attachments";
+
+export interface RetryWorkflowEvent {
+  readonly failure: ProviderFailure;
+  readonly kind: "retry";
+  readonly operation: "extraction";
+  readonly retryAttempt: 1;
+}
+
+export interface SandboxReceipt {
+  readonly approvalId: string;
+  readonly approvedAt: string;
+  readonly caseId: string;
+  readonly contractVersion: "2.0.0";
+  readonly environment: "sandbox";
+  readonly humanApproved: true;
+  readonly receiptId: string;
+  readonly redacted: true;
+  readonly renderedAt: string;
+  readonly sandboxOnly: true;
+  readonly state: "receipt";
+  readonly submittedToRealInsurer: false;
+  readonly summary: SandboxReceiptSummary;
+  readonly variant: PortalVariant;
+  readonly version: number;
+}
+
+export interface SandboxReceiptSummary {
+  readonly attachmentCount: 3;
+  readonly completedFieldCount: 8;
+  readonly finalActionOwner: "human";
+  readonly verificationPassed: true;
+}
+
+export interface StateWorkflowEvent {
+  readonly actor: ActorType;
+  readonly fromState: CaseState;
+  readonly kind: "state";
+  readonly toState: CaseState;
+}
+
+export type ToolCallStatus = "started" | "succeeded" | "blocked";
+
+export interface ToolCallWorkflowEvent {
+  readonly invocationId: string;
+  readonly kind: "tool_call";
+  readonly sequence: number;
+  readonly status: ToolCallStatus;
+  readonly tool: AllowedTool;
+}
+
+export interface ToolInvocation {
+  readonly arguments: ToolInvocationArguments;
+  readonly contractVersion: "2.0.0";
+  readonly invocationId: string;
+  readonly sequence: number;
+  readonly tool: AllowedTool;
+}
+
+export type ToolInvocationArguments = Readonly<Record<string, never>>;
 
 export interface ToolPlan {
   readonly agentCanSubmit: false;
   readonly steps: ReadonlyArray<PlanStep>;
+}
+
+export interface TranscriptConfirmationRequest {
+  readonly confirmed: true;
+  readonly contractVersion: "2.0.0";
+  readonly expectedVersion: number;
+  readonly transcriptId: string;
+  readonly transcriptSha256: string;
+}
+
+export interface TranscriptConfirmationView {
+  readonly confirmed: false;
+  readonly contractVersion: "2.0.0";
+  readonly text: string;
+  readonly transcriptId: string;
+  readonly transcriptSha256: string;
+  readonly version: number;
+}
+
+export interface VerificationAttempt {
+  readonly attemptId: string;
+  readonly attemptNumber: 1 | 2;
+  readonly caseId: string;
+  readonly caseState: "verifying";
+  readonly contractVersion: "2.0.0";
+  readonly final: boolean;
+  readonly gateDecision: GateDecision | null;
+  readonly portalVersion: number;
+  readonly repair: VerificationRepairMetadata | null;
+  readonly repairedFromAttemptId: string | null;
+  readonly report: VerificationReport;
+}
+
+export interface VerificationAttemptSeries {
+  readonly attempts: ReadonlyArray<VerificationAttempt>;
+  readonly caseId: string;
+  readonly contractVersion: "2.0.0";
 }
 
 export interface VerificationFieldResult {
@@ -264,6 +529,14 @@ export interface VerificationFieldResult {
 }
 
 export type VerificationFieldStatus = "match" | "mismatch" | "missing";
+
+export interface VerificationRepairMetadata {
+  readonly field: "incident_date" | "incident_time" | "location" | "claimant_name" | "policy_reference" | "vehicle_registration" | "counterparty_known" | "narrative";
+  readonly fromPortalVersion: number;
+  readonly repairNumber: 1;
+  readonly sourceRefs: ReadonlyArray<string>;
+  readonly toPortalVersion: number;
+}
 
 export interface VerificationReport {
   readonly actualAttachmentCount: number | null;
@@ -278,6 +551,30 @@ export interface VerificationReport {
 
 export type VerificationState = "pending" | "verified" | "mismatch" | "blocked";
 
+export interface VerificationWorkflowEvent {
+  readonly attemptNumber: 1 | 2;
+  readonly deterministicMatch: boolean;
+  readonly final: boolean;
+  readonly kind: "verification";
+  readonly modelReportedMismatch: boolean;
+  readonly repairUsed: boolean;
+  readonly status: VerificationState;
+}
+
+export interface WorkflowEventEnvelope {
+  readonly caseId: string;
+  readonly contractVersion: "2.0.0";
+  readonly cursor: number;
+  readonly event: StateWorkflowEvent | GateWorkflowEvent | ClarificationWorkflowEvent | PlanStepWorkflowEvent | ToolCallWorkflowEvent | PortalFillWorkflowEvent | VerificationWorkflowEvent | RetryWorkflowEvent | OperationalFailureWorkflowEvent | ProviderCallWorkflowEvent;
+  readonly eventId: string;
+  readonly occurredAt: string;
+  readonly sourceAuditEventId: string;
+  readonly sourceAuditEventType: AuditEventType;
+  readonly sourceAuditSequence: number;
+}
+
+export type WorkflowOperation = "transcription" | "extraction" | "computer_use" | "verification";
+
 
 export const CONTRACT_ROOT_MODELS = [
   "AuditEvent",
@@ -285,14 +582,28 @@ export const CONTRACT_ROOT_MODELS = [
   "ClaimPacket",
   "ClaimScope",
   "EvalCase",
+  "EvalCaseResult",
+  "EvalCheckResult",
+  "EvalRunSummary",
   "EvidenceFact",
   "EvidenceItem",
   "GateDecision",
   "PlanStep",
+  "PortalDraftFields",
+  "PortalReviewFields",
+  "PortalSessionView",
   "ProvenanceRef",
   "ReleaseDecision",
+  "RenderedPortalSnapshot",
+  "SandboxReceipt",
+  "ToolInvocation",
   "ToolPlan",
-  "VerificationReport"
+  "TranscriptConfirmationRequest",
+  "TranscriptConfirmationView",
+  "VerificationAttempt",
+  "VerificationAttemptSeries",
+  "VerificationReport",
+  "WorkflowEventEnvelope"
 ] as const;
 
 
@@ -303,7 +614,8 @@ export const CASE_TRANSITIONS = {
     "awaiting_clarification",
     "blocked",
     "emergency_stopped",
-    "failed"
+    "failed",
+    "ready_to_fill"
   ],
   "awaiting_clarification": [
     "abandoned",
@@ -311,6 +623,13 @@ export const CASE_TRANSITIONS = {
     "emergency_stopped",
     "failed",
     "ready_to_fill"
+  ],
+  "awaiting_transcript_confirmation": [
+    "abandoned",
+    "analyzing",
+    "blocked",
+    "emergency_stopped",
+    "failed"
   ],
   "blocked": [],
   "created": [
@@ -321,6 +640,7 @@ export const CASE_TRANSITIONS = {
   "disclosed": [
     "abandoned",
     "analyzing",
+    "awaiting_transcript_confirmation",
     "blocked",
     "emergency_stopped",
     "failed"

@@ -1,4 +1,4 @@
-"""Immutable G0-G5 registry, reason ordering, and decision construction."""
+"""Immutable G0-G10 registry, reason ordering, and decision construction."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,6 +9,7 @@ from claimdone_api.contracts import (
     GateId,
     GateReasonCode,
 )
+from claimdone_api.contracts.enums import MODEL_BLOCK_REASON_BY_GATE
 
 
 class GateOrderError(ValueError):
@@ -23,7 +24,7 @@ class GateSpec:
     order: int
     name: str
     reason_priority: tuple[GateReasonCode, ...]
-    model_may_add_block: bool = False
+    model_block_reason: GateReasonCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,12 +52,19 @@ class GateRegistry:
                 raise ValueError(
                     f"Gate {spec.gate_id.value} must register every reason code exactly once"
                 )
+            if (
+                spec.model_block_reason is not None
+                and spec.model_block_reason not in spec.reason_priority
+            ):
+                raise ValueError("A model block reason must belong to its gate priority")
+            if spec.model_block_reason is not MODEL_BLOCK_REASON_BY_GATE.get(spec.gate_id):
+                raise ValueError("Gate model block reason must match the canonical mapping")
 
     def spec_for(self, gate_id: GateId) -> GateSpec:
         for spec in self.specs:
             if spec.gate_id is gate_id:
                 return spec
-        raise KeyError(f"Gate {gate_id.value} is not registered in the G0-G5 pipeline")
+        raise KeyError(f"Gate {gate_id.value} is not registered in this pipeline")
 
     def validate_history(self, history: tuple[GateDecision, ...]) -> None:
         """Require a contiguous prefix and stop the pipeline at its first failure."""
@@ -96,7 +104,7 @@ class GateRegistry:
         return next_history
 
 
-G0_TO_G5_REGISTRY = GateRegistry(
+G0_TO_G10_REGISTRY = GateRegistry(
     specs=(
         GateSpec(
             GateId.G0_INTAKE,
@@ -145,7 +153,7 @@ G0_TO_G5_REGISTRY = GateRegistry(
                 GateReasonCode.G3_SUBMISSION_ACTION,
                 GateReasonCode.G3_MODEL_UNCERTAIN,
             ),
-            model_may_add_block=True,
+            model_block_reason=GateReasonCode.G3_MODEL_UNCERTAIN,
         ),
         GateSpec(
             GateId.G4_PROVENANCE,
@@ -170,8 +178,69 @@ G0_TO_G5_REGISTRY = GateRegistry(
                 GateReasonCode.G5_CLARIFICATION_LIMIT,
             ),
         ),
+        GateSpec(
+            GateId.G6_TOOL_AUTHORITY,
+            6,
+            "Tool authority",
+            (
+                GateReasonCode.G6_TOOL_UNKNOWN,
+                GateReasonCode.G6_ARGUMENTS_INVALID,
+                GateReasonCode.G6_STATE_INVALID,
+                GateReasonCode.G6_URL_NOT_ALLOWED,
+                GateReasonCode.G6_LIMIT_EXCEEDED,
+                GateReasonCode.G6_FORBIDDEN_ACTION,
+            ),
+        ),
+        GateSpec(
+            GateId.G7_PORTAL_WRITE,
+            7,
+            "Portal write",
+            (
+                GateReasonCode.G7_FIELD_NOT_ALLOWED,
+                GateReasonCode.G7_VALUE_NOT_FROM_PACKET,
+                GateReasonCode.G7_PROVENANCE_MISSING,
+                GateReasonCode.G7_FIELD_NOT_EDITABLE,
+                GateReasonCode.G7_ATTACHMENT_MISMATCH,
+            ),
+        ),
+        GateSpec(
+            GateId.G8_VERIFICATION,
+            8,
+            "Verification",
+            (
+                GateReasonCode.G8_FIELD_MISMATCH,
+                GateReasonCode.G8_ATTACHMENT_MISMATCH,
+                GateReasonCode.G8_REQUIRED_FIELD_MISSING,
+                GateReasonCode.G8_MODEL_MISMATCH,
+            ),
+            model_block_reason=GateReasonCode.G8_MODEL_MISMATCH,
+        ),
+        GateSpec(
+            GateId.G9_HUMAN_APPROVAL,
+            9,
+            "Human approval",
+            (
+                GateReasonCode.G9_AGENT_FORBIDDEN,
+                GateReasonCode.G9_ROLE_INVALID,
+                GateReasonCode.G9_TOKEN_INVALID,
+            ),
+        ),
+        GateSpec(
+            GateId.G10_RECEIPT_REDACTION,
+            10,
+            "Receipt redaction",
+            (
+                GateReasonCode.G10_BEFORE_APPROVAL,
+                GateReasonCode.G10_REDACTION_FAILED,
+            ),
+        ),
     )
 )
+
+# Compatibility view for the already implemented prefix. Its validation and
+# append behavior remain byte-for-byte equivalent while the canonical registry
+# now covers every product gate through G10.
+G0_TO_G5_REGISTRY = GateRegistry(specs=G0_TO_G10_REGISTRY.specs[:6])
 
 
 def make_gate_decision(
@@ -184,21 +253,23 @@ def make_gate_decision(
 ) -> GateDecision:
     """Build a decision without accepting a caller-provided pass/override flag."""
 
-    spec = G0_TO_G5_REGISTRY.spec_for(gate_id)
+    spec = G0_TO_G10_REGISTRY.spec_for(gate_id)
     known_reasons = set(spec.reason_priority)
     supplied_reasons = set(deterministic_reasons)
     if not supplied_reasons <= known_reasons:
         raise ValueError("Decision contains a reason not registered for this gate")
-    if GateReasonCode.G3_MODEL_UNCERTAIN in supplied_reasons:
-        raise ValueError("The G3 model reason must be supplied through model_blocked")
+    if spec.model_block_reason in supplied_reasons:
+        raise ValueError("The model reason must be supplied through model_blocked")
     if type(model_blocked) is not bool:
         raise TypeError("model_blocked must be an exact boolean")
-    if model_blocked and not spec.model_may_add_block:
+    if model_blocked and spec.model_block_reason is None:
         raise ValueError("This gate does not allow model-added blocks")
 
     reasons = set(supplied_reasons)
     if model_blocked:
-        reasons.add(GateReasonCode.G3_MODEL_UNCERTAIN)
+        if spec.model_block_reason is None:  # pragma: no cover - narrowed above
+            raise AssertionError("model block reason unexpectedly absent")
+        reasons.add(spec.model_block_reason)
     ordered_reasons = tuple(reason for reason in spec.reason_priority if reason in reasons)
     deterministic_passed = not supplied_reasons
     passed = deterministic_passed and not model_blocked

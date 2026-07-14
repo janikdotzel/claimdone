@@ -1,5 +1,5 @@
 {
-  "contractVersion": "1.0.0",
+  "contractVersion": "2.0.0",
   "caseId": "case-happy-001",
   "state": "review",
   "portalState": "review",
@@ -17,7 +17,8 @@
       "mediaType": "image/jpeg",
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "text": null,
-      "modelCopyApproved": true
+      "modelCopyApproved": true,
+      "transcriptConfirmed": null
     },
     {
       "evidenceId": "image-2",
@@ -26,7 +27,8 @@
       "mediaType": "image/jpeg",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "text": null,
-      "modelCopyApproved": true
+      "modelCopyApproved": true,
+      "transcriptConfirmed": null
     },
     {
       "evidenceId": "image-3",
@@ -35,7 +37,8 @@
       "mediaType": "image/png",
       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "text": null,
-      "modelCopyApproved": true
+      "modelCopyApproved": true,
+      "transcriptConfirmed": null
     },
     {
       "evidenceId": "statement-1",
@@ -44,7 +47,8 @@
       "mediaType": "text/plain",
       "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "text": "At 14:30 in Berlin another car hit the rear of my demo vehicle. Demo claimant, policy DEMO-42, registration DEMO-CD-1; the counterparty is known.",
-      "modelCopyApproved": true
+      "modelCopyApproved": true,
+      "transcriptConfirmed": null
     },
     {
       "evidenceId": "clarification-date",
@@ -53,7 +57,8 @@
       "mediaType": "text/plain",
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "text": "2026-07-14",
-      "modelCopyApproved": true
+      "modelCopyApproved": true,
+      "transcriptConfirmed": null
     }
   ],
   "provenance": [
@@ -150,7 +155,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G0",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -160,7 +165,7 @@
       "decidedAt": "2026-07-14T12:00:00Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G1",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -170,7 +175,7 @@
       "decidedAt": "2026-07-14T12:00:01Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G2",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -180,7 +185,7 @@
       "decidedAt": "2026-07-14T12:00:02Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G3",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -190,7 +195,7 @@
       "decidedAt": "2026-07-14T12:00:03Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G4",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -200,7 +205,7 @@
       "decidedAt": "2026-07-14T12:00:04Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G5",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -210,7 +215,7 @@
       "decidedAt": "2026-07-14T12:00:05Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G6",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -220,7 +225,7 @@
       "decidedAt": "2026-07-14T12:00:06Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G7",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -230,7 +235,7 @@
       "decidedAt": "2026-07-14T12:00:07Z"
     },
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G8",
       "deterministicPassed": true,
       "modelBlocked": false,

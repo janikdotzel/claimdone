@@ -47,14 +47,28 @@ def test_schema_exports_every_required_public_root() -> None:
         "ClaimPacket",
         "ClaimScope",
         "EvalCase",
+        "EvalCaseResult",
+        "EvalCheckResult",
+        "EvalRunSummary",
         "EvidenceFact",
         "EvidenceItem",
         "GateDecision",
         "PlanStep",
+        "PortalDraftFields",
+        "PortalReviewFields",
+        "PortalSessionView",
         "ProvenanceRef",
         "ReleaseDecision",
+        "RenderedPortalSnapshot",
+        "SandboxReceipt",
+        "ToolInvocation",
         "ToolPlan",
+        "TranscriptConfirmationRequest",
+        "TranscriptConfirmationView",
+        "VerificationAttempt",
+        "VerificationAttemptSeries",
         "VerificationReport",
+        "WorkflowEventEnvelope",
     }
 
 
@@ -84,6 +98,13 @@ def test_generated_transition_map_covers_every_case_state() -> None:
 
     assert set(transitions) == {state.value for state in CaseState}
     assert transitions["review"] == ["abandoned", "failed", "human_approved"]
+    assert transitions["awaiting_transcript_confirmation"] == [
+        "abandoned",
+        "analyzing",
+        "blocked",
+        "emergency_stopped",
+        "failed",
+    ]
     assert transitions["blocked"] == []
 
 

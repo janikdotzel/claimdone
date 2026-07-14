@@ -32,6 +32,7 @@ from .g5_completeness import (
 )
 from .registry import (
     G0_TO_G5_REGISTRY,
+    G0_TO_G10_REGISTRY,
     GateOrderError,
     GateRegistry,
     GateSpec,
@@ -40,6 +41,7 @@ from .registry import (
 
 __all__ = [
     "G0_TO_G5_REGISTRY",
+    "G0_TO_G10_REGISTRY",
     "MAX_CLARIFICATION_ROUNDS",
     "PROVENANCE_CONFIDENCE_THRESHOLD",
     "AdviceCategory",

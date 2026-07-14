@@ -4,6 +4,7 @@
 # ruff: noqa: UP040
 
 import re
+from collections.abc import Callable
 from datetime import date, datetime, time
 from typing import Annotated, Literal, TypeAlias
 
@@ -20,8 +21,8 @@ from pydantic import (
     StringConstraints,
 )
 
-CONTRACT_VERSION = "1.0.0"
-ContractVersion: TypeAlias = Literal["1.0.0"]
+CONTRACT_VERSION = "2.0.0"
+ContractVersion: TypeAlias = Literal["2.0.0"]
 
 Identifier: TypeAlias = Annotated[
     StrictStr,
@@ -43,6 +44,10 @@ ShortText: TypeAlias = Annotated[
 Sha256Digest: TypeAlias = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^[a-f0-9]{64}$"),
+]
+GitCommitSha: TypeAlias = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^[a-f0-9]{40}$"),
 ]
 Confidence: TypeAlias = Annotated[StrictFloat, Field(ge=0.0, le=1.0)]
 JsonScalar: TypeAlias = StrictStr | StrictInt | StrictFloat | StrictBool | None
@@ -121,9 +126,36 @@ def _require_three(value: object) -> object:
     return value
 
 
+def _require_exact_integer(allowed: frozenset[int], label: str) -> Callable[[object], object]:
+    def validator(value: object) -> object:
+        if type(value) is not int or value not in allowed:
+            raise ValueError(f"value must be {label}")
+        return value
+
+    return validator
+
+
 AlwaysFalse: TypeAlias = Annotated[Literal[False], BeforeValidator(_require_false)]
 AlwaysTrue: TypeAlias = Annotated[Literal[True], BeforeValidator(_require_true)]
 ExactlyThree: TypeAlias = Annotated[Literal[3], BeforeValidator(_require_three)]
+ExactlyOne: TypeAlias = Annotated[
+    Literal[1], BeforeValidator(_require_exact_integer(frozenset({1}), "the integer 1"))
+]
+ZeroOrOne: TypeAlias = Annotated[
+    Literal[0, 1],
+    BeforeValidator(_require_exact_integer(frozenset({0, 1}), "the integer 0 or 1")),
+]
+ExactlyEight: TypeAlias = Annotated[
+    Literal[8], BeforeValidator(_require_exact_integer(frozenset({8}), "the integer 8"))
+]
+OneToThree: TypeAlias = Annotated[
+    Literal[1, 2, 3],
+    BeforeValidator(_require_exact_integer(frozenset({1, 2, 3}), "one of the integers 1, 2, or 3")),
+]
+OneOrTwo: TypeAlias = Annotated[
+    Literal[1, 2],
+    BeforeValidator(_require_exact_integer(frozenset({1, 2}), "the integer 1 or 2")),
+]
 
 
 def to_camel(value: str) -> str:

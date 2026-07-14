@@ -1,9 +1,11 @@
-# ClaimDone G0-G5 gate boundary
+# ClaimDone G0-G10 gate boundary
 
-`G0_TO_G5_REGISTRY` is the only ordering and reason-priority authority for the
-first six gates. Callers append the final decision for each gate to a fresh
-history and must stop whenever `decision.passed` is false. There is no API that
-accepts a UI- or model-provided pass value.
+`G0_TO_G10_REGISTRY` is the canonical ordering and reason-priority authority
+for every runtime gate. `G0_TO_G5_REGISTRY` is a derived compatibility prefix
+for the implemented intake pipeline. Callers append the final decision for
+each gate to a fresh history and must stop whenever `decision.passed` is false.
+There is no API that accepts a UI- or model-provided pass value. G11 remains the
+separate release gate and is intentionally absent from this runtime registry.
 
 - G0/G1 are executed by `claimdone_api.media`; they use the same registry
   decision constructor and expose model-ready paths only after G1 passes.

@@ -23,6 +23,7 @@ from .base import (
     WireTime,
 )
 from .enums import (
+    MODEL_BLOCK_REASON_BY_GATE,
     ActorType,
     AllowedTool,
     AuditEventType,
@@ -81,6 +82,7 @@ class EvidenceItem(ContractModel):
     sha256: Sha256Digest
     text: NonEmptyText | None
     model_copy_approved: StrictBoolean
+    transcript_confirmed: StrictBoolean | None = None
 
     @model_validator(mode="after")
     def validate_kind_payload(self) -> Self:
@@ -89,6 +91,8 @@ class EvidenceItem(ContractModel):
                 raise ValueError("Image evidence must use an image media type and contain no text")
         elif self.media_type != "text/plain" or self.text is None:
             raise ValueError("Text evidence must use text/plain and contain text")
+        if self.kind is not EvidenceKind.TRANSCRIPT and self.transcript_confirmed is not None:
+            raise ValueError("Only transcript evidence may carry transcriptConfirmed")
         return self
 
 
@@ -215,23 +219,28 @@ class GateDecision(ContractModel):
 
     @model_validator(mode="after")
     def prevent_override(self) -> Self:
-        expected_passed = self.deterministic_passed and not self.model_blocked
+        if len(set(self.reason_codes)) != len(self.reason_codes):
+            raise ValueError("Gate reason codes cannot contain duplicates")
+        expected_prefix = f"{self.gate_id.value}_"
+        if any(not reason.value.startswith(expected_prefix) for reason in self.reason_codes):
+            raise ValueError("Every reason code must belong to the selected gate")
+        model_reason = MODEL_BLOCK_REASON_BY_GATE.get(self.gate_id)
+        model_reason_present = model_reason is not None and model_reason in self.reason_codes
+        deterministic_reasons = tuple(
+            reason for reason in self.reason_codes if reason is not model_reason
+        )
+        expected_deterministic_passed = not deterministic_reasons
+        if self.deterministic_passed is not expected_deterministic_passed:
+            raise ValueError("deterministicPassed must be derived from non-model reason codes")
+        if self.model_blocked is not model_reason_present:
+            raise ValueError("modelBlocked must be derived from the gate's model-only reason")
+        expected_passed = expected_deterministic_passed and not model_reason_present
         if self.passed is not expected_passed:
             raise ValueError("passed must equal deterministicPassed AND NOT modelBlocked")
         if self.passed and self.reason_codes:
             raise ValueError("A passed gate cannot contain blocking reason codes")
         if not self.passed and not self.reason_codes:
             raise ValueError("A failed gate requires at least one reason code")
-        if len(set(self.reason_codes)) != len(self.reason_codes):
-            raise ValueError("Gate reason codes cannot contain duplicates")
-        expected_prefix = f"{self.gate_id.value}_"
-        if any(not reason.value.startswith(expected_prefix) for reason in self.reason_codes):
-            raise ValueError("Every reason code must belong to the selected gate")
-        if self.model_blocked and self.gate_id not in {
-            GateId.G3_SAFETY_SCOPE,
-            GateId.G8_VERIFICATION,
-        }:
-            raise ValueError("Only G3 and G8 may receive an additional model block")
         return self
 
 
@@ -357,10 +366,12 @@ class AuditEvent(ContractModel):
     from_state: CaseState | None
     to_state: CaseState | None
     reason_codes: tuple[GateReasonCode, ...]
-    details: tuple[AuditDetail, ...]
+    details: tuple[()]
 
     @model_validator(mode="after")
     def validate_state_event(self) -> Self:
+        if self.event_type is not AuditEventType.GATE_DECISION and self.reason_codes:
+            raise ValueError("Only gate_decision audit events may carry gate reason codes")
         has_from = self.from_state is not None
         has_to = self.to_state is not None
         if has_from is not has_to:
@@ -494,6 +505,7 @@ class ClaimPacket(ContractModel):
             CaseState.CREATED: {PortalState.DRAFT},
             CaseState.DISCLOSED: {PortalState.DRAFT},
             CaseState.ANALYZING: {PortalState.DRAFT},
+            CaseState.AWAITING_TRANSCRIPT_CONFIRMATION: {PortalState.DRAFT},
             CaseState.AWAITING_CLARIFICATION: {PortalState.DRAFT},
             CaseState.READY_TO_FILL: {PortalState.DRAFT},
             CaseState.FILLING: {PortalState.DRAFT},

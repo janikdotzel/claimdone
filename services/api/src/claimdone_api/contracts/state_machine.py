@@ -9,6 +9,7 @@ _TRANSITIONS: dict[CaseState, frozenset[CaseState]] = {
     CaseState.DISCLOSED: frozenset(
         {
             CaseState.ANALYZING,
+            CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
             CaseState.BLOCKED,
             CaseState.EMERGENCY_STOPPED,
             CaseState.ABANDONED,
@@ -18,6 +19,16 @@ _TRANSITIONS: dict[CaseState, frozenset[CaseState]] = {
     CaseState.ANALYZING: frozenset(
         {
             CaseState.AWAITING_CLARIFICATION,
+            CaseState.READY_TO_FILL,
+            CaseState.BLOCKED,
+            CaseState.EMERGENCY_STOPPED,
+            CaseState.ABANDONED,
+            CaseState.FAILED,
+        }
+    ),
+    CaseState.AWAITING_TRANSCRIPT_CONFIRMATION: frozenset(
+        {
+            CaseState.ANALYZING,
             CaseState.BLOCKED,
             CaseState.EMERGENCY_STOPPED,
             CaseState.ABANDONED,

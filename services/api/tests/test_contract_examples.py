@@ -22,7 +22,7 @@ def test_committed_examples_validate_from_json(name: str) -> None:
 
     packet = ClaimPacket.model_validate_json(source)
 
-    assert packet.contract_version == "1.0.0"
+    assert packet.contract_version == "2.0.0"
     assert packet.scope.agent_can_submit is False
     assert packet.plan.agent_can_submit is False
 

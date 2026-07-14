@@ -21,6 +21,7 @@ _PORTAL_STATES_BY_CASE_STATE = MappingProxyType(
         CaseState.CREATED: frozenset({PortalState.DRAFT}),
         CaseState.DISCLOSED: frozenset({PortalState.DRAFT}),
         CaseState.ANALYZING: frozenset({PortalState.DRAFT}),
+        CaseState.AWAITING_TRANSCRIPT_CONFIRMATION: frozenset({PortalState.DRAFT}),
         CaseState.AWAITING_CLARIFICATION: frozenset({PortalState.DRAFT}),
         CaseState.READY_TO_FILL: frozenset({PortalState.DRAFT}),
         CaseState.FILLING: frozenset({PortalState.DRAFT}),

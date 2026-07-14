@@ -1,5 +1,5 @@
 {
-  "contractVersion": "1.0.0",
+  "contractVersion": "2.0.0",
   "caseId": "case-mismatch-001",
   "state": "blocked",
   "portalState": "review",
@@ -10,10 +10,10 @@
     "finalActionOwner": "human"
   },
   "evidence": [
-    {"evidenceId": "image-1", "kind": "image", "localRef": "mismatch-ref-1", "mediaType": "image/jpeg", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "text": null, "modelCopyApproved": true},
-    {"evidenceId": "image-2", "kind": "image", "localRef": "mismatch-ref-2", "mediaType": "image/jpeg", "sha256": "6666666666666666666666666666666666666666666666666666666666666666", "text": null, "modelCopyApproved": true},
-    {"evidenceId": "image-3", "kind": "image", "localRef": "mismatch-ref-3", "mediaType": "image/png", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "text": null, "modelCopyApproved": true},
-    {"evidenceId": "statement-1", "kind": "user_statement", "localRef": "mismatch-statement-1", "mediaType": "text/plain", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "text": "On 2026-07-14 at 14:30 in Berlin another car hit the rear of my demo vehicle. Demo claimant, policy DEMO-42, registration DEMO-CD-1; the counterparty is known.", "modelCopyApproved": true}
+    {"evidenceId": "image-1", "kind": "image", "localRef": "mismatch-ref-1", "mediaType": "image/jpeg", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "text": null, "modelCopyApproved": true, "transcriptConfirmed": null},
+    {"evidenceId": "image-2", "kind": "image", "localRef": "mismatch-ref-2", "mediaType": "image/jpeg", "sha256": "6666666666666666666666666666666666666666666666666666666666666666", "text": null, "modelCopyApproved": true, "transcriptConfirmed": null},
+    {"evidenceId": "image-3", "kind": "image", "localRef": "mismatch-ref-3", "mediaType": "image/png", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "text": null, "modelCopyApproved": true, "transcriptConfirmed": null},
+    {"evidenceId": "statement-1", "kind": "user_statement", "localRef": "mismatch-statement-1", "mediaType": "text/plain", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "text": "On 2026-07-14 at 14:30 in Berlin another car hit the rear of my demo vehicle. Demo claimant, policy DEMO-42, registration DEMO-CD-1; the counterparty is known.", "modelCopyApproved": true, "transcriptConfirmed": null}
   ],
   "provenance": [
     {"provenanceId": "prov-image-1", "evidenceId": "image-1", "locator": "image 1", "userConfirmed": false},
@@ -60,7 +60,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "1.0.0",
+      "contractVersion": "2.0.0",
       "gateId": "G8",
       "deterministicPassed": false,
       "modelBlocked": false,

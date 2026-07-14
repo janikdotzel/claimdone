@@ -106,7 +106,7 @@ class OutputContractRun:
                 raise G2RunError("G2 attempts must be contiguous and zero-based")
             if (result.extraction is not None) is not result.decision.passed:
                 raise G2RunError("G2 extraction exposure must match the decision")
-            expected_retry = index == 0 and not result.decision.passed
+            expected_retry = index == 0 and _is_output_retry_allowed(result.decision)
             if result.retry_allowed is not expected_retry:
                 raise G2RunError("G2 retry authority must be derived from the first result")
             if index:
@@ -133,8 +133,7 @@ class OutputContractRun:
         if len(self.attempts) >= 2:
             return False
         return not self.attempts or (
-            not self.attempts[-1].decision.passed
-            and self.attempts[-1].retry_allowed
+            not self.attempts[-1].decision.passed and self.attempts[-1].retry_allowed
         )
 
     @property
@@ -185,13 +184,25 @@ def evaluate_g2(
         ),
         decided_at=decided_at,
     )
-    retry_allowed = not decision.passed and envelope.attempt == 0 and valid_attempt
+    retry_allowed = envelope.attempt == 0 and valid_attempt and _is_output_retry_allowed(decision)
     return OutputContractResult(
         decision=decision,
         extraction=extraction if decision.passed else None,
         retry_allowed=retry_allowed,
         attempt=envelope.attempt,
     )
+
+
+def _is_output_retry_allowed(decision: GateDecision) -> bool:
+    """Allow one parse/reference retry, never a refusal or provider-policy retry."""
+
+    retryable_reasons = {
+        GateReasonCode.G2_OUTPUT_TRUNCATED,
+        GateReasonCode.G2_SCHEMA_INVALID,
+        GateReasonCode.G2_REFERENCE_MISSING,
+    }
+    reasons = set(decision.reason_codes)
+    return bool(reasons) and reasons <= retryable_reasons
 
 
 def _strict_extraction(payload: str | bytes | None) -> ModelExtraction | None:
@@ -240,6 +251,5 @@ def _matches_approved_evidence(
     if set(extracted_by_id) != set(approved_by_id):
         return False
     return all(
-        extracted_by_id[evidence_id] == approved
-        for evidence_id, approved in approved_by_id.items()
+        extracted_by_id[evidence_id] == approved for evidence_id, approved in approved_by_id.items()
     )

@@ -10,7 +10,7 @@ from threading import Barrier
 from typing import Literal
 
 import pytest
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from claimdone_api.cases import CaseService
 from claimdone_api.cases.errors import (
@@ -515,38 +515,31 @@ def test_raw_claim_values_never_enter_redacted_metadata_or_audit(tmp_path: Path)
     assert all(event.event.details == () for event in repository.list_audit_events(created.case_id))
 
 
-def test_repository_rejects_free_form_audit_details_atomically(tmp_path: Path) -> None:
+def test_contract_rejects_free_form_audit_details_before_repository_write(
+    tmp_path: Path,
+) -> None:
     service, repository = _service(tmp_path / "cases.db")
     created = service.create_case()
-    unsafe_event = AuditEvent.model_validate(
-        {
-            "contractVersion": CONTRACT_VERSION,
-            "eventId": "event-unsafe-detail",
-            "caseId": created.case_id,
-            "eventType": AuditEventType.CASE_STATE_CHANGED,
-            "actor": ActorType.SYSTEM,
-            "occurredAt": NOW,
-            "fromState": CaseState.CREATED,
-            "toState": CaseState.DISCLOSED,
-            "reasonCodes": (),
-            "details": (
-                {
-                    "key": "claimantName",
-                    "valueSummary": "Ada Lovelace",
-                    "redacted": True,
-                },
-            ),
-        }
-    )
-
-    with pytest.raises(ValueError, match="must not contain free-form details"):
-        repository.transition_case(
-            case_id=created.case_id,
-            expected_version=created.version,
-            target=CaseState.DISCLOSED,
-            snapshot=created.snapshot,
-            event=unsafe_event,
-            updated_at=NOW,
+    with pytest.raises(ValidationError, match="details"):
+        AuditEvent.model_validate(
+            {
+                "contractVersion": CONTRACT_VERSION,
+                "eventId": "event-unsafe-detail",
+                "caseId": created.case_id,
+                "eventType": AuditEventType.CASE_STATE_CHANGED,
+                "actor": ActorType.SYSTEM,
+                "occurredAt": NOW,
+                "fromState": CaseState.CREATED,
+                "toState": CaseState.DISCLOSED,
+                "reasonCodes": (),
+                "details": (
+                    {
+                        "key": "claimantName",
+                        "valueSummary": "Ada Lovelace",
+                        "redacted": True,
+                    },
+                ),
+            }
         )
 
     unchanged = repository.get_case(created.case_id)

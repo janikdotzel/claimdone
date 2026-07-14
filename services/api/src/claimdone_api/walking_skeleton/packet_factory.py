@@ -1,6 +1,7 @@
 """Trusted ClaimPacket assembly; model output cannot express authority fields."""
 
 from claimdone_api.contracts import (
+    CONTRACT_VERSION,
     AllowedTool,
     CaseState,
     ClaimPacket,
@@ -46,7 +47,7 @@ def build_packet(
     )
     return ClaimPacket.model_validate(
         {
-            "contractVersion": "1.0.0",
+            "contractVersion": CONTRACT_VERSION,
             "caseId": case_id,
             "state": state.value,
             "portalState": portal_state.value,

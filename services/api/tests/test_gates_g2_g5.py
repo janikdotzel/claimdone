@@ -221,8 +221,8 @@ def test_g2_accepts_only_strict_duplicate_free_json_and_exact_inventory() -> Non
     unknown = extraction_data()
     unknown["unknownField"] = True
     duplicate = extraction_payload().replace(
-        '"contractVersion": "1.0.0",',
-        '"contractVersion": "1.0.0", "contractVersion": "1.0.0",',
+        '"contractVersion": "2.0.0",',
+        '"contractVersion": "2.0.0", "contractVersion": "2.0.0",',
         1,
     )
     for payload in (json.dumps(unknown), duplicate, "[1, 2]", b"\xff"):
@@ -311,6 +311,19 @@ def test_g2_allows_exactly_one_retry_and_stops_after_budget() -> None:
         GateId.G1_PRIVACY,
         GateId.G2_OUTPUT_CONTRACT,
     )
+
+
+def test_g2_refusal_is_terminal_and_never_retryable() -> None:
+    packet = happy_packet()
+    refusal = evaluate_g2(
+        ModelOutputEnvelope(extraction_payload(), True, False, 0),
+        approved_evidence=packet.evidence,
+        decided_at=DECIDED_AT,
+    )
+
+    assert refusal.decision.reason_codes == (GateReasonCode.G2_REFUSAL,)
+    assert refusal.retry_allowed is False
+    assert OutputContractRun().append(refusal).final_result == refusal
 
 
 def test_g2_retry_cannot_be_started_without_the_failed_run() -> None:

@@ -23,6 +23,12 @@ NORMAL_PATH = (
     CaseState.HUMAN_APPROVED,
     CaseState.RECEIPT,
 )
+AUDIO_PREFIX = (
+    CaseState.CREATED,
+    CaseState.DISCLOSED,
+    CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+    CaseState.ANALYZING,
+)
 
 
 def test_normal_workflow_path_is_explicitly_allowed() -> None:
@@ -31,11 +37,25 @@ def test_normal_workflow_path_is_explicitly_allowed() -> None:
         assert is_case_transition_allowed(current, target)
 
 
+def test_audio_must_confirm_before_analysis() -> None:
+    for current, target in pairwise(AUDIO_PREFIX):
+        validate_case_transition(current, target)
+    assert not is_case_transition_allowed(
+        CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+        CaseState.AWAITING_CLARIFICATION,
+    )
+    assert not is_case_transition_allowed(
+        CaseState.ANALYZING,
+        CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+    )
+
+
 @pytest.mark.parametrize(
     ("current", "target"),
     [
         (CaseState.CREATED, CaseState.ANALYZING),
-        (CaseState.ANALYZING, CaseState.READY_TO_FILL),
+        (CaseState.DISCLOSED, CaseState.READY_TO_FILL),
+        (CaseState.AWAITING_TRANSCRIPT_CONFIRMATION, CaseState.READY_TO_FILL),
         (CaseState.VERIFYING, CaseState.HUMAN_APPROVED),
         (CaseState.BLOCKED, CaseState.HUMAN_APPROVED),
         (CaseState.REVIEW, CaseState.RECEIPT),

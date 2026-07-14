@@ -690,7 +690,7 @@ function parseGateHistory(value: unknown): readonly GateDecision[] {
     const evidenceRefs = gate.evidenceRefs;
     if (
       gate.gateId !== expectedGateId ||
-      gate.contractVersion !== "1.0.0" ||
+      gate.contractVersion !== "2.0.0" ||
       !isWireAwareDatetime(gate.decidedAt) ||
       !Array.isArray(evidenceRefs) ||
       !evidenceRefs.every(
@@ -840,6 +840,7 @@ function isCaseState(value: unknown): value is CaseState {
     "created",
     "disclosed",
     "analyzing",
+    "awaiting_transcript_confirmation",
     "awaiting_clarification",
     "ready_to_fill",
     "filling",

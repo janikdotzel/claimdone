@@ -1,6 +1,7 @@
 """Stable enum values shared by every ClaimDone contract consumer."""
 
 from enum import StrEnum
+from types import MappingProxyType
 
 
 class FactStatus(StrEnum):
@@ -18,6 +19,7 @@ class CaseState(StrEnum):
     CREATED = "created"
     DISCLOSED = "disclosed"
     ANALYZING = "analyzing"
+    AWAITING_TRANSCRIPT_CONFIRMATION = "awaiting_transcript_confirmation"
     AWAITING_CLARIFICATION = "awaiting_clarification"
     READY_TO_FILL = "ready_to_fill"
     FILLING = "filling"
@@ -142,6 +144,14 @@ class GateReasonCode(StrEnum):
     G11_HUMAN_CHECKPOINT_MISSING = "G11_HUMAN_CHECKPOINT_MISSING"
 
 
+MODEL_BLOCK_REASON_BY_GATE = MappingProxyType(
+    {
+        GateId.G3_SAFETY_SCOPE: GateReasonCode.G3_MODEL_UNCERTAIN,
+        GateId.G8_VERIFICATION: GateReasonCode.G8_MODEL_MISMATCH,
+    }
+)
+
+
 class EvidenceKind(StrEnum):
     IMAGE = "image"
     USER_STATEMENT = "user_statement"
@@ -194,6 +204,119 @@ class AllowedTool(StrEnum):
     READ_RECEIPT = "read_receipt"
 
 
+class PortalVariant(StrEnum):
+    """Closed visual variants supported by the local sandbox portal."""
+
+    A = "A"
+    B = "B"
+
+
+class ProviderFailureCategory(StrEnum):
+    """Sanitized provider failure categories safe for persisted workflow events."""
+
+    QUOTA_EXHAUSTED = "quota_exhausted"
+    BILLING_LIMIT = "billing_limit"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    MODEL_NOT_FOUND = "model_not_found"
+    INVALID_RESPONSE = "invalid_response"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    PERMISSION_DENIED = "permission_denied"
+    INVALID_REQUEST = "invalid_request"
+    CANCELLED = "cancelled"
+
+
+class WorkflowEventKind(StrEnum):
+    """Closed discriminator for persistable workflow events."""
+
+    STATE = "state"
+    GATE = "gate"
+    CLARIFICATION = "clarification"
+    PLAN_STEP = "plan_step"
+    TOOL_CALL = "tool_call"
+    PORTAL_FILL = "portal_fill"
+    VERIFICATION = "verification"
+    RETRY = "retry"
+    OPERATIONAL_FAILURE = "operational_failure"
+    PROVIDER_CALL = "provider_call"
+
+
+class ClarificationStatus(StrEnum):
+    """Content-free clarification lifecycle states."""
+
+    REQUESTED = "requested"
+    CONFIRMED = "confirmed"
+    EXHAUSTED = "exhausted"
+
+
+class ToolCallStatus(StrEnum):
+    """Persistable result of a bounded tool invocation."""
+
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    BLOCKED = "blocked"
+
+
+class WorkflowOperation(StrEnum):
+    """Closed operations that may be retried or fail operationally."""
+
+    TRANSCRIPTION = "transcription"
+    EXTRACTION = "extraction"
+    COMPUTER_USE = "computer_use"
+    VERIFICATION = "verification"
+
+
+class ProviderModelId(StrEnum):
+    """Exact V1 model identities allowed in value-free provider telemetry."""
+
+    SOL = "gpt-5.6-sol"
+    TERRA = "gpt-5.6-terra"
+    LUNA = "gpt-5.6-luna"
+    TRANSCRIBE = "gpt-4o-transcribe"
+    DETERMINISTIC_MOCK = "claimdone-deterministic-mock"
+
+
+class EvalGraderType(StrEnum):
+    """Authority class for one evaluation check."""
+
+    DETERMINISTIC = "deterministic"
+    MODEL = "model"
+    HUMAN = "human"
+
+
+class EvalMetricId(StrEnum):
+    """Closed release metrics required in every v2 eval run summary."""
+
+    SCHEMA_VALIDITY = "schema_validity"
+    PROVENANCE_COVERAGE = "provenance_coverage"
+    FORBIDDEN_FACTS = "forbidden_facts"
+    REQUIRED_FIELD_COMPLETION = "required_field_completion"
+    SAFETY_BLOCKING = "safety_blocking"
+    TOOL_POLICY = "tool_policy"
+    PORTAL_VALUE_MATCH = "portal_value_match"
+    MISMATCH_DETECTION = "mismatch_detection"
+    APPROVAL_AUTHORITY = "approval_authority"
+    RECEIPT_REDACTION = "receipt_redaction"
+
+
+class EvalMetricStatus(StrEnum):
+    """Aggregate result, including denominator-free not-applicable metrics."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class EvalFailureCode(StrEnum):
+    """Why a grader failed, separate from observed product gate reasons."""
+
+    EXPECTATION_MISMATCH = "expectation_mismatch"
+    MISSING_OBSERVATION = "missing_observation"
+    PROVIDER_FAILURE = "provider_failure"
+    GRADER_FAILED = "grader_failed"
+
+
 class VerificationFieldStatus(StrEnum):
     MATCH = "match"
     MISMATCH = "mismatch"
@@ -205,10 +328,31 @@ class AuditEventType(StrEnum):
     GATE_DECISION = "gate_decision"
     PLAN_STEP = "plan_step"
     TOOL_CALL = "tool_call"
+    CLARIFICATION = "clarification"
+    PORTAL_FILL = "portal_fill"
     VERIFICATION = "verification"
+    RETRY = "retry"
+    OPERATIONAL_FAILURE = "operational_failure"
+    PROVIDER_CALL = "provider_call"
     HUMAN_APPROVAL = "human_approval"
     RECEIPT = "receipt"
     RESET = "reset"
+
+
+AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND = MappingProxyType(
+    {
+        WorkflowEventKind.STATE: AuditEventType.CASE_STATE_CHANGED,
+        WorkflowEventKind.GATE: AuditEventType.GATE_DECISION,
+        WorkflowEventKind.CLARIFICATION: AuditEventType.CLARIFICATION,
+        WorkflowEventKind.PLAN_STEP: AuditEventType.PLAN_STEP,
+        WorkflowEventKind.TOOL_CALL: AuditEventType.TOOL_CALL,
+        WorkflowEventKind.PORTAL_FILL: AuditEventType.PORTAL_FILL,
+        WorkflowEventKind.VERIFICATION: AuditEventType.VERIFICATION,
+        WorkflowEventKind.RETRY: AuditEventType.RETRY,
+        WorkflowEventKind.OPERATIONAL_FAILURE: AuditEventType.OPERATIONAL_FAILURE,
+        WorkflowEventKind.PROVIDER_CALL: AuditEventType.PROVIDER_CALL,
+    }
+)
 
 
 class ActorType(StrEnum):
