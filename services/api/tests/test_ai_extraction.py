@@ -329,6 +329,7 @@ def test_extraction_uses_exact_multimodal_structured_call_and_passes_g2() -> Non
     result = runner(client, [10.0, 10.02]).run(request, call_sequence_start=7)
 
     assert isinstance(result, ExtractionSuccess)
+    assert CONTRACT_VERSION == "3.0.0"
     assert result.extraction == expected
     assert result.g2_run.final_result is not None
     assert result.g2_run.final_result.decision.passed
@@ -504,6 +505,18 @@ def test_schema_failure_gets_exactly_one_app_retry_then_succeeds() -> None:
     assert RETRY_INSTRUCTIONS not in client.responses_api.calls[0].instructions
     assert RETRY_INSTRUCTIONS in client.responses_api.calls[1].instructions
     assert tuple(item.retry_attempt for item in result.telemetry) == (0, 1)
+    retry_event = result.telemetry[0].to_retry_event(result.g2_run)
+    assert retry_event.operation is WorkflowOperation.EXTRACTION
+    assert retry_event.model_id is ProviderModelId.SOL
+    assert retry_event.provider_mode == "live"
+    assert retry_event.call_sequence == 1
+    assert retry_event.retry_attempt == 1
+    assert retry_event.duration_ms == 10
+    assert retry_event.failure.category is ProviderFailureCategory.INVALID_RESPONSE
+    assert retry_event.failure.retryable and not retry_event.failure.terminal
+    second_call_event = result.telemetry[1].to_success_event()
+    assert second_call_event.call_sequence == 2
+    assert second_call_event.retry_attempt == 1
 
 
 def test_raw_create_strict_schema_matches_pinned_sdk_transform_without_eager_parse() -> None:
@@ -538,7 +551,7 @@ def test_truncated_output_gets_one_g2_owned_retry() -> None:
         [
             FakeResponse(
                 status="incomplete",
-                output_text='{"contractVersion":"2.0.0"',
+                output_text=f'{{"contractVersion":"{CONTRACT_VERSION}"',
                 incomplete_details={"reason": "max_output_tokens"},
                 output=[{"type": "message", "status": "incomplete", "content": []}],
             ),
@@ -642,7 +655,7 @@ def test_content_filter_incomplete_is_operational_failure_without_retry() -> Non
     result = runner(client, [1.0, 1.01]).run(request)
 
     assert isinstance(result, ExtractionProviderFailure)
-    assert result.failure.category.value in {"invalid_request", "content_filtered"}
+    assert result.failure.category is ProviderFailureCategory.CONTENT_FILTERED
     assert result.g2_run.attempts == ()
     assert len(client.responses_api.calls) == 1
 
@@ -751,7 +764,13 @@ def test_provider_exceptions_never_use_app_retry(
     assert result.failure.category.value == category
     assert result.failure.terminal and not result.failure.retryable
     assert len(client.responses_api.calls) == 1
-    assert result.telemetry[-1].to_failure_event(result.failure).failure == result.failure
+    failure_event = result.telemetry[-1].to_failure_event(result.failure)
+    assert failure_event.failure == result.failure
+    assert failure_event.model_id is ProviderModelId.SOL
+    assert failure_event.provider_mode == "live"
+    assert failure_event.call_sequence == 1
+    assert failure_event.retry_attempt == 0
+    assert failure_event.duration_ms == 10
 
 
 def test_failed_response_code_is_sanitized_and_never_enters_g2() -> None:
@@ -771,7 +790,7 @@ def test_failed_response_code_is_sanitized_and_never_enters_g2() -> None:
     result = runner(client, [1.0, 1.01]).run(request)
 
     assert isinstance(result, ExtractionProviderFailure)
-    assert result.failure.category.value in {"invalid_request", "content_filtered"}
+    assert result.failure.category is ProviderFailureCategory.CONTENT_FILTERED
     assert result.g2_run.attempts == ()
     assert "private remote policy detail" not in repr(result)
     assert "req-private-marker" not in repr(result)
@@ -793,7 +812,26 @@ def test_provider_failure_on_second_call_stops_after_g2_authorized_retry() -> No
     assert result.failure.category is ProviderFailureCategory.PROVIDER_UNAVAILABLE
     assert len(result.g2_run.attempts) == 1
     assert tuple(item.status.value for item in result.telemetry) == ("succeeded", "failed")
+    retry_event = result.telemetry[0].to_retry_event(result.g2_run)
+    terminal_event = result.telemetry[1].to_failure_event(result.failure)
+    assert retry_event.call_sequence == 1
+    assert retry_event.retry_attempt == 1
+    assert terminal_event.call_sequence == 2
+    assert terminal_event.retry_attempt == 1
+    assert terminal_event.duration_ms == 10
     assert len(client.responses_api.calls) == 2
+
+
+def test_retry_event_requires_deterministic_g2_authority() -> None:
+    request = extraction_input()
+    expected = model_extraction(request)
+    client = FakeExtractionClient([completed_response(expected)])
+
+    result = runner(client, [1.0, 1.01]).run(request)
+
+    assert isinstance(result, ExtractionSuccess)
+    with pytest.raises(ValueError, match="did not authorize"):
+        result.telemetry[0].to_retry_event(result.g2_run)
 
 
 def test_invalid_usage_is_dropped_without_weakening_success() -> None:

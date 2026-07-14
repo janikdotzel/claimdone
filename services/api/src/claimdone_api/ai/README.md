@@ -22,7 +22,9 @@ remote request IDs, or persists images, audio, statements, prompts, or responses
 The production client factory requires an explicitly injected key and always sets
 `max_retries=0`. Tests use injected fake clients and make no network requests.
 
-`ProviderCallTelemetry` retains content-free duration, operation, model, mode,
-sequence, and retry metadata for failed calls. Its current contract projection is
-the narrower `OperationalFailureWorkflowEvent`; this is the seam for the
-coordinated additive OBS failure-telemetry contract without a free-form payload.
+`ProviderCallTelemetry` projects the same content-free operation, model, mode,
+sequence, retry, and duration metadata into successful-call and terminal-failure
+events. A retry event can be projected only from the completed initial extraction
+call together with a canonical G2 run whose first deterministic result authorized
+the single retry. The retry event describes that rejected response; the second
+provider call is recorded separately with the next sequence and retry index one.

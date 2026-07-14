@@ -11,10 +11,13 @@ from claimdone_api.contracts import (
     OperationalFailureWorkflowEvent,
     ProviderCallWorkflowEvent,
     ProviderFailure,
+    ProviderFailureCategory,
     ProviderModelId,
     ProviderUsageSnapshot,
+    RetryWorkflowEvent,
     WorkflowOperation,
 )
+from claimdone_api.gates import OutputContractRun
 
 from .config import ProviderMode
 
@@ -88,7 +91,7 @@ class ProviderCallTelemetry:
         self,
         failure: ProviderFailure,
     ) -> OperationalFailureWorkflowEvent:
-        """Project today while retaining duration/model locally for the additive OBS seam."""
+        """Project one terminal provider failure with the same call metadata."""
 
         if self.status is not ProviderCallStatus.FAILED:
             raise ValueError("Only failed telemetry has an operational-failure event")
@@ -96,6 +99,47 @@ class ProviderCallTelemetry:
             {
                 "kind": "operational_failure",
                 "operation": self.operation.value,
+                "modelId": self.model_id.value,
+                "providerMode": self.provider_mode.value,
+                "callSequence": self.call_sequence,
+                "retryAttempt": self.retry_attempt,
+                "durationMs": self.duration_ms,
+                "failure": failure,
+            }
+        )
+
+    def to_retry_event(self, g2_run: OutputContractRun) -> RetryWorkflowEvent:
+        """Project the one retry authorized by the deterministic first G2 result."""
+
+        if self.operation is not WorkflowOperation.EXTRACTION:
+            raise ValueError("Only extraction telemetry can project a retry event")
+        if self.status is not ProviderCallStatus.SUCCEEDED:
+            raise ValueError("A G2 retry follows a completed provider response")
+        if self.retry_attempt != 0:
+            raise ValueError("Only the initial extraction response can authorize a retry")
+        if self.call_sequence >= 40:
+            raise ValueError("The retry must reserve the next provider call sequence")
+        if not isinstance(g2_run, OutputContractRun):
+            raise ValueError("Retry authority requires the canonical G2 run")
+        if not g2_run.attempts or not g2_run.attempts[0].retry_allowed:
+            raise ValueError("The first deterministic G2 result did not authorize a retry")
+
+        failure = ProviderFailure.model_validate(
+            {
+                "category": ProviderFailureCategory.INVALID_RESPONSE.value,
+                "retryable": True,
+                "terminal": False,
+            }
+        )
+        return RetryWorkflowEvent.model_validate(
+            {
+                "kind": "retry",
+                "operation": self.operation.value,
+                "modelId": self.model_id.value,
+                "providerMode": self.provider_mode.value,
+                "callSequence": self.call_sequence,
+                "retryAttempt": 1,
+                "durationMs": self.duration_ms,
                 "failure": failure,
             }
         )

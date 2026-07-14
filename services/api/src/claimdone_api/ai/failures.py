@@ -101,12 +101,9 @@ def classify_response_error_code(code: object) -> ProviderFailure:
 
 
 def content_filtered_category() -> ProviderFailureCategory:
-    """Bridge the current enum and the coordinated additive OBS contract update."""
+    """Return the dedicated sanitized content-filter category."""
 
-    try:
-        return ProviderFailureCategory("content_filtered")
-    except ValueError:
-        return ProviderFailureCategory.INVALID_REQUEST
+    return ProviderFailureCategory.CONTENT_FILTERED
 
 
 def _status_category(status_code: int) -> ProviderFailureCategory:

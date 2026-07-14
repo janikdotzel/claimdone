@@ -294,7 +294,7 @@ def test_provider_exception_classification_is_closed_terminal_and_redacted(
     assert "remote secret" not in caplog.text
 
 
-def test_content_policy_error_uses_current_or_additive_closed_category() -> None:
+def test_content_policy_error_uses_exact_closed_category() -> None:
     error = openai.BadRequestError(
         "remote image policy detail",
         response=response(400),
@@ -303,7 +303,7 @@ def test_content_policy_error_uses_current_or_additive_closed_category() -> None
 
     failure = classify_provider_exception(error)
 
-    assert failure.category.value in {"invalid_request", "content_filtered"}
+    assert failure.category is ProviderFailureCategory.CONTENT_FILTERED
     assert failure.terminal and not failure.retryable
     assert "remote image policy detail" not in repr(failure)
 
@@ -358,6 +358,12 @@ def test_transcriber_rejects_empty_non_text_or_oversized_response_without_retry(
         result.telemetry.to_failure_event(result.failure).operation
         is WorkflowOperation.TRANSCRIPTION
     )
+    failure_event = result.telemetry.to_failure_event(result.failure)
+    assert failure_event.model_id is ProviderModelId.TRANSCRIBE
+    assert failure_event.provider_mode == "live"
+    assert failure_event.call_sequence == 1
+    assert failure_event.retry_attempt == 0
+    assert failure_event.duration_ms == 1
 
 
 def test_transcriber_timeout_is_terminal_and_never_retried() -> None:
