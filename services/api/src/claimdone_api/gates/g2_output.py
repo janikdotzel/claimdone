@@ -5,17 +5,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Self
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from claimdone_api.contracts import (
-    ClaimPacket,
+    ClaimData,
+    EvidenceFact,
     EvidenceItem,
+    EvidenceKind,
     GateDecision,
     GateId,
     GateReasonCode,
+    ProvenanceRef,
 )
+from claimdone_api.contracts.base import ContractModel, ContractVersion
 
 from .registry import make_gate_decision
 
@@ -32,12 +36,112 @@ class ModelOutputEnvelope:
 
 @dataclass(frozen=True, slots=True)
 class OutputContractResult:
-    """A G2 decision and packet exposed only when every check passes."""
+    """A G2 decision and extraction exposed only when every check passes."""
 
     decision: GateDecision
-    packet: ClaimPacket | None
+    extraction: ModelExtraction | None
     retry_allowed: bool
     attempt: int
+
+
+class ModelExtraction(ContractModel):
+    """Model-owned facts only; workflow, authority, gates, and verification are absent."""
+
+    contract_version: ContractVersion
+    evidence: Annotated[tuple[EvidenceItem, ...], Field(min_length=4)]
+    provenance: Annotated[tuple[ProvenanceRef, ...], Field(min_length=1)]
+    facts: tuple[EvidenceFact, ...]
+    claim: ClaimData
+
+    @model_validator(mode="after")
+    def validate_extraction_references(self) -> Self:
+        evidence_ids = tuple(item.evidence_id for item in self.evidence)
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("Extraction evidence IDs must be unique")
+        images = tuple(item for item in self.evidence if item.kind is EvidenceKind.IMAGE)
+        if len(images) != 3:
+            raise ValueError("Extraction requires exactly three image evidence items")
+        if tuple(item.local_ref for item in images) != self.claim.attachments:
+            raise ValueError("Extraction attachments must match image local refs")
+
+        provenance_ids = tuple(reference.provenance_id for reference in self.provenance)
+        if len(set(provenance_ids)) != len(provenance_ids):
+            raise ValueError("Extraction provenance IDs must be unique")
+        if any(reference.evidence_id not in evidence_ids for reference in self.provenance):
+            raise ValueError("Extraction provenance must reference existing evidence")
+        known_provenance = set(provenance_ids)
+        fact_ids = tuple(fact.fact_id for fact in self.facts)
+        if len(set(fact_ids)) != len(fact_ids):
+            raise ValueError("Extraction fact IDs must be unique")
+        if any(
+            source not in known_provenance for fact in self.facts for source in fact.source_refs
+        ):
+            raise ValueError("Extraction facts must reference existing provenance")
+        if any(
+            source not in known_provenance
+            for field in self.claim.field_provenance
+            for source in field.source_refs
+        ):
+            raise ValueError("Extraction claim fields must reference existing provenance")
+        return self
+
+
+class G2RunError(ValueError):
+    """Raised when immutable G2 attempts are recorded out of scope or order."""
+
+
+@dataclass(frozen=True, slots=True)
+class OutputContractRun:
+    """Immutable diagnostic attempts; only its final result enters gate history."""
+
+    attempts: tuple[OutputContractResult, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.attempts) > 2:
+            raise G2RunError("G2 allows one initial attempt and one retry")
+        for index, result in enumerate(self.attempts):
+            if result.decision.gate_id is not GateId.G2_OUTPUT_CONTRACT:
+                raise G2RunError("A G2 run may contain only G2 decisions")
+            if result.attempt != index:
+                raise G2RunError("G2 attempts must be contiguous and zero-based")
+            if (result.extraction is not None) is not result.decision.passed:
+                raise G2RunError("G2 extraction exposure must match the decision")
+            expected_retry = index == 0 and not result.decision.passed
+            if result.retry_allowed is not expected_retry:
+                raise G2RunError("G2 retry authority must be derived from the first result")
+            if index:
+                previous = self.attempts[index - 1]
+                if previous.decision.passed or not previous.retry_allowed:
+                    raise G2RunError("A final G2 attempt cannot be followed")
+                if result.decision.decided_at < previous.decision.decided_at:
+                    raise G2RunError("G2 attempt timestamps must be non-decreasing")
+
+    def append(self, result: OutputContractResult) -> OutputContractRun:
+        if len(self.attempts) >= 2:
+            raise G2RunError("G2 allows one initial attempt and one retry")
+        if result.attempt != len(self.attempts):
+            raise G2RunError("G2 attempts must be contiguous and zero-based")
+        if self.attempts:
+            previous = self.attempts[-1]
+            if previous.decision.passed or not previous.retry_allowed:
+                raise G2RunError("The previous G2 attempt is final")
+        return OutputContractRun(attempts=(*self.attempts, result))
+
+    def accepts(self, attempt: object) -> bool:
+        if type(attempt) is not int or attempt != len(self.attempts):
+            return False
+        if len(self.attempts) >= 2:
+            return False
+        return not self.attempts or (
+            not self.attempts[-1].decision.passed
+            and self.attempts[-1].retry_allowed
+        )
+
+    @property
+    def final_result(self) -> OutputContractResult | None:
+        if not self.attempts or self.attempts[-1].retry_allowed:
+            return None
+        return self.attempts[-1]
 
 
 class DuplicateJsonKey(ValueError):
@@ -48,6 +152,7 @@ def evaluate_g2(
     envelope: ModelOutputEnvelope,
     *,
     approved_evidence: tuple[EvidenceItem, ...],
+    run: OutputContractRun | None = None,
     decided_at: datetime | None = None,
 ) -> OutputContractResult:
     """Fail closed on transport, schema, reference, and retry-budget violations."""
@@ -58,13 +163,14 @@ def evaluate_g2(
     if envelope.truncated is not False:
         reasons.add(GateReasonCode.G2_OUTPUT_TRUNCATED)
 
-    packet = _strict_packet(envelope.payload)
-    if packet is None:
+    extraction = _strict_extraction(envelope.payload)
+    if extraction is None:
         reasons.add(GateReasonCode.G2_SCHEMA_INVALID)
-    elif not _matches_approved_evidence(packet, approved_evidence):
+    elif not _matches_approved_evidence(extraction, approved_evidence):
         reasons.add(GateReasonCode.G2_REFERENCE_MISSING)
 
-    valid_attempt = type(envelope.attempt) is int and envelope.attempt in {0, 1}
+    active_run = run or OutputContractRun()
+    valid_attempt = active_run.accepts(envelope.attempt)
     failed_before_budget = bool(reasons)
     if not valid_attempt or (failed_before_budget and envelope.attempt == 1):
         reasons.add(GateReasonCode.G2_RETRY_EXHAUSTED)
@@ -73,8 +179,8 @@ def evaluate_g2(
         GateId.G2_OUTPUT_CONTRACT,
         deterministic_reasons=tuple(reasons),
         evidence_refs=(
-            tuple(reference.provenance_id for reference in packet.provenance)
-            if packet is not None and not reasons
+            tuple(reference.provenance_id for reference in extraction.provenance)
+            if extraction is not None and not reasons
             else ()
         ),
         decided_at=decided_at,
@@ -82,13 +188,13 @@ def evaluate_g2(
     retry_allowed = not decision.passed and envelope.attempt == 0 and valid_attempt
     return OutputContractResult(
         decision=decision,
-        packet=packet if decision.passed else None,
+        extraction=extraction if decision.passed else None,
         retry_allowed=retry_allowed,
         attempt=envelope.attempt,
     )
 
 
-def _strict_packet(payload: str | bytes | None) -> ClaimPacket | None:
+def _strict_extraction(payload: str | bytes | None) -> ModelExtraction | None:
     if not isinstance(payload, str | bytes) or type(payload) not in {str, bytes}:
         return None
     try:
@@ -99,7 +205,7 @@ def _strict_packet(payload: str | bytes | None) -> ClaimPacket | None:
         )
         if type(value) is not dict:
             return None
-        return ClaimPacket.model_validate(value)
+        return ModelExtraction.model_validate(value)
     except (DuplicateJsonKey, UnicodeDecodeError, ValueError, TypeError, ValidationError):
         return None
 
@@ -118,7 +224,7 @@ def _reject_non_finite(value: str) -> None:
 
 
 def _matches_approved_evidence(
-    packet: ClaimPacket,
+    extraction: ModelExtraction,
     approved_evidence: tuple[EvidenceItem, ...],
 ) -> bool:
     if any(not isinstance(item, EvidenceItem) for item in approved_evidence):
@@ -128,12 +234,12 @@ def _matches_approved_evidence(
     approved_by_id = {item.evidence_id: item for item in approved_evidence}
     if len(approved_by_id) != len(approved_evidence):
         return False
-    packet_by_id = {item.evidence_id: item for item in packet.evidence}
-    if any(item.model_copy_approved is not True for item in packet_by_id.values()):
+    extracted_by_id = {item.evidence_id: item for item in extraction.evidence}
+    if any(item.model_copy_approved is not True for item in extracted_by_id.values()):
         return False
-    if set(packet_by_id) != set(approved_by_id):
+    if set(extracted_by_id) != set(approved_by_id):
         return False
     return all(
-        packet_by_id[evidence_id] == approved
+        extracted_by_id[evidence_id] == approved
         for evidence_id, approved in approved_by_id.items()
     )

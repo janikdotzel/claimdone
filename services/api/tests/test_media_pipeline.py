@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 from PIL import Image
 
+import claimdone_api.media.validation as media_validation
 from claimdone_api.contracts import GateReasonCode
 from claimdone_api.media import (
     MAX_IMAGE_BYTES,
@@ -188,6 +189,37 @@ def test_g0_reason_order_is_fixed_when_multiple_inputs_fail(tmp_path: Path) -> N
         GateReasonCode.G0_INPUT_MODE_INVALID,
         GateReasonCode.G0_CONSENT_MISSING,
     )
+
+
+def test_wrong_image_count_never_decodes_but_keeps_independent_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_image_validation(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"image validation was called: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(media_validation, "_validate_image", forbidden_image_validation)
+    request = IntakeRequest(
+        images=(
+            ImageUpload(b"must-not-be-read-1", "image/jpeg"),
+            ImageUpload(b"must-not-be-read-2", "image/png"),
+        ),
+        text="Text and audio are deliberately both present.",
+        audio=AudioUpload(wav_bytes(seconds=61), "audio/wav"),
+        consents=IntakeConsents(False, False, False),
+    )
+    store = CaseMediaStore(tmp_path / "media")
+
+    result = start_intake(store, request, decided_at=DECIDED_AT)
+
+    assert result.session is None
+    assert result.decision.reason_codes == (
+        GateReasonCode.G0_IMAGE_COUNT_INVALID,
+        GateReasonCode.G0_INPUT_MODE_INVALID,
+        GateReasonCode.G0_AUDIO_TOO_LONG,
+        GateReasonCode.G0_CONSENT_MISSING,
+    )
+    assert case_directories(store) == []
 
 
 def test_valid_text_and_exactly_sixty_second_pcm_wav_pass_g0(tmp_path: Path) -> None:

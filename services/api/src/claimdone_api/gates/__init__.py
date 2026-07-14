@@ -1,6 +1,13 @@
 """Deterministic ClaimDone gate registry and G2-G5 evaluators."""
 
-from .g2_output import ModelOutputEnvelope, OutputContractResult, evaluate_g2
+from .g2_output import (
+    G2RunError,
+    ModelExtraction,
+    ModelOutputEnvelope,
+    OutputContractResult,
+    OutputContractRun,
+    evaluate_g2,
+)
 from .g3_safety import (
     AdviceCategory,
     ModelSafetySignal,
@@ -11,13 +18,14 @@ from .g3_safety import (
 )
 from .g4_provenance import (
     PROVENANCE_CONFIDENCE_THRESHOLD,
-    FieldEvidence,
     ProvenanceResult,
     evaluate_g4,
 )
 from .g5_completeness import (
     MAX_CLARIFICATION_ROUNDS,
     ClarificationQuestion,
+    ClarificationSubflow,
+    ClarificationSubflowError,
     CompletenessResult,
     compute_missing_required_fields,
     evaluate_g5,
@@ -36,14 +44,18 @@ __all__ = [
     "PROVENANCE_CONFIDENCE_THRESHOLD",
     "AdviceCategory",
     "ClarificationQuestion",
+    "ClarificationSubflow",
+    "ClarificationSubflowError",
     "CompletenessResult",
-    "FieldEvidence",
+    "G2RunError",
     "GateOrderError",
     "GateRegistry",
     "GateSpec",
+    "ModelExtraction",
     "ModelOutputEnvelope",
     "ModelSafetySignal",
     "OutputContractResult",
+    "OutputContractRun",
     "ProvenanceResult",
     "RequestedAction",
     "SafetyInput",

@@ -6,12 +6,13 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from math import isfinite
 from typing import cast
 
 from claimdone_api.contracts import (
+    ClaimData,
     ClaimPacket,
     EvidenceFact,
+    EvidenceField,
     EvidenceItem,
     EvidenceKind,
     FactStatus,
@@ -28,6 +29,7 @@ PROVENANCE_CONFIDENCE_THRESHOLD = 0.80
 
 type FieldValue = str | int | float | bool | None | tuple[str, ...]
 
+_SUPPORTED_STATUSES = frozenset({FactStatus.OBSERVED, FactStatus.USER_STATED})
 _SENSITIVE_IMAGE_FIELDS = frozenset(
     {
         RequiredClaimField.LOCATION,
@@ -39,53 +41,40 @@ _SENSITIVE_IMAGE_FIELDS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class FieldEvidence:
-    """One assertion bound to a ClaimPacket fact or approved direct user evidence."""
-
-    fact_id: str | None
-    field: RequiredClaimField
-    value: FieldValue
-    status: FactStatus
-    source_refs: tuple[str, ...]
-    confidence: float | None
-
-
-@dataclass(frozen=True, slots=True)
 class ProvenanceResult:
     decision: GateDecision
+    claim: ClaimData
     writable_fields: tuple[RequiredClaimField, ...]
+    blocked_fields: tuple[RequiredClaimField, ...]
+    conflicting_fields: tuple[RequiredClaimField, ...]
+
+    def __post_init__(self) -> None:
+        if self.decision.gate_id is not GateId.G4_PROVENANCE:
+            raise ValueError("ProvenanceResult requires a G4 decision")
+        active_fields = tuple(
+            field
+            for field in RequiredClaimField
+            if field not in set(self.claim.missing_required_fields)
+        )
+        if len(set(self.conflicting_fields)) != len(self.conflicting_fields):
+            raise ValueError("G4 conflicting fields must be unique")
+        if RequiredClaimField.ATTACHMENTS in self.conflicting_fields:
+            raise ValueError("Attachments cannot be represented as scalar fact conflicts")
+        if self.decision.passed:
+            if self.writable_fields != active_fields or self.blocked_fields:
+                raise ValueError("A passed G4 must expose every populated field as writable")
+            if self.conflicting_fields:
+                raise ValueError("A passed G4 cannot contain conflict fields")
+        elif self.writable_fields or self.blocked_fields != active_fields:
+            raise ValueError("A failed G4 is a transaction-wide write barrier")
 
 
 def evaluate_g4(
     packet: ClaimPacket,
     *,
-    field_evidence: tuple[object, ...],
     decided_at: datetime | None = None,
 ) -> ProvenanceResult:
-    """Check every proposed write against its canonical value and approved sources."""
-
-    reasons: set[GateReasonCode] = set()
-    grouped: dict[RequiredClaimField, list[FieldEvidence]] = defaultdict(list)
-    malformed_evidence = False
-    malformed_fields: set[RequiredClaimField] = set()
-    for support in field_evidence:
-        if not isinstance(support, FieldEvidence) or not isinstance(
-            support.field, RequiredClaimField
-        ):
-            malformed_evidence = True
-            continue
-        if type(support.source_refs) is not tuple or any(
-            type(source) is not str for source in support.source_refs
-        ):
-            malformed_evidence = True
-            malformed_fields.add(support.field)
-            continue
-        if not _is_field_value(support.value):
-            malformed_evidence = True
-            malformed_fields.add(support.field)
-        grouped[support.field].append(support)
-    if malformed_evidence:
-        reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
+    """Derive all G4 inputs from the complete packet; callers cannot select a subset."""
 
     claim_json = packet.claim.model_dump(mode="json", by_alias=False)
     missing_fields = set(packet.claim.missing_required_fields)
@@ -95,182 +84,212 @@ def evaluate_g4(
     }
     provenance_by_id = {reference.provenance_id: reference for reference in packet.provenance}
     evidence_by_id = {item.evidence_id: item for item in packet.evidence}
-    facts_by_id = {fact.fact_id: fact for fact in packet.facts}
-    known_provenance = set(provenance_by_id)
-    writable: list[RequiredClaimField] = []
-    used_known_refs: list[str] = []
-
+    reasons, audited_conflicts = _audit_complete_fact_inventory(
+        packet.facts,
+        provenance_by_id=provenance_by_id,
+        evidence_by_id=evidence_by_id,
+    )
+    field_reasons_by_field: dict[RequiredClaimField, set[GateReasonCode]] = {}
+    valid_evidence_refs: list[str] = []
     for field in active_fields:
-        supports = tuple(grouped.get(field, ()))
-        if not supports:
-            reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
-            continue
         expected_sources = claim_sources.get(field, ())
-        supplied_sources = tuple(
-            source for support in supports for source in support.source_refs
-        )
-        sources_valid = (
-            bool(expected_sources)
-            and all(support.source_refs for support in supports)
-            and all(
-                len(set(support.source_refs)) == len(support.source_refs)
-                for support in supports
-            )
-            and set(supplied_sources) == set(expected_sources)
-            and set(supplied_sources) <= known_provenance
-            and all(
-                _source_kind(source, provenance_by_id, evidence_by_id) is not None
-                for source in supplied_sources
-            )
-        )
-        if sources_valid:
-            used_known_refs.extend(supplied_sources)
-        canonical_value = _canonical_value(field, claim_json)
-        field_reasons = _reasons_for_field(
+        field_reasons = _evaluate_field(
             field,
-            supports=supports,
-            canonical_value=canonical_value,
-            sources_valid=sources_valid,
+            canonical_value=_canonical_value(field, claim_json),
+            expected_sources=expected_sources,
+            facts=packet.facts,
             provenance_by_id=provenance_by_id,
             evidence_by_id=evidence_by_id,
-            facts_by_id=facts_by_id,
         )
-        if field in malformed_fields:
-            field_reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
+        field_reasons_by_field[field] = field_reasons
         reasons.update(field_reasons)
         if not field_reasons:
-            writable.append(field)
+            valid_evidence_refs.extend(expected_sources)
 
-    if any(field in missing_fields for field in grouped):
-        reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
+    audited_conflict_values = {field.value for field in audited_conflicts}
+    conflicting_fields = tuple(
+        field
+        for field in RequiredClaimField
+        if field is not RequiredClaimField.ATTACHMENTS
+        if field.value in audited_conflict_values
+        or (
+            field in field_reasons_by_field
+            and GateReasonCode.G4_CONFLICTING_SOURCES
+            in field_reasons_by_field[field]
+        )
+    )
+    # G4 is a transaction-wide write barrier. A global bad fact or any field
+    # failure makes every populated field non-writable until the packet is rerun.
+    writable_fields = active_fields if not reasons else ()
+    blocked_fields = () if not reasons else active_fields
 
     decision = make_gate_decision(
         GateId.G4_PROVENANCE,
         deterministic_reasons=tuple(reasons),
-        evidence_refs=tuple(dict.fromkeys(used_known_refs)),
+        evidence_refs=tuple(dict.fromkeys(valid_evidence_refs)),
         decided_at=decided_at,
     )
-    return ProvenanceResult(decision=decision, writable_fields=tuple(writable))
+    return ProvenanceResult(
+        decision=decision,
+        claim=packet.claim,
+        writable_fields=writable_fields,
+        blocked_fields=blocked_fields,
+        conflicting_fields=conflicting_fields,
+    )
 
 
-def _reasons_for_field(
-    field: RequiredClaimField,
+def _audit_complete_fact_inventory(
+    facts: tuple[EvidenceFact, ...],
     *,
-    supports: tuple[FieldEvidence, ...],
-    canonical_value: FieldValue,
-    sources_valid: bool,
     provenance_by_id: Mapping[str, ProvenanceRef],
     evidence_by_id: Mapping[str, EvidenceItem],
-    facts_by_id: Mapping[str, EvidenceFact],
-) -> set[GateReasonCode]:
-    """Derive field-local reasons so writable_fields cannot inherit global state."""
+) -> tuple[set[GateReasonCode], set[EvidenceField]]:
+    """Inspect every packet fact, including facts no caller chose to expose."""
 
     reasons: set[GateReasonCode] = set()
-    if not sources_valid:
-        reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
-    if field is RequiredClaimField.NARRATIVE:
-        if any(
-            support.status not in {FactStatus.OBSERVED, FactStatus.USER_STATED}
-            for support in supports
-        ):
-            reasons.add(GateReasonCode.G4_NARRATIVE_UNSUPPORTED)
-    else:
-        supported = tuple(
-            support
-            for support in supports
-            if support.status in {FactStatus.OBSERVED, FactStatus.USER_STATED}
+    supported_by_field: dict[EvidenceField, list[EvidenceFact]] = defaultdict(list)
+    for fact in facts:
+        sources_valid = (
+            bool(fact.source_refs)
+            and len(set(fact.source_refs)) == len(fact.source_refs)
+            and all(
+                _source_kind(source, provenance_by_id, evidence_by_id) is not None
+                for source in fact.source_refs
+            )
         )
-        if len({_strict_value_key(support.value) for support in supported}) > 1:
-            reasons.add(GateReasonCode.G4_CONFLICTING_SOURCES)
-        if not any(_same_value(support.value, canonical_value) for support in supported):
-            reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
-        if len(supported) != len(supports):
-            reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
-    seen_fact_ids: set[str] = set()
-    for support in supports:
-        binding_reason = _validate_support_binding(
-            field,
-            support=support,
-            canonical_value=canonical_value,
-            provenance_by_id=provenance_by_id,
-            evidence_by_id=evidence_by_id,
-            facts_by_id=facts_by_id,
-        )
-        if binding_reason is not None:
-            reasons.add(binding_reason)
-        if support.fact_id is not None:
-            if support.fact_id in seen_fact_ids:
+        if fact.status in _SUPPORTED_STATUSES and not sources_valid:
+            reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
+        if fact.status not in _SUPPORTED_STATUSES:
+            if fact.field is EvidenceField.NARRATIVE:
+                reasons.add(GateReasonCode.G4_NARRATIVE_UNSUPPORTED)
+            else:
                 reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
-            seen_fact_ids.add(support.fact_id)
-        if support.status is FactStatus.OBSERVED and (
-            type(support.confidence) is not float
-            or support.confidence < PROVENANCE_CONFIDENCE_THRESHOLD
-            or support.confidence > 1.0
+            continue
+        supported_by_field[fact.field].append(fact)
+        if fact.status is FactStatus.OBSERVED and (
+            fact.confidence is None
+            or fact.confidence < PROVENANCE_CONFIDENCE_THRESHOLD
         ):
             reasons.add(GateReasonCode.G4_CONFIDENCE_BELOW_THRESHOLD)
-        if support.status is FactStatus.USER_STATED and support.confidence is not None:
-            reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
-    if field in _SENSITIVE_IMAGE_FIELDS and any(
-        _source_is_image(source, provenance_by_id, evidence_by_id)
-        for support in supports
-        for source in support.source_refs
-    ):
+
+    conflicting_fields: set[EvidenceField] = set()
+    for field, field_facts in supported_by_field.items():
+        if len({_strict_value_key(fact.value) for fact in field_facts}) > 1:
+            reasons.add(GateReasonCode.G4_CONFLICTING_SOURCES)
+            conflicting_fields.add(field)
+    return reasons, conflicting_fields
+
+
+def _evaluate_field(
+    field: RequiredClaimField,
+    *,
+    canonical_value: FieldValue,
+    expected_sources: tuple[str, ...],
+    facts: tuple[EvidenceFact, ...],
+    provenance_by_id: Mapping[str, ProvenanceRef],
+    evidence_by_id: Mapping[str, EvidenceItem],
+) -> set[GateReasonCode]:
+    reasons: set[GateReasonCode] = set()
+    if not expected_sources or len(set(expected_sources)) != len(expected_sources):
+        reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
+        return reasons
+    source_kinds = {
+        source: _source_kind(source, provenance_by_id, evidence_by_id)
+        for source in expected_sources
+    }
+    if any(kind is None for kind in source_kinds.values()):
+        reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
+
+    if field in _SENSITIVE_IMAGE_FIELDS and EvidenceKind.IMAGE in source_kinds.values():
         reasons.add(GateReasonCode.G4_SENSITIVE_IMAGE_INFERENCE)
+
+    if field is RequiredClaimField.ATTACHMENTS:
+        if (
+            len(expected_sources) != 3
+            or set(source_kinds.values()) != {EvidenceKind.IMAGE}
+            or not _attachments_match_sources(
+                canonical_value,
+                expected_sources=expected_sources,
+                provenance_by_id=provenance_by_id,
+                evidence_by_id=evidence_by_id,
+            )
+        ):
+            reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
+        return reasons
+
+    field_facts = tuple(fact for fact in facts if fact.field.value == field.value)
+    if any(not set(fact.source_refs) <= set(expected_sources) for fact in field_facts):
+        reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
+
+    if field is RequiredClaimField.NARRATIVE:
+        reasons.update(
+            _evaluate_narrative(
+                canonical_value,
+                field_facts=field_facts,
+                expected_sources=expected_sources,
+            )
+        )
+        return reasons
+
+    supported_facts = tuple(fact for fact in field_facts if fact.status in _SUPPORTED_STATUSES)
+    if len(supported_facts) != len(field_facts):
+        reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
+    if not supported_facts:
+        reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
+    else:
+        values = {_strict_value_key(fact.value) for fact in supported_facts}
+        if len(values) > 1:
+            reasons.add(GateReasonCode.G4_CONFLICTING_SOURCES)
+        if not all(_same_value(fact.value, canonical_value) for fact in supported_facts):
+            reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
+
+    fact_sources = {source for fact in field_facts for source in fact.source_refs}
+    if fact_sources != set(expected_sources):
+        reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
     return reasons
 
 
-def _validate_support_binding(
-    field: RequiredClaimField,
-    *,
-    support: FieldEvidence,
+def _evaluate_narrative(
     canonical_value: FieldValue,
+    *,
+    field_facts: tuple[EvidenceFact, ...],
+    expected_sources: tuple[str, ...],
+) -> set[GateReasonCode]:
+    reasons: set[GateReasonCode] = set()
+    if type(canonical_value) is not str or not canonical_value.strip():
+        return {GateReasonCode.G4_NARRATIVE_UNSUPPORTED}
+
+    if not field_facts or any(
+        fact.status not in _SUPPORTED_STATUSES
+        or not _same_value(fact.value, canonical_value)
+        for fact in field_facts
+    ):
+        reasons.add(GateReasonCode.G4_NARRATIVE_UNSUPPORTED)
+    narrative_sources = {source for fact in field_facts for source in fact.source_refs}
+    if narrative_sources != set(expected_sources):
+        reasons.add(GateReasonCode.G4_PROVENANCE_MISSING)
+    return reasons
+
+
+def _attachments_match_sources(
+    canonical_value: FieldValue,
+    *,
+    expected_sources: tuple[str, ...],
     provenance_by_id: Mapping[str, ProvenanceRef],
     evidence_by_id: Mapping[str, EvidenceItem],
-    facts_by_id: Mapping[str, EvidenceFact],
-) -> GateReasonCode | None:
-    """Bind assertions to canonical facts or narrowly allowed direct user evidence."""
-
-    if support.fact_id is not None:
-        if type(support.fact_id) is not str:
-            return GateReasonCode.G4_FACT_NOT_WRITABLE
-        fact = facts_by_id.get(support.fact_id)
-        if fact is None:
-            return GateReasonCode.G4_PROVENANCE_MISSING
-        if (
-            fact.value != support.value
-            or type(fact.value) is not type(support.value)
-            or fact.status is not support.status
-            or fact.source_refs != support.source_refs
-            or fact.confidence != support.confidence
-            or type(fact.confidence) is not type(support.confidence)
-        ):
-            return GateReasonCode.G4_FACT_NOT_WRITABLE
-        if field is not RequiredClaimField.NARRATIVE and fact.field.value != field.value:
-            return GateReasonCode.G4_FACT_NOT_WRITABLE
-        return None
-
-    source_kinds = {
-        _source_kind(source, provenance_by_id, evidence_by_id)
-        for source in support.source_refs
-    }
-    if None in source_kinds:
-        return GateReasonCode.G4_PROVENANCE_MISSING
-    if field is RequiredClaimField.ATTACHMENTS:
-        allowed = source_kinds == {EvidenceKind.IMAGE}
-    else:
-        allowed = source_kinds <= {
-            EvidenceKind.USER_STATEMENT,
-            EvidenceKind.TRANSCRIPT,
-            EvidenceKind.CLARIFICATION,
-        }
-    if (
-        not allowed
-        or support.status is not FactStatus.USER_STATED
-        or support.confidence is not None
-        or not _same_value(support.value, canonical_value)
-    ):
-        return GateReasonCode.G4_FACT_NOT_WRITABLE
-    return None
+) -> bool:
+    if not isinstance(canonical_value, tuple):
+        return False
+    local_refs: list[str] = []
+    for source in expected_sources:
+        reference = provenance_by_id.get(source)
+        if reference is None:
+            return False
+        evidence = evidence_by_id.get(reference.evidence_id)
+        if evidence is None or evidence.kind is not EvidenceKind.IMAGE:
+            return False
+        local_refs.append(evidence.local_ref)
+    return tuple(local_refs) == canonical_value
 
 
 def _canonical_value(field: RequiredClaimField, claim_json: dict[str, object]) -> FieldValue:
@@ -289,27 +308,7 @@ def _same_value(left: object, right: FieldValue) -> bool:
 
 
 def _strict_value_key(value: object) -> tuple[str, object]:
-    if isinstance(value, tuple):
-        return ("tuple", tuple(repr(item) for item in value))
-    if type(value) in {str, int, float, bool} or value is None:
-        return (type(value).__name__, value)
-    return (f"invalid-{type(value).__name__}", repr(value)[:200])
-
-
-def _is_field_value(value: object) -> bool:
-    if value is None or type(value) in {str, int, bool}:
-        return True
-    if type(value) is float:
-        return isfinite(value)
-    return type(value) is tuple and all(type(item) is str for item in value)
-
-
-def _source_is_image(
-    source_ref: str,
-    provenance_by_id: Mapping[str, ProvenanceRef],
-    evidence_by_id: Mapping[str, EvidenceItem],
-) -> bool:
-    return _source_kind(source_ref, provenance_by_id, evidence_by_id) is EvidenceKind.IMAGE
+    return (type(value).__name__, value)
 
 
 def _source_kind(
@@ -318,9 +317,9 @@ def _source_kind(
     evidence_by_id: Mapping[str, EvidenceItem],
 ) -> EvidenceKind | None:
     reference = provenance_by_id.get(source_ref)
-    evidence_id = getattr(reference, "evidence_id", None)
-    evidence = evidence_by_id.get(evidence_id) if isinstance(evidence_id, str) else None
+    if reference is None:
+        return None
+    evidence = evidence_by_id.get(reference.evidence_id)
     if evidence is None or evidence.model_copy_approved is not True:
         return None
-    kind = getattr(evidence, "kind", None)
-    return kind if isinstance(kind, EvidenceKind) else None
+    return evidence.kind

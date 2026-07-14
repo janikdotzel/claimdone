@@ -2,7 +2,7 @@
 
 import json
 from copy import deepcopy
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -11,7 +11,6 @@ import pytest
 from pydantic import ValidationError
 
 from claimdone_api.contracts import (
-    ClaimData,
     ClaimPacket,
     FactStatus,
     GateDecision,
@@ -23,10 +22,14 @@ from claimdone_api.gates import (
     G0_TO_G5_REGISTRY,
     AdviceCategory,
     ClarificationQuestion,
-    FieldEvidence,
+    ClarificationSubflow,
+    ClarificationSubflowError,
+    G2RunError,
     GateOrderError,
+    ModelExtraction,
     ModelOutputEnvelope,
     ModelSafetySignal,
+    OutputContractRun,
     RequestedAction,
     SafetyInput,
     compute_missing_required_fields,
@@ -54,6 +57,18 @@ def happy_payload() -> str:
     return HAPPY_PATH.read_text(encoding="utf-8")
 
 
+def extraction_data(source: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = source or happy_data()
+    return {
+        key: deepcopy(data[key])
+        for key in ("contractVersion", "evidence", "provenance", "facts", "claim")
+    }
+
+
+def extraction_payload(source: dict[str, Any] | None = None) -> str:
+    return json.dumps(extraction_data(source))
+
+
 def safe_input(**updates: object) -> SafetyInput:
     values: dict[str, object] = {
         "injury_reported": False,
@@ -69,67 +84,49 @@ def safe_input(**updates: object) -> SafetyInput:
     return SafetyInput(**values)  # type: ignore[arg-type]
 
 
-def valid_field_evidence(packet: ClaimPacket) -> tuple[FieldEvidence, ...]:
-    claim_json = packet.claim.model_dump(mode="json", by_alias=False)
-    sources = {entry.field: entry.source_refs for entry in packet.claim.field_provenance}
-    missing = set(packet.claim.missing_required_fields)
-    result: list[FieldEvidence] = []
-    for field in RequiredClaimField:
-        if field in missing:
+def complete_g4_data(source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Add explicit canonical facts for every populated writable field."""
+
+    data = deepcopy(source or happy_data())
+    source_refs = {
+        item["field"]: item["sourceRefs"] for item in data["claim"]["fieldProvenance"]
+    }
+    wire_names = {
+        RequiredClaimField.INCIDENT_DATE: "incidentDate",
+        RequiredClaimField.INCIDENT_TIME: "incidentTime",
+        RequiredClaimField.LOCATION: "location",
+        RequiredClaimField.CLAIMANT_NAME: "claimantName",
+        RequiredClaimField.POLICY_REFERENCE: "policyReference",
+        RequiredClaimField.VEHICLE_REGISTRATION: "vehicleRegistration",
+        RequiredClaimField.COUNTERPARTY_KNOWN: "counterpartyKnown",
+        RequiredClaimField.NARRATIVE: "narrative",
+    }
+    fact_fields = {fact["field"] for fact in data["facts"]}
+    for field, wire_name in wire_names.items():
+        value = data["claim"][wire_name]
+        if value is None or field.value in fact_fields:
             continue
-        value: object = claim_json[field.value]
-        if field is RequiredClaimField.ATTACHMENTS:
-            assert isinstance(value, list)
-            value = tuple(value)
-        field_sources = sources[field]
-        if field is RequiredClaimField.NARRATIVE:
-            matching_facts = tuple(
-                fact
-                for fact in packet.facts
-                if set(fact.source_refs) <= set(field_sources)
-                and bool(set(fact.source_refs) & set(field_sources))
-            )
-        elif field is RequiredClaimField.ATTACHMENTS:
-            matching_facts = ()
-        else:
-            matching_facts = tuple(
-                fact
-                for fact in packet.facts
-                if fact.field.value == field.value
-                and set(fact.source_refs) <= set(field_sources)
-            )
-        covered_sources: set[str] = set()
-        for fact in matching_facts:
-            covered_sources.update(fact.source_refs)
-            result.append(
-                FieldEvidence(
-                    fact_id=fact.fact_id,
-                    field=field,
-                    value=fact.value,
-                    status=fact.status,
-                    source_refs=fact.source_refs,
-                    confidence=fact.confidence,
-                )
-            )
-        remaining_sources = tuple(
-            source for source in field_sources if source not in covered_sources
+        data["facts"].append(
+            {
+                "factId": f"fact-canonical-{field.value.replace('_', '-')}",
+                "field": field.value,
+                "value": value,
+                "status": "user_stated",
+                "sourceRefs": source_refs[field.value],
+                "confidence": None,
+            }
         )
-        if remaining_sources:
-            result.append(
-                FieldEvidence(
-                    fact_id=None,
-                    field=field,
-                    value=cast(str | int | float | bool | None | tuple[str, ...], value),
-                    status=FactStatus.USER_STATED,
-                    source_refs=remaining_sources,
-                    confidence=None,
-                )
-            )
-    return tuple(result)
+    return data
 
 
-def incomplete_claim(field: RequiredClaimField = RequiredClaimField.LOCATION) -> ClaimData:
-    data = deepcopy(happy_data()["claim"])
+def g4_packet(source: dict[str, Any] | None = None) -> ClaimPacket:
+    return ClaimPacket.model_validate(complete_g4_data(source))
+
+
+def incomplete_packet(
+    field: RequiredClaimField = RequiredClaimField.LOCATION,
+) -> ClaimPacket:
+    data = happy_data()
     wire_name = {
         RequiredClaimField.INCIDENT_DATE: "incidentDate",
         RequiredClaimField.INCIDENT_TIME: "incidentTime",
@@ -139,24 +136,39 @@ def incomplete_claim(field: RequiredClaimField = RequiredClaimField.LOCATION) ->
         RequiredClaimField.VEHICLE_REGISTRATION: "vehicleRegistration",
         RequiredClaimField.NARRATIVE: "narrative",
     }[field]
-    data[wire_name] = None
-    data["missingRequiredFields"] = [field.value]
-    data["fieldProvenance"] = [
-        item for item in data["fieldProvenance"] if item["field"] != field.value
+    data["state"] = "awaiting_clarification"
+    data["portalState"] = "draft"
+    data["gateDecisions"] = []
+    data["claim"][wire_name] = None
+    data["claim"]["missingRequiredFields"] = [field.value]
+    data["claim"]["fieldProvenance"] = [
+        item
+        for item in data["claim"]["fieldProvenance"]
+        if item["field"] != field.value
     ]
-    return ClaimData.model_validate(data)
+    data["verification"] = {
+        "status": "pending",
+        "deterministicMatch": None,
+        "modelReportedMismatch": False,
+        "fieldResults": [],
+        "expectedAttachmentCount": 3,
+        "actualAttachmentCount": None,
+        "reviewAllowed": False,
+        "verifiedAt": None,
+    }
+    return g4_packet(data)
 
 
 @pytest.mark.parametrize(
     ("envelope", "inventory_transform", "reason"),
     [
         (
-            ModelOutputEnvelope(happy_payload(), True, False, 0),
+            ModelOutputEnvelope(extraction_payload(), True, False, 0),
             lambda items: items,
             GateReasonCode.G2_REFUSAL,
         ),
         (
-            ModelOutputEnvelope(happy_payload(), False, True, 0),
+            ModelOutputEnvelope(extraction_payload(), False, True, 0),
             lambda items: items,
             GateReasonCode.G2_OUTPUT_TRUNCATED,
         ),
@@ -166,7 +178,7 @@ def incomplete_claim(field: RequiredClaimField = RequiredClaimField.LOCATION) ->
             GateReasonCode.G2_SCHEMA_INVALID,
         ),
         (
-            ModelOutputEnvelope(happy_payload(), False, False, 0),
+            ModelOutputEnvelope(extraction_payload(), False, False, 0),
             lambda items: items[:-1],
             GateReasonCode.G2_REFERENCE_MISSING,
         ),
@@ -192,22 +204,23 @@ def test_every_g2_reason_blocks_output(
 
     assert not result.decision.passed
     assert reason in result.decision.reason_codes
-    assert result.packet is None
+    assert result.extraction is None
 
 
 def test_g2_accepts_only_strict_duplicate_free_json_and_exact_inventory() -> None:
     packet = happy_packet()
     result = evaluate_g2(
-        ModelOutputEnvelope(happy_payload(), False, False, 0),
+        ModelOutputEnvelope(extraction_payload(), False, False, 0),
         approved_evidence=packet.evidence,
         decided_at=DECIDED_AT,
     )
-    assert result.decision.passed and result.packet == packet
+    assert result.decision.passed
+    assert result.extraction == ModelExtraction.model_validate(extraction_data())
     assert not result.retry_allowed
 
-    unknown = happy_data()
+    unknown = extraction_data()
     unknown["unknownField"] = True
-    duplicate = happy_payload().replace(
+    duplicate = extraction_payload().replace(
         '"contractVersion": "1.0.0",',
         '"contractVersion": "1.0.0", "contractVersion": "1.0.0",',
         1,
@@ -223,7 +236,7 @@ def test_g2_accepts_only_strict_duplicate_free_json_and_exact_inventory() -> Non
 
 def test_g2_external_inventory_detects_self_consistent_but_invented_evidence() -> None:
     packet = happy_packet()
-    data = happy_data()
+    data = extraction_data()
     data["evidence"][0]["sha256"] = "f" * 64
     invented = json.dumps(data)
 
@@ -242,7 +255,7 @@ def test_g2_rejects_evidence_that_was_not_approved_for_model_use() -> None:
     packet = ClaimPacket.model_validate(data)
 
     result = evaluate_g2(
-        ModelOutputEnvelope(json.dumps(data), False, False, 0),
+        ModelOutputEnvelope(extraction_payload(data), False, False, 0),
         approved_evidence=packet.evidence,
         decided_at=DECIDED_AT,
     )
@@ -257,26 +270,75 @@ def test_g2_allows_exactly_one_retry_and_stops_after_budget() -> None:
         approved_evidence=evidence,
         decided_at=DECIDED_AT,
     )
+    run = OutputContractRun().append(initial)
     retry_success = evaluate_g2(
-        ModelOutputEnvelope(happy_payload(), False, False, 1),
+        ModelOutputEnvelope(extraction_payload(), False, False, 1),
         approved_evidence=evidence,
-        decided_at=DECIDED_AT,
+        run=run,
+        decided_at=DECIDED_AT + timedelta(seconds=2),
     )
+    completed_run = run.append(retry_success)
     forbidden_third = evaluate_g2(
-        ModelOutputEnvelope(happy_payload(), False, False, 2),
+        ModelOutputEnvelope(extraction_payload(), False, False, 2),
         approved_evidence=evidence,
-        decided_at=DECIDED_AT,
+        run=completed_run,
+        decided_at=DECIDED_AT + timedelta(seconds=3),
     )
 
     assert initial.retry_allowed
     assert retry_success.decision.passed and not retry_success.retry_allowed
+    assert completed_run.attempts == (initial, retry_success)
+    final_result = completed_run.final_result
+    assert final_result is not None
+    assert final_result == retry_success
+    assert not completed_run.attempts[0].decision.passed
     assert forbidden_third.decision.reason_codes == (GateReasonCode.G2_RETRY_EXHAUSTED,)
-    assert forbidden_third.packet is None
+    assert forbidden_third.extraction is None
+    with pytest.raises(G2RunError):
+        completed_run.append(forbidden_third)
+
+    authoritative: tuple[GateDecision, ...] = ()
+    for offset, gate_id in enumerate((GateId.G0_INTAKE, GateId.G1_PRIVACY)):
+        authoritative = G0_TO_G5_REGISTRY.append(
+            authoritative,
+            make_gate_decision(gate_id, decided_at=DECIDED_AT + timedelta(seconds=offset)),
+        )
+    authoritative = G0_TO_G5_REGISTRY.append(
+        authoritative, final_result.decision
+    )
+    assert tuple(decision.gate_id for decision in authoritative) == (
+        GateId.G0_INTAKE,
+        GateId.G1_PRIVACY,
+        GateId.G2_OUTPUT_CONTRACT,
+    )
+
+
+def test_g2_retry_cannot_be_started_without_the_failed_run() -> None:
+    result = evaluate_g2(
+        ModelOutputEnvelope(extraction_payload(), False, False, 1),
+        approved_evidence=happy_packet().evidence,
+        decided_at=DECIDED_AT,
+    )
+
+    assert result.decision.reason_codes == (GateReasonCode.G2_RETRY_EXHAUSTED,)
+    assert result.extraction is None
+
+
+def test_g2_model_authored_authority_fields_never_survive() -> None:
+    packet = happy_packet()
+    result = evaluate_g2(
+        ModelOutputEnvelope(happy_payload(), False, False, 0),
+        approved_evidence=packet.evidence,
+        decided_at=DECIDED_AT,
+    )
+
+    assert result.decision.reason_codes == (GateReasonCode.G2_SCHEMA_INVALID,)
+    assert result.extraction is None
 
 
 def test_g2_multiple_failures_follow_registered_reason_priority() -> None:
     result = evaluate_g2(
-        ModelOutputEnvelope(happy_payload(), True, True, 1),
+        ModelOutputEnvelope(extraction_payload(), True, True, 1),
         approved_evidence=(),
         decided_at=DECIDED_AT,
     )
@@ -369,30 +431,42 @@ def test_g3_malformed_boundary_signals_fail_closed() -> None:
 
 
 def test_g4_accepts_complete_supported_provenance_at_threshold() -> None:
-    data = happy_data()
+    data = complete_g4_data()
     damage = next(fact for fact in data["facts"] if fact["factId"] == "fact-damage")
     damage["confidence"] = 0.80
     packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(
-        packet,
-        field_evidence=valid_field_evidence(packet),
-        decided_at=DECIDED_AT,
-    )
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert result.decision.passed
     assert result.writable_fields == tuple(RequiredClaimField)
+    assert result.blocked_fields == result.conflicting_fields == ()
+
+
+def test_g4_requires_explicit_narrative_fact_even_with_legitimate_sources() -> None:
+    result = evaluate_g4(happy_packet(), decided_at=DECIDED_AT)
+
+    assert GateReasonCode.G4_NARRATIVE_UNSUPPORTED in result.decision.reason_codes
+    assert not result.writable_fields
 
 
 def test_g4_provenance_missing_blocks() -> None:
-    packet = happy_packet()
-    supports = tuple(
-        support
-        for support in valid_field_evidence(packet)
-        if support.field is not RequiredClaimField.LOCATION
+    data = complete_g4_data()
+    location_entry = next(
+        item
+        for item in data["claim"]["fieldProvenance"]
+        if item["field"] == RequiredClaimField.LOCATION.value
     )
+    location_entry["sourceRefs"] = ["prov-image-1"]
+    verification_entry = next(
+        item
+        for item in data["verification"]["fieldResults"]
+        if item["field"] == RequiredClaimField.LOCATION.value
+    )
+    verification_entry["sourceRefs"] = ["prov-image-1"]
+    packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(packet, field_evidence=supports, decided_at=DECIDED_AT)
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert GateReasonCode.G4_PROVENANCE_MISSING in result.decision.reason_codes
     assert RequiredClaimField.LOCATION not in result.writable_fields
@@ -410,7 +484,7 @@ def test_g4_provenance_missing_blocks() -> None:
 def test_g4_forbids_sensitive_identity_inference_from_images(
     field: RequiredClaimField,
 ) -> None:
-    data = happy_data()
+    data = complete_g4_data()
     field_entry = next(
         item for item in data["claim"]["fieldProvenance"] if item["field"] == field.value
     )
@@ -421,13 +495,11 @@ def test_g4_forbids_sensitive_identity_inference_from_images(
         if item["field"] == field.value
     )
     verification_entry["sourceRefs"] = ["prov-image-1"]
+    canonical_fact = next(fact for fact in data["facts"] if fact["field"] == field.value)
+    canonical_fact["sourceRefs"] = ["prov-image-1"]
     packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(
-        packet,
-        field_evidence=valid_field_evidence(packet),
-        decided_at=DECIDED_AT,
-    )
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert GateReasonCode.G4_SENSITIVE_IMAGE_INFERENCE in result.decision.reason_codes
     assert field not in result.writable_fields
@@ -435,159 +507,166 @@ def test_g4_forbids_sensitive_identity_inference_from_images(
 
 @pytest.mark.parametrize("status", [FactStatus.UNKNOWN, FactStatus.NOT_SUPPORTED])
 def test_g4_unknown_and_not_supported_facts_are_never_writable(status: FactStatus) -> None:
-    data = happy_data()
+    data = complete_g4_data()
     date_fact = next(fact for fact in data["facts"] if fact["factId"] == "fact-date")
     date_fact.update({"value": None, "status": status.value, "confidence": None})
     packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(
-        packet,
-        field_evidence=valid_field_evidence(packet),
-        decided_at=DECIDED_AT,
-    )
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert GateReasonCode.G4_FACT_NOT_WRITABLE in result.decision.reason_codes
     assert RequiredClaimField.INCIDENT_DATE not in result.writable_fields
 
 
 def test_g4_observed_confidence_below_point_eight_blocks_write() -> None:
-    data = happy_data()
+    data = complete_g4_data()
     damage = next(fact for fact in data["facts"] if fact["factId"] == "fact-damage")
     damage["confidence"] = 0.799999
     packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(
-        packet,
-        field_evidence=valid_field_evidence(packet),
-        decided_at=DECIDED_AT,
-    )
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert GateReasonCode.G4_CONFIDENCE_BELOW_THRESHOLD in result.decision.reason_codes
     assert RequiredClaimField.NARRATIVE not in result.writable_fields
 
 
-def test_g4_canonical_fact_binding_rejects_confidence_override() -> None:
-    data = happy_data()
-    damage = next(fact for fact in data["facts"] if fact["factId"] == "fact-damage")
-    damage["confidence"] = 0.50
-    packet = ClaimPacket.model_validate(data)
-    supports = valid_field_evidence(packet)
-    forged = tuple(
-        FieldEvidence(
-            fact_id=support.fact_id,
-            field=support.field,
-            value=support.value,
-            status=support.status,
-            source_refs=support.source_refs,
-            confidence=0.99,
+def test_g4_accepts_no_caller_selected_fact_subset() -> None:
+    with pytest.raises(TypeError):
+        evaluate_g4(  # type: ignore[call-arg]
+            g4_packet(), field_evidence=(), decided_at=DECIDED_AT
         )
-        if support.fact_id == "fact-damage"
-        else support
-        for support in supports
+
+
+def test_g4_omitted_canonical_fact_fails_closed() -> None:
+    data = complete_g4_data()
+    data["facts"] = [fact for fact in data["facts"] if fact["field"] != "location"]
+
+    result = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
+
+    assert GateReasonCode.G4_FACT_NOT_WRITABLE in result.decision.reason_codes
+    assert GateReasonCode.G4_PROVENANCE_MISSING in result.decision.reason_codes
+
+
+def test_g4_audits_unmapped_unknown_facts_in_the_full_inventory() -> None:
+    data = complete_g4_data()
+    data["facts"].append(
+        {
+            "factId": "fact-unlisted-unknown",
+            "field": "vehicle_count",
+            "value": None,
+            "status": "unknown",
+            "sourceRefs": [],
+            "confidence": None,
+        }
     )
 
-    result = evaluate_g4(packet, field_evidence=forged, decided_at=DECIDED_AT)
+    result = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
 
-    assert not result.decision.passed
     assert GateReasonCode.G4_FACT_NOT_WRITABLE in result.decision.reason_codes
-    assert RequiredClaimField.NARRATIVE not in result.writable_fields
+    assert not result.writable_fields
 
 
 def test_g4_conflicting_supported_values_block_fill() -> None:
-    data = happy_data()
-    data["facts"].extend(
-        [
-            {
-                "factId": "fact-location-berlin",
-                "field": "location",
-                "value": "Berlin",
-                "status": "user_stated",
-                "sourceRefs": ["prov-statement"],
-                "confidence": None,
-            },
-            {
-                "factId": "fact-location-munich",
-                "field": "location",
-                "value": "Munich",
-                "status": "user_stated",
-                "sourceRefs": ["prov-statement"],
-                "confidence": None,
-            },
-        ]
+    data = complete_g4_data()
+    data["facts"].append(
+        {
+            "factId": "fact-location-munich",
+            "field": "location",
+            "value": "Munich",
+            "status": "user_stated",
+            "sourceRefs": ["prov-statement"],
+            "confidence": None,
+        }
     )
     packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(
-        packet,
-        field_evidence=valid_field_evidence(packet),
-        decided_at=DECIDED_AT,
-    )
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert GateReasonCode.G4_CONFLICTING_SOURCES in result.decision.reason_codes
     assert RequiredClaimField.LOCATION not in result.writable_fields
+    assert result.conflicting_fields == (RequiredClaimField.LOCATION,)
 
 
 def test_g4_narrative_uses_only_observed_or_user_stated_support() -> None:
-    data = happy_data()
-    damage = next(fact for fact in data["facts"] if fact["factId"] == "fact-damage")
-    damage.update({"value": None, "status": "unknown", "confidence": None})
+    data = complete_g4_data()
+    narrative = next(fact for fact in data["facts"] if fact["field"] == "narrative")
+    narrative.update({"value": None, "status": "unknown", "confidence": None})
     packet = ClaimPacket.model_validate(data)
 
-    result = evaluate_g4(
-        packet,
-        field_evidence=valid_field_evidence(packet),
-        decided_at=DECIDED_AT,
-    )
+    result = evaluate_g4(packet, decided_at=DECIDED_AT)
 
     assert GateReasonCode.G4_NARRATIVE_UNSUPPORTED in result.decision.reason_codes
     assert RequiredClaimField.NARRATIVE not in result.writable_fields
 
 
+def test_g4_narrative_requires_exact_canonical_text_and_source_union() -> None:
+    data = complete_g4_data()
+    narrative = next(fact for fact in data["facts"] if fact["field"] == "narrative")
+    narrative["value"] = "A different narrative"
+    mismatch = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
+    assert GateReasonCode.G4_NARRATIVE_UNSUPPORTED in mismatch.decision.reason_codes
+
+    data = complete_g4_data()
+    narrative = next(fact for fact in data["facts"] if fact["field"] == "narrative")
+    narrative["sourceRefs"] = ["prov-statement"]
+    incomplete_sources = evaluate_g4(
+        ClaimPacket.model_validate(data), decided_at=DECIDED_AT
+    )
+    assert GateReasonCode.G4_PROVENANCE_MISSING in incomplete_sources.decision.reason_codes
+
+
+def test_g4_wrong_field_fact_cannot_authorize_narrative_text() -> None:
+    data = complete_g4_data()
+    data["facts"] = [fact for fact in data["facts"] if fact["field"] != "narrative"]
+    narrative = data["claim"]["narrative"]
+    damage = next(fact for fact in data["facts"] if fact["factId"] == "fact-damage")
+    damage["value"] = narrative
+    collision = next(fact for fact in data["facts"] if fact["factId"] == "fact-collision")
+    collision["value"] = narrative
+
+    result = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
+
+    assert GateReasonCode.G4_NARRATIVE_UNSUPPORTED in result.decision.reason_codes
+    assert GateReasonCode.G4_PROVENANCE_MISSING in result.decision.reason_codes
+
+
+def test_g4_fact_id_cannot_be_omitted_or_replaced_with_none() -> None:
+    data = complete_g4_data()
+    location = next(fact for fact in data["facts"] if fact["field"] == "location")
+    location["factId"] = None
+
+    with pytest.raises(ValidationError):
+        ClaimPacket.model_validate(data)
+
+
 def test_vin_cannot_enter_g4_because_it_is_absent_from_the_strict_contract() -> None:
-    packet = happy_packet()
     data = happy_data()
     data["claim"]["vin"] = "INFERRED-FROM-IMAGE"
     with pytest.raises(ValidationError):
         ClaimPacket.model_validate(data)
 
-    malformed = FieldEvidence(
-        fact_id=None,
-        field=cast(RequiredClaimField, "vin"),
-        value="INFERRED-FROM-IMAGE",
-        status=FactStatus.OBSERVED,
-        source_refs=("prov-image-1",),
-        confidence=0.99,
-    )
-    result = evaluate_g4(
-        packet,
-        field_evidence=(*valid_field_evidence(packet), malformed),
-        decided_at=DECIDED_AT,
-    )
-    assert GateReasonCode.G4_FACT_NOT_WRITABLE in result.decision.reason_codes
-
 
 def test_g5_complete_claim_passes_without_question() -> None:
-    claim = happy_packet().claim
+    provenance = evaluate_g4(g4_packet(), decided_at=DECIDED_AT)
     result = evaluate_g5(
-        claim,
-        conflicting_fields=(),
+        provenance,
         proposed_questions=(),
         completed_rounds=0,
         decided_at=DECIDED_AT,
     )
 
-    assert compute_missing_required_fields(claim) == ()
+    assert compute_missing_required_fields(provenance.claim) == ()
     assert result.decision.passed
     assert result.blocking_fields == ()
     assert result.accepted_question is None
 
 
 def test_g5_missing_field_accepts_only_one_question_for_next_blocker() -> None:
-    claim = incomplete_claim()
+    provenance = evaluate_g4(incomplete_packet(), decided_at=DECIDED_AT)
+    assert provenance.decision.passed
     question = ClarificationQuestion(RequiredClaimField.LOCATION, "Where did it happen?")
     result = evaluate_g5(
-        claim,
-        conflicting_fields=(),
+        provenance,
         proposed_questions=(question,),
         completed_rounds=0,
         decided_at=DECIDED_AT,
@@ -613,9 +692,9 @@ def test_g5_missing_field_accepts_only_one_question_for_next_blocker() -> None:
 def test_g5_rejects_omitted_multiple_wrong_or_empty_questions(
     questions: tuple[ClarificationQuestion, ...],
 ) -> None:
+    provenance = evaluate_g4(incomplete_packet(), decided_at=DECIDED_AT)
     result = evaluate_g5(
-        incomplete_claim(),
-        conflicting_fields=(),
+        provenance,
         proposed_questions=questions,
         completed_rounds=0,
         decided_at=DECIDED_AT,
@@ -629,13 +708,24 @@ def test_g5_rejects_omitted_multiple_wrong_or_empty_questions(
 
 
 def test_g5_conflict_is_a_real_question_target() -> None:
+    data = complete_g4_data()
+    data["facts"].append(
+        {
+            "factId": "fact-time-conflict",
+            "field": "incident_time",
+            "value": "15:00:00",
+            "status": "user_stated",
+            "sourceRefs": ["prov-statement"],
+            "confidence": None,
+        }
+    )
+    provenance = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
     question = ClarificationQuestion(
         RequiredClaimField.INCIDENT_TIME,
         "Which incident time is correct?",
     )
     result = evaluate_g5(
-        happy_packet().claim,
-        conflicting_fields=(RequiredClaimField.INCIDENT_TIME,),
+        provenance,
         proposed_questions=(question,),
         completed_rounds=1,
         decided_at=DECIDED_AT,
@@ -647,18 +737,16 @@ def test_g5_conflict_is_a_real_question_target() -> None:
 
 
 def test_g5_third_round_is_last_and_then_manual_handoff_is_mandatory() -> None:
-    claim = incomplete_claim()
+    provenance = evaluate_g4(incomplete_packet(), decided_at=DECIDED_AT)
     question = ClarificationQuestion(RequiredClaimField.LOCATION, "Where did it happen?")
     third = evaluate_g5(
-        claim,
-        conflicting_fields=(),
+        provenance,
         proposed_questions=(question,),
         completed_rounds=2,
         decided_at=DECIDED_AT,
     )
     exhausted = evaluate_g5(
-        claim,
-        conflicting_fields=(),
+        provenance,
         proposed_questions=(),
         completed_rounds=3,
         decided_at=DECIDED_AT,
@@ -674,9 +762,9 @@ def test_g5_third_round_is_last_and_then_manual_handoff_is_mandatory() -> None:
 
 
 def test_g5_extraneous_question_on_complete_claim_is_invalid() -> None:
+    provenance = evaluate_g4(g4_packet(), decided_at=DECIDED_AT)
     result = evaluate_g5(
-        happy_packet().claim,
-        conflicting_fields=(),
+        provenance,
         proposed_questions=(
             ClarificationQuestion(RequiredClaimField.LOCATION, "Unnecessary?"),
         ),
@@ -684,6 +772,162 @@ def test_g5_extraneous_question_on_complete_claim_is_invalid() -> None:
         decided_at=DECIDED_AT,
     )
     assert result.decision.reason_codes == (GateReasonCode.G5_QUESTION_INVALID,)
+
+
+def test_g4_conflict_context_cannot_be_omitted_or_replaced_by_caller() -> None:
+    data = complete_g4_data()
+    data["facts"].append(
+        {
+            "factId": "fact-location-conflict",
+            "field": "location",
+            "value": "Munich",
+            "status": "user_stated",
+            "sourceRefs": ["prov-statement"],
+            "confidence": None,
+        }
+    )
+    provenance = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
+    assert provenance.conflicting_fields == (RequiredClaimField.LOCATION,)
+
+    omitted = evaluate_g5(
+        provenance,
+        proposed_questions=(),
+        completed_rounds=0,
+        decided_at=DECIDED_AT,
+    )
+    replaced = evaluate_g5(
+        provenance,
+        proposed_questions=(
+            ClarificationQuestion(RequiredClaimField.CLAIMANT_NAME, "Who?"),
+        ),
+        completed_rounds=0,
+        decided_at=DECIDED_AT,
+    )
+    assert omitted.accepted_question is None
+    assert replaced.accepted_question is None
+    assert GateReasonCode.G5_QUESTION_INVALID in omitted.decision.reason_codes
+    assert GateReasonCode.G5_QUESTION_INVALID in replaced.decision.reason_codes
+
+    with pytest.raises(TypeError):
+        evaluate_g5(  # type: ignore[call-arg]
+            provenance,
+            conflicting_fields=(),
+            proposed_questions=(),
+            completed_rounds=0,
+        )
+
+
+def test_g4_conflicts_on_a_missing_field_still_drive_the_g5_question() -> None:
+    data = incomplete_packet().model_dump(mode="json", by_alias=True)
+    data["facts"].extend(
+        [
+            {
+                "factId": "fact-location-berlin",
+                "field": "location",
+                "value": "Berlin",
+                "status": "user_stated",
+                "sourceRefs": ["prov-statement"],
+                "confidence": None,
+            },
+            {
+                "factId": "fact-location-munich",
+                "field": "location",
+                "value": "Munich",
+                "status": "user_stated",
+                "sourceRefs": ["prov-statement"],
+                "confidence": None,
+            },
+        ]
+    )
+    provenance = evaluate_g4(ClaimPacket.model_validate(data), decided_at=DECIDED_AT)
+    question = ClarificationQuestion(
+        RequiredClaimField.LOCATION, "Which incident location is correct?"
+    )
+    result = evaluate_g5(
+        provenance,
+        proposed_questions=(question,),
+        completed_rounds=0,
+        decided_at=DECIDED_AT,
+    )
+
+    assert not provenance.decision.passed
+    assert provenance.conflicting_fields == (RequiredClaimField.LOCATION,)
+    assert result.blocking_fields == (RequiredClaimField.LOCATION,)
+    assert result.accepted_question == question
+
+
+def test_g4_to_g5_clarification_is_diagnostic_and_bound_to_one_question() -> None:
+    data = complete_g4_data()
+    data["facts"].append(
+        {
+            "factId": "fact-location-conflict",
+            "field": "location",
+            "value": "Munich",
+            "status": "user_stated",
+            "sourceRefs": ["prov-statement"],
+            "confidence": None,
+        }
+    )
+    g4_conflict = evaluate_g4(
+        ClaimPacket.model_validate(data), decided_at=DECIDED_AT + timedelta(seconds=4)
+    )
+    question = ClarificationQuestion(
+        RequiredClaimField.LOCATION, "Which incident location is correct?"
+    )
+    diagnostic = evaluate_g5(
+        g4_conflict,
+        proposed_questions=(question,),
+        completed_rounds=0,
+        decided_at=DECIDED_AT + timedelta(seconds=5),
+    )
+    flow = ClarificationSubflow(g4_conflict, completed_rounds=0).append(diagnostic)
+
+    assert flow.trigger == g4_conflict
+    assert flow.diagnostic == diagnostic
+    assert diagnostic.accepted_question == question
+    assert diagnostic.blocking_fields[0] is RequiredClaimField.LOCATION
+    with pytest.raises(ValueError, match="blockers must be recomputed"):
+        replace(
+            diagnostic,
+            blocking_fields=(RequiredClaimField.CLAIMANT_NAME,),
+        )
+    with pytest.raises(ValueError, match="accepted question is not bound"):
+        replace(
+            diagnostic,
+            accepted_question=ClarificationQuestion(
+                RequiredClaimField.CLAIMANT_NAME, "Who?"
+            ),
+        )
+    with pytest.raises(ClarificationSubflowError):
+        flow.append(diagnostic)
+
+    authoritative: tuple[GateDecision, ...] = ()
+    for offset, gate_id in enumerate(
+        (GateId.G0_INTAKE, GateId.G1_PRIVACY, GateId.G2_OUTPUT_CONTRACT, GateId.G3_SAFETY_SCOPE)
+    ):
+        authoritative = G0_TO_G5_REGISTRY.append(
+            authoritative,
+            make_gate_decision(gate_id, decided_at=DECIDED_AT + timedelta(seconds=offset)),
+        )
+    failed_history = G0_TO_G5_REGISTRY.append(authoritative, g4_conflict.decision)
+    with pytest.raises(GateOrderError):
+        G0_TO_G5_REGISTRY.append(failed_history, diagnostic.decision)
+
+    resolved_g4 = evaluate_g4(
+        g4_packet(), decided_at=DECIDED_AT + timedelta(seconds=4)
+    )
+    resolved_g5 = evaluate_g5(
+        resolved_g4,
+        proposed_questions=(),
+        completed_rounds=1,
+        decided_at=DECIDED_AT + timedelta(seconds=5),
+    )
+    resolved_history = G0_TO_G5_REGISTRY.append(authoritative, resolved_g4.decision)
+    resolved_history = G0_TO_G5_REGISTRY.append(
+        resolved_history, resolved_g5.decision
+    )
+    assert len(resolved_history) == 6
+    assert all(decision.passed for decision in resolved_history)
 
 
 def test_registry_is_contiguous_immutable_and_stops_after_failure() -> None:

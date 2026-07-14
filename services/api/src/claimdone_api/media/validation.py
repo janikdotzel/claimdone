@@ -54,6 +54,8 @@ _SENSITIVE_EXIF_TAGS = {
     "XPTitle",
 }
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def validate_g0(
     request: IntakeRequest,
     *,
@@ -62,15 +64,15 @@ def validate_g0(
     """Validate every deterministic intake boundary before any local persistence."""
 
     reasons: set[GateReasonCode] = set()
+    validated_images: list[ValidatedImage] = []
     if len(request.images) != 3:
         reasons.add(GateReasonCode.G0_IMAGE_COUNT_INVALID)
-
-    validated_images: list[ValidatedImage] = []
-    for index, upload in enumerate(request.images, start=1):
-        validated, image_reasons = _validate_image(upload, input_id=f"image-{index}")
-        reasons.update(image_reasons)
-        if validated is not None:
-            validated_images.append(validated)
+    else:
+        for index, upload in enumerate(request.images, start=1):
+            validated, image_reasons = _validate_image(upload, input_id=f"image-{index}")
+            reasons.update(image_reasons)
+            if validated is not None:
+                validated_images.append(validated)
 
     normalized_text: str | None = None
     text_is_valid = request.text is None or type(request.text) is str
