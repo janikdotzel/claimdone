@@ -5,6 +5,7 @@ CLAIMDONE_REQUIRED_NODE="24.14.0"
 CLAIMDONE_REQUIRED_PNPM="11.7.0"
 CLAIMDONE_REQUIRED_PYTHON="3.12.13"
 CLAIMDONE_REQUIRED_UV="0.8.3"
+CLAIMDONE_REQUIRED_PLAYWRIGHT="1.61.0"
 export NEXT_TELEMETRY_DISABLED=1
 
 claimdone_die() {
@@ -98,6 +99,10 @@ claimdone_uv_cache_dir() {
   printf '%s\n' "$CLAIMDONE_ROOT/.tools/cache/uv"
 }
 
+claimdone_playwright_browsers_path() {
+  printf '%s\n' "${CLAIMDONE_PLAYWRIGHT_BROWSERS_PATH:-$CLAIMDONE_ROOT/.tools/playwright}"
+}
+
 claimdone_print_runtime() {
   printf 'Node.js %s\n' "$(claimdone_tool_version node "$CLAIMDONE_NODE_BIN")"
   printf 'pnpm %s\n' "$(claimdone_tool_version pnpm "$CLAIMDONE_PNPM_BIN")"
@@ -106,11 +111,20 @@ claimdone_print_runtime() {
 
 claimdone_require_project_environment() {
   local uv_bin
+  local playwright_marker
+  local playwright_browsers_path
   uv_bin="$(claimdone_uv_bin)"
+  playwright_browsers_path="$(claimdone_playwright_browsers_path)"
+  playwright_marker="$playwright_browsers_path/.claimdone-ready"
 
   [[ -x "$uv_bin" ]] || claimdone_die "repo-local uv is missing; run make setup"
   [[ "$(claimdone_tool_version uv "$uv_bin")" == "$CLAIMDONE_REQUIRED_UV" ]] \
     || claimdone_die "repo-local uv has the wrong version; run make setup"
   [[ -d "$CLAIMDONE_ROOT/node_modules" ]] || claimdone_die "node_modules is missing; run make setup"
   [[ -d "$CLAIMDONE_ROOT/.venv" ]] || claimdone_die ".venv is missing; run make setup"
+  [[ -f "$playwright_marker" ]] \
+    || claimdone_die "Playwright Chromium is missing; run make setup"
+  [[ "$(<"$playwright_marker")" == "$CLAIMDONE_REQUIRED_PLAYWRIGHT" ]] \
+    || claimdone_die "Playwright Chromium has the wrong version; run make setup"
+  export PLAYWRIGHT_BROWSERS_PATH="$playwright_browsers_path"
 }

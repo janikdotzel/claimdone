@@ -21,6 +21,27 @@ scoped INT-001 record must not be presented as release approval or a product-qua
 | Evidence type | Canonical command output and direct HTTP observations against both local services |
 | Known record gap | Exact wall-clock durations and a versioned report artifact were not captured |
 
+## Welle-2 external prerequisites (separate from INT-001 evidence)
+
+On 2026-07-14, the OpenAI credential was created through the secure Platform flow and written only
+to the ignored local `.env.local` as `OPENAI_API_KEY`. No plaintext credential is recorded in this
+repository or verification document.
+
+- The human owner confirmed that a hard external EUR 10 usage limit is configured in OpenAI
+  Platform. Codex did not inspect that account setting; this is a human checkpoint, not automated
+  test evidence. A later live request rejected for quota or billing-limit reasons is therefore an
+  expected possible stop condition. Live harnesses must classify that response as a terminal,
+  non-retryable operational failure, stop the remaining paid checks, and must not turn it into a
+  deterministic product-gate decision.
+- Cost-free read-only model metadata checks with the project-scoped key returned HTTP `200` for
+  `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-4o-transcribe`.
+- The `gpt-5.6` alias returned HTTP `404` with `model_not_found` for this project even though the
+  exact family IDs were available. Welle 2 therefore uses the explicit `gpt-5.6-sol` model ID as
+  the task's GPT-5.6 target and must classify quota failures separately from model-access errors.
+
+These checks prove credential and model metadata access only. They do not prove a successful
+transcription, Responses API extraction, Computer Use loop, or live eval.
+
 ## How to record a run
 
 For every checkpoint, record:
