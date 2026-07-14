@@ -191,6 +191,24 @@ describe("ClaimDone intake API boundary", () => {
       },
     },
     {
+      label: "clarification limit combined with the allowed reason",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[5]!.reasonCodes = [
+          "G5_REQUIRED_FIELD_MISSING",
+          "G5_CLARIFICATION_LIMIT",
+        ];
+      },
+    },
+    {
+      label: "invalid question combined with the allowed reason",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[5]!.reasonCodes = [
+          "G5_REQUIRED_FIELD_MISSING",
+          "G5_QUESTION_INVALID",
+        ];
+      },
+    },
+    {
       label: "passing gate with a reason",
       mutate: (body: ReturnType<typeof awaitingBody>) => {
         body.gateHistory[0]!.reasonCodes = ["G0_CONSENT_MISSING"];

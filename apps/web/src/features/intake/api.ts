@@ -749,7 +749,7 @@ function assertGateOutcome(
     .slice(0, -1)
     .every((gate) => gate.deterministicPassed && !gate.modelBlocked);
   const expectedG5Reason = phase === "awaiting_clarification"
-    ? last?.reasonCodes.includes("G5_REQUIRED_FIELD_MISSING")
+    ? last?.reasonCodes.length === 1 && last.reasonCodes[0] === "G5_REQUIRED_FIELD_MISSING"
     : last?.reasonCodes.length === 0;
   if (
     !earlierPassed ||
