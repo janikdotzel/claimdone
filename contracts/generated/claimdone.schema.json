@@ -655,6 +655,12 @@
       "additionalProperties": false,
       "description": "Non-sensitive fixture references and natural-language input.",
       "properties": {
+        "completedClarificationRounds": {
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Completedclarificationrounds",
+          "type": "integer"
+        },
         "fixtureIds": {
           "items": {
             "maxLength": 128,
@@ -713,6 +719,7 @@
         "fixtureIds",
         "statement",
         "transcript",
+        "completedClarificationRounds",
         "language",
         "portalVariant"
       ],

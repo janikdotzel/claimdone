@@ -14,6 +14,7 @@ from .base import (
     NonEmptyText,
     ShortText,
     StrictBoolean,
+    StrictInteger,
 )
 from .enums import (
     AllowedTool,
@@ -35,6 +36,7 @@ class EvalInput(ContractModel):
     fixture_ids: Annotated[tuple[Identifier, ...], Field(min_length=1)]
     statement: NonEmptyText | None
     transcript: NonEmptyText | None
+    completed_clarification_rounds: Annotated[StrictInteger, Field(ge=0, le=3)]
     language: Literal["de", "en"]
     portal_variant: Literal["A", "B"]
 
@@ -42,6 +44,8 @@ class EvalInput(ContractModel):
     def require_one_text_input(self) -> Self:
         if (self.statement is None) is (self.transcript is None):
             raise ValueError("Eval input requires exactly one of statement or transcript")
+        if len(set(self.fixture_ids)) != len(self.fixture_ids):
+            raise ValueError("Eval input fixture IDs must be unique")
         return self
 
 
@@ -96,6 +100,12 @@ class PortalValueExpectation(ContractModel):
     field: RequiredClaimField
     value: JsonScalar
     source_refs: Annotated[tuple[Identifier, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def require_unique_sources(self) -> Self:
+        if len(set(self.source_refs)) != len(self.source_refs):
+            raise ValueError("Expected portal source refs must be unique")
+        return self
 
 
 class DeterministicEvalExpectation(ContractModel):
@@ -170,4 +180,34 @@ class EvalCase(ContractModel):
             and self.expectation.model_grader_thresholds
         ):
             raise ValueError("Deterministic eval cases cannot require model graders")
+
+        source_catalog = set(self.input.fixture_ids)
+        unresolved_sources = {
+            source_ref
+            for portal_value in self.expectation.expected_portal_values
+            for source_ref in portal_value.source_refs
+            if source_ref not in source_catalog
+        }
+        if unresolved_sources:
+            raise ValueError("Expected portal source refs must resolve to input fixture IDs")
+
+        clarification_limit_expected = any(
+            decision.gate_id is GateId.G5_COMPLETENESS
+            and GateReasonCode.G5_CLARIFICATION_LIMIT in decision.reason_codes
+            for decision in self.expectation.expected_gate_decisions
+        )
+        if (
+            clarification_limit_expected
+            and self.input.completed_clarification_rounds != 3
+        ):
+            raise ValueError("G5 clarification limit requires three completed rounds")
+        if self.input.completed_clarification_rounds == 3:
+            if self.expectation.expected_clarification is not None:
+                raise ValueError("Exhausted clarification budget cannot expect another question")
+            if (
+                AllowedTool.ASK_CLARIFICATION in self.expectation.allowed_tools
+                or AllowedTool.ASK_CLARIFICATION
+                in self.expectation.expected_tool_sequence
+            ):
+                raise ValueError("Exhausted clarification budget cannot allow another question")
         return self

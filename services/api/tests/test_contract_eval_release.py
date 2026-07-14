@@ -20,6 +20,7 @@ def eval_case_data() -> dict[str, Any]:
             "fixtureIds": ["fixture-safe-images"],
             "statement": "Someone may be injured.",
             "transcript": None,
+            "completedClarificationRounds": 0,
             "language": "en",
             "portalVariant": "A",
         },
@@ -121,6 +122,118 @@ def test_eval_case_carries_explicit_deterministic_ground_truth() -> None:
     assert gate.deterministic is True
     assert gate.passed is False
     assert case.expectation.deterministic_checks[0].deterministic is True
+
+
+@pytest.mark.parametrize("invalid_rounds", [-1, 4, True, 1.0])
+def test_eval_input_rejects_invalid_clarification_rounds(invalid_rounds: object) -> None:
+    data = eval_case_data()
+    data["input"]["completedClarificationRounds"] = invalid_rounds
+
+    with pytest.raises(ValidationError):
+        EvalCase.model_validate(data)
+
+
+def test_eval_input_requires_explicit_clarification_rounds() -> None:
+    data = eval_case_data()
+    del data["input"]["completedClarificationRounds"]
+
+    with pytest.raises(ValidationError):
+        EvalCase.model_validate(data)
+
+
+def test_eval_portal_sources_must_resolve_to_unique_input_fixture_ids() -> None:
+    data = eval_case_data()
+    data["expectation"]["expectedPortalValues"] = [
+        {
+            "field": "incident_date",
+            "value": "2026-07-14",
+            "sourceRefs": ["fixture-not-catalogued"],
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="resolve to input fixture IDs"):
+        EvalCase.model_validate(data)
+
+    data["expectation"]["expectedPortalValues"][0]["sourceRefs"] = [
+        "fixture-safe-images",
+        "fixture-safe-images",
+    ]
+    with pytest.raises(ValidationError, match="source refs must be unique"):
+        EvalCase.model_validate(data)
+
+
+def test_eval_input_source_catalog_rejects_duplicate_fixture_ids() -> None:
+    data = eval_case_data()
+    data["input"]["fixtureIds"] = ["fixture-safe-images", "fixture-safe-images"]
+
+    with pytest.raises(ValidationError, match="fixture IDs must be unique"):
+        EvalCase.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("rounds", "requires three completed rounds"),
+        ("question", "cannot expect another question"),
+        ("allowed_tool", "cannot allow another question"),
+        ("expected_tool", "cannot allow another question"),
+    ],
+)
+def test_g5_clarification_limit_cannot_schedule_another_question(
+    mutation: str, message: str
+) -> None:
+    data = eval_case_data()
+    data["input"]["completedClarificationRounds"] = 3
+    data["expectation"].update(
+        {
+            "expectedGateDecisions": [
+                {
+                    "gateId": "G5",
+                    "deterministic": True,
+                    "passed": False,
+                    "reasonCodes": [
+                        "G5_REQUIRED_FIELD_MISSING",
+                        "G5_CLARIFICATION_LIMIT",
+                    ],
+                }
+            ],
+            "expectedClarification": None,
+            "allowedTools": ["inspect_evidence", "check_required_fields"],
+            "expectedToolSequence": ["inspect_evidence", "check_required_fields"],
+        }
+    )
+    if mutation == "rounds":
+        data["input"]["completedClarificationRounds"] = 2
+    elif mutation == "question":
+        data["expectation"]["expectedClarification"] = "Ask again?"
+    elif mutation == "allowed_tool":
+        data["expectation"]["allowedTools"].append("ask_clarification")
+    else:
+        data["expectation"]["allowedTools"].append("ask_clarification")
+        data["expectation"]["expectedToolSequence"].append("ask_clarification")
+
+    with pytest.raises(ValidationError, match=message):
+        EvalCase.model_validate(data)
+
+
+@pytest.mark.parametrize("mutation", ["question", "allowed_tool", "expected_tool"])
+def test_exhausted_clarification_budget_cannot_be_bypassed_by_omitting_limit_reason(
+    mutation: str,
+) -> None:
+    data = eval_case_data()
+    data["input"]["completedClarificationRounds"] = 3
+    if mutation == "question":
+        data["expectation"]["expectedClarification"] = "Ask a fourth clarification?"
+    elif mutation == "allowed_tool":
+        data["expectation"]["allowedTools"].append("ask_clarification")
+    else:
+        data["expectation"]["allowedTools"].append("ask_clarification")
+        data["expectation"]["expectedToolSequence"].append("ask_clarification")
+
+    expected_reasons = data["expectation"]["expectedGateDecisions"][0]["reasonCodes"]
+    assert "G5_CLARIFICATION_LIMIT" not in expected_reasons
+    with pytest.raises(ValidationError, match="Exhausted clarification budget"):
+        EvalCase.model_validate(data)
 
 
 @pytest.mark.parametrize("status", ["unknown", "not_supported"])

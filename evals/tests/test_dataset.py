@@ -1,7 +1,7 @@
 import pytest
 
 from claimdone_api.contracts import EvalCase
-from claimdone_api.contracts.enums import AllowedTool
+from claimdone_api.contracts.enums import AllowedTool, GateReasonCode
 from evals.validate_dataset import (
     EXPECTED_CASE_COUNT,
     PRE_TOOL_SAFETY_GATES,
@@ -25,6 +25,26 @@ def test_dataset_loads_without_live_services() -> None:
     assert len(cases) == EXPECTED_CASE_COUNT
     assert len({case.eval_id for case in cases}) == len(cases)
     assert {tag for case in cases for tag in case.tags} >= REQUIRED_CATEGORIES
+
+
+def test_every_portal_source_resolves_to_a_unique_input_catalog_entry() -> None:
+    for case in load_dataset():
+        source_catalog = set(case.input.fixture_ids)
+        assert len(source_catalog) == len(case.input.fixture_ids)
+        for portal_value in case.expectation.expected_portal_values:
+            assert len(set(portal_value.source_refs)) == len(portal_value.source_refs)
+            assert set(portal_value.source_refs) <= source_catalog
+
+
+def test_clarification_limit_reproduces_consumed_budget_without_another_question() -> None:
+    case = next(
+        case for case in load_dataset() if case.eval_id == "eval-clarification-limit-en"
+    )
+
+    assert case.input.completed_clarification_rounds == 3
+    assert case.expectation.expected_clarification is None
+    assert AllowedTool.ASK_CLARIFICATION not in case.expectation.allowed_tools
+    assert AllowedTool.ASK_CLARIFICATION not in case.expectation.expected_tool_sequence
 
 
 def test_every_safety_case_has_an_explicit_block_reason() -> None:
@@ -124,3 +144,111 @@ def test_dataset_rejects_a_case_count_other_than_twelve() -> None:
     extra = cases[-1].model_copy(update={"eval_id": "eval-unplanned-thirteenth-case"})
     with pytest.raises(DatasetValidationError, match="exactly 12"):
         validate_dataset((*cases, extra))
+
+
+def test_dataset_rejects_portal_source_outside_the_input_catalog() -> None:
+    cases = load_dataset()
+    case = cases[0]
+    portal_value = case.expectation.expected_portal_values[0].model_copy(
+        update={"source_refs": ("synthetic-source-not-catalogued",)}
+    )
+    expectation = case.expectation.model_copy(
+        update={
+            "expected_portal_values": (
+                portal_value,
+                *case.expectation.expected_portal_values[1:],
+            )
+        }
+    )
+    mutated = case.model_copy(update={"expectation": expectation})
+
+    with pytest.raises(DatasetValidationError, match="resolve to input fixture IDs"):
+        validate_dataset((mutated, *cases[1:]))
+
+
+def test_dataset_rejects_duplicate_portal_source_refs() -> None:
+    cases = load_dataset()
+    case = cases[0]
+    source_ref = case.expectation.expected_portal_values[0].source_refs[0]
+    portal_value = case.expectation.expected_portal_values[0].model_copy(
+        update={"source_refs": (source_ref, source_ref)}
+    )
+    expectation = case.expectation.model_copy(
+        update={
+            "expected_portal_values": (
+                portal_value,
+                *case.expectation.expected_portal_values[1:],
+            )
+        }
+    )
+    mutated = case.model_copy(update={"expectation": expectation})
+
+    with pytest.raises(DatasetValidationError, match="source refs must be unique"):
+        validate_dataset((mutated, *cases[1:]))
+
+
+def test_dataset_rejects_clarification_limit_before_the_budget_is_consumed() -> None:
+    cases = load_dataset()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if case.eval_id == "eval-clarification-limit-en"
+    )
+    case = cases[case_index]
+    mutated_input = case.input.model_copy(update={"completed_clarification_rounds": 2})
+    mutated = case.model_copy(update={"input": mutated_input})
+
+    with pytest.raises(DatasetValidationError, match="three completed rounds"):
+        validate_dataset((*cases[:case_index], mutated, *cases[case_index + 1 :]))
+
+
+@pytest.mark.parametrize("mutate_sequence", [False, True])
+def test_dataset_rejects_another_question_after_clarification_limit(
+    mutate_sequence: bool,
+) -> None:
+    cases = load_dataset()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if case.eval_id == "eval-clarification-limit-en"
+    )
+    case = cases[case_index]
+    update: dict[str, object]
+    if mutate_sequence:
+        update = {
+            "expected_tool_sequence": (
+                *case.expectation.expected_tool_sequence,
+                AllowedTool.ASK_CLARIFICATION,
+            )
+        }
+    else:
+        update = {"expected_clarification": "Ask a fourth clarification?"}
+    expectation = case.expectation.model_copy(update=update)
+    mutated = case.model_copy(update={"expectation": expectation})
+
+    with pytest.raises(DatasetValidationError, match="cannot (expect|allow) another question"):
+        validate_dataset((*cases[:case_index], mutated, *cases[case_index + 1 :]))
+
+
+def test_exhausted_budget_cannot_be_bypassed_by_omitting_limit_reason() -> None:
+    cases = load_dataset()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if case.eval_id == "eval-clarification-limit-en"
+    )
+    case = cases[case_index]
+    gate = case.expectation.expected_gate_decisions[0].model_copy(
+        update={"reason_codes": (GateReasonCode.G5_REQUIRED_FIELD_MISSING,)}
+    )
+    expectation = case.expectation.model_copy(
+        update={
+            "expected_clarification": "Ask a fourth clarification?",
+            "expected_gate_decisions": (gate,),
+        }
+    )
+    mutated = case.model_copy(update={"expectation": expectation})
+
+    assert GateReasonCode.G5_CLARIFICATION_LIMIT not in gate.reason_codes
+    with pytest.raises(DatasetValidationError, match="exhausted clarification budget"):
+        validate_dataset((*cases[:case_index], mutated, *cases[case_index + 1 :]))
