@@ -1145,6 +1145,53 @@ def test_transcript_identity_is_derived_at_save_confirm_and_reopen(
         SqliteCaseRepository(database_path)
 
 
+@pytest.mark.parametrize("tampering", ("changed", "removed"))
+def test_case_update_cannot_invalidate_bound_transcript_summary(
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    database_path = tmp_path / f"transcript-write-binding-{tampering}.db"
+    service, repository = _service(database_path)
+    case = service.create_case()
+    case = service.transition_case(
+        case.case_id,
+        expected_version=case.version,
+        target=CaseState.DISCLOSED,
+    )
+    case = service.save_intake_summary(
+        case.case_id,
+        expected_version=case.version,
+        summary=_pending_summary(),
+    )
+    waiting = service.transition_case(
+        case.case_id,
+        expected_version=case.version,
+        target=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+    )
+    transcript = repository.get_transcript(case.case_id)
+    assert transcript is not None
+
+    replacement: dict[str, Any] | None = _pending_summary()
+    if tampering == "changed":
+        assert replacement is not None
+        statement = cast(dict[str, Any], replacement["statement"])
+        statement["sha256"] = "b" * 64
+    else:
+        replacement = None
+    with pytest.raises(TranscriptStateError, match="bound transcript"):
+        service.save_intake_summary(
+            case.case_id,
+            expected_version=waiting.version,
+            summary=replacement,
+        )
+
+    assert service.get_case(case.case_id) == waiting
+    assert repository.get_transcript(case.case_id) == transcript
+    reopened = SqliteCaseRepository(database_path)
+    assert reopened.get_case(case.case_id) == waiting
+    assert reopened.get_transcript(case.case_id) == transcript
+
+
 def test_capabilities_store_digest_only_revoke_prior_open_and_cascade(
     tmp_path: Path,
 ) -> None:

@@ -1944,8 +1944,9 @@ class SqliteCaseRepository:
             ),
         )
 
-    @staticmethod
+    @classmethod
     def _update_case_row(
+        cls,
         connection: sqlite3.Connection,
         *,
         current: CaseRecord,
@@ -1953,6 +1954,34 @@ class SqliteCaseRepository:
         snapshot: CaseSnapshot,
         updated_at: datetime,
     ) -> None:
+        transcript_row = connection.execute(
+            "SELECT * FROM case_transcripts WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if transcript_row is not None:
+            transcript = cls._row_to_transcript(transcript_row)
+            if snapshot.intake_summary is None:
+                raise TranscriptStateError(
+                    "A case with a bound transcript must retain its intake summary"
+                )
+            try:
+                derived_id, derived_ref, derived_hash = _transcript_identity_from_summary(
+                    current.case_id,
+                    snapshot.intake_summary,
+                )
+            except ValueError as error:
+                raise TranscriptStateError(
+                    "A case update cannot invalidate its bound transcript summary"
+                ) from error
+            if (
+                transcript.transcript_id != derived_id
+                or transcript.local_ref != derived_ref
+                or transcript.transcript_sha256 != derived_hash
+            ):
+                raise TranscriptStateError(
+                    "A case update cannot replace its bound transcript identity"
+                )
+
         updated_at_value = _dump_aware_datetime(updated_at, "updated_at")
         if updated_at < current.updated_at:
             raise ValueError("updated_at cannot move backwards")
