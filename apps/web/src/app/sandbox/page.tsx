@@ -4,7 +4,7 @@ import styles from "./sandbox-index.module.css";
 
 export default function SandboxIndexPage() {
   return (
-    <main className={styles.page}>
+    <main className={styles.page} id="main-content">
       <section className={styles.card}>
         <span>ClaimDone developer sandbox</span>
         <h1>Choose a portal layout</h1>

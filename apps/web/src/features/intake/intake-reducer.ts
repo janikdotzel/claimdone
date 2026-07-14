@@ -20,6 +20,7 @@ export const initialIntakeState: IntakeState = {
   disclosureAccepted: false,
   images: [],
   inputRevision: 0,
+  pendingCaseId: null,
   serverAuthority: null,
   serverError: null,
   serverRequest: null,
@@ -27,6 +28,24 @@ export const initialIntakeState: IntakeState = {
   statementMode: "text",
   textStatement: "",
 };
+
+function isInputMutation(action: IntakeAction): boolean {
+  return [
+    "SET_DISCLOSURE_ACCEPTED",
+    "BEGIN_INTAKE",
+    "ADD_IMAGES",
+    "REMOVE_IMAGE",
+    "COMPLETE_IMAGE_INSPECTION",
+    "SET_EXIF_DECISION",
+    "SET_STATEMENT_MODE",
+    "SET_TEXT_STATEMENT",
+    "SET_AUDIO",
+    "COMPLETE_AUDIO_INSPECTION",
+    "REMOVE_AUDIO",
+    "SET_CONSENT",
+    "RESET",
+  ].includes(action.type);
+}
 
 function withInputMutation(
   state: IntakeState,
@@ -190,6 +209,8 @@ export function evaluateIntakeGates(state: IntakeState): IntakeGateResult {
 }
 
 export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeState {
+  if (state.serverRequest !== null && isInputMutation(action)) return state;
+
   switch (action.type) {
     case "SET_DISCLOSURE_ACCEPTED":
       return state.stage === "disclosure"
@@ -322,6 +343,7 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
       return { ...state, backendErrors: mapBackendValidationErrors(action.errors) };
 
     case "BEGIN_SERVER_REQUEST":
+      if (state.serverRequest !== null) return state;
       if (
         action.kind === "intake" &&
         (state.stage !== "intake" || !evaluateIntakeGates(state).canContinue)
@@ -346,6 +368,21 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
         },
       };
 
+    case "SERVER_CASE_CREATED":
+      if (
+        state.serverRequest?.kind !== "intake" ||
+        state.serverRequest.token !== action.token ||
+        state.pendingCaseId !== null
+      ) {
+        return state;
+      }
+      return { ...state, pendingCaseId: action.caseId };
+
+    case "SERVER_CASE_CLEANED":
+      return state.pendingCaseId === action.caseId
+        ? { ...state, pendingCaseId: null }
+        : state;
+
     case "SERVER_SUCCEEDED": {
       const request = state.serverRequest;
       if (
@@ -353,13 +390,18 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
         request.token !== action.token ||
         request.inputRevision !== state.inputRevision ||
         (request.kind === "intake" && action.response.phase !== "awaiting_clarification") ||
-        (request.kind === "clarification" && action.response.phase !== "review")
+        (request.kind === "clarification" && action.response.phase !== "review") ||
+        (request.kind === "intake" &&
+          state.pendingCaseId !== action.response.case.caseId) ||
+        (request.kind === "clarification" &&
+          state.serverAuthority?.case.caseId !== action.response.case.caseId)
       ) {
         return state;
       }
       return {
         ...state,
         backendErrors: {},
+        pendingCaseId: request.kind === "intake" ? null : state.pendingCaseId,
         serverAuthority: action.response,
         serverError: null,
         serverRequest: null,
@@ -390,6 +432,8 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
     }
 
     case "RESET":
-      return { ...initialIntakeState, inputRevision: state.inputRevision + 1 };
+      return state.pendingCaseId === null
+        ? { ...initialIntakeState, inputRevision: state.inputRevision + 1 }
+        : state;
   }
 }

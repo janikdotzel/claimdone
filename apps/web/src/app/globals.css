@@ -1146,6 +1146,11 @@ code {
   background: var(--color-accent-50);
 }
 
+.drop-zone--disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 .drop-zone__title {
   margin-bottom: 0;
   color: var(--color-navy-950);

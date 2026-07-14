@@ -12,6 +12,111 @@ export const DEFAULT_CLAIMDONE_PORTAL_ORIGIN = "http://127.0.0.1:3000";
 
 const FLOW_GATE_IDS = ["G0", "G1", "G2", "G3", "G4", "G5"] as const;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const WIRE_AWARE_DATETIME_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const GATE_DECISION_KEYS = [
+  "contractVersion",
+  "decidedAt",
+  "deterministicPassed",
+  "evidenceRefs",
+  "gateId",
+  "modelBlocked",
+  "passed",
+  "reasonCodes",
+] as const;
+
+const GATE_REASON_CODES_BY_GATE = {
+  G0: [
+    "G0_IMAGE_COUNT_INVALID",
+    "G0_IMAGE_TYPE_INVALID",
+    "G0_IMAGE_TOO_LARGE",
+    "G0_INPUT_MODE_INVALID",
+    "G0_AUDIO_TOO_LONG",
+    "G0_CONSENT_MISSING",
+  ],
+  G1: [
+    "G1_EXIF_UNREVIEWED",
+    "G1_MODEL_COPY_NOT_APPROVED",
+    "G1_SENSITIVE_LOG_DATA",
+  ],
+  G2: [
+    "G2_SCHEMA_INVALID",
+    "G2_REFUSAL",
+    "G2_OUTPUT_TRUNCATED",
+    "G2_REFERENCE_MISSING",
+    "G2_RETRY_EXHAUSTED",
+  ],
+  G3: [
+    "G3_INJURY_OR_EMERGENCY",
+    "G3_REAL_PORTAL",
+    "G3_LEGAL_OR_LIABILITY",
+    "G3_PAYMENT_OR_COVERAGE",
+    "G3_SUBMISSION_ACTION",
+    "G3_MODEL_UNCERTAIN",
+  ],
+  G4: [
+    "G4_PROVENANCE_MISSING",
+    "G4_SENSITIVE_IMAGE_INFERENCE",
+    "G4_FACT_NOT_WRITABLE",
+    "G4_CONFIDENCE_BELOW_THRESHOLD",
+    "G4_CONFLICTING_SOURCES",
+    "G4_NARRATIVE_UNSUPPORTED",
+  ],
+  G5: [
+    "G5_REQUIRED_FIELD_MISSING",
+    "G5_QUESTION_INVALID",
+    "G5_CLARIFICATION_LIMIT",
+  ],
+  G6: [
+    "G6_TOOL_UNKNOWN",
+    "G6_ARGUMENTS_INVALID",
+    "G6_STATE_INVALID",
+    "G6_URL_NOT_ALLOWED",
+    "G6_LIMIT_EXCEEDED",
+    "G6_FORBIDDEN_ACTION",
+  ],
+  G7: [
+    "G7_FIELD_NOT_ALLOWED",
+    "G7_VALUE_NOT_FROM_PACKET",
+    "G7_PROVENANCE_MISSING",
+    "G7_FIELD_NOT_EDITABLE",
+    "G7_ATTACHMENT_MISMATCH",
+  ],
+  G8: [
+    "G8_FIELD_MISMATCH",
+    "G8_ATTACHMENT_MISMATCH",
+    "G8_REQUIRED_FIELD_MISSING",
+    "G8_MODEL_MISMATCH",
+  ],
+  G9: ["G9_AGENT_FORBIDDEN", "G9_ROLE_INVALID", "G9_TOKEN_INVALID"],
+  G10: ["G10_BEFORE_APPROVAL", "G10_REDACTION_FAILED"],
+  G11: [
+    "G11_DETERMINISTIC_TESTS_FAILED",
+    "G11_SAFETY_EVAL_FAILED",
+    "G11_THRESHOLD_FAILED",
+    "G11_PORTAL_SUCCESS_FAILED",
+    "G11_APPROVAL_ATTACK_FAILED",
+    "G11_CLEAN_CHECKOUT_FAILED",
+    "G11_DOCUMENTATION_MISSING",
+    "G11_LICENSE_MISSING",
+    "G11_FIXTURES_MISSING",
+    "G11_TEST_REPORT_MISSING",
+    "G11_HUMAN_CHECKPOINT_MISSING",
+  ],
+} as const satisfies Readonly<Record<GateId, readonly GateReasonCode[]>>;
+
+type ListedGateReasonCode =
+  (typeof GATE_REASON_CODES_BY_GATE)[keyof typeof GATE_REASON_CODES_BY_GATE][number];
+const ALL_GATE_REASON_CODES_ARE_LISTED: Exclude<
+  GateReasonCode,
+  ListedGateReasonCode
+> extends never
+  ? true
+  : never = true;
+const GATE_REASON_CODE_SET = new Set<GateReasonCode>(
+  Object.values(GATE_REASON_CODES_BY_GATE).flat(),
+);
+void ALL_GATE_REASON_CODES_ARE_LISTED;
 
 export interface CaseView {
   readonly activeClarification: Readonly<Record<string, unknown>> | null;
@@ -76,7 +181,7 @@ export type NewIntakeSubmission = Omit<IntakeSubmission, "expectedVersion">;
 
 export interface IntakeCaseLifecycle {
   readonly onCaseCreated?: (caseId: string) => void;
-  readonly onCaseReleased?: (caseId: string) => void;
+  readonly onCaseCleaned?: (caseId: string) => void;
 }
 
 export interface ApiFieldError {
@@ -120,15 +225,20 @@ export type ClaimDoneFetch = (
 ) => Promise<Response>;
 
 export function claimDoneApiOrigin(): string {
-  const configured = process.env.NEXT_PUBLIC_CLAIMDONE_API_ORIGIN?.trim();
-  return normalizeConfiguredOrigin(configured || DEFAULT_CLAIMDONE_API_ORIGIN, "API");
+  const configured = process.env.NEXT_PUBLIC_CLAIMDONE_API_ORIGIN;
+  return normalizeConfiguredOrigin(
+    configured || DEFAULT_CLAIMDONE_API_ORIGIN,
+    "API",
+    DEFAULT_CLAIMDONE_API_ORIGIN,
+  );
 }
 
 export function claimDonePortalOrigin(): string {
-  const configured = process.env.NEXT_PUBLIC_CLAIMDONE_PORTAL_ORIGIN?.trim();
+  const configured = process.env.NEXT_PUBLIC_CLAIMDONE_PORTAL_ORIGIN;
   return normalizeConfiguredOrigin(
     configured || DEFAULT_CLAIMDONE_PORTAL_ORIGIN,
     "portal",
+    DEFAULT_CLAIMDONE_PORTAL_ORIGIN,
   );
 }
 
@@ -160,12 +270,11 @@ export async function createAndSubmitIntake(
       { ...submission, expectedVersion: created.version },
       fetcher,
     );
-    lifecycle.onCaseReleased?.(created.caseId);
     return response;
   } catch (primaryError) {
     try {
       await deleteAuthoritativeCase(created.caseId, fetcher);
-      lifecycle.onCaseReleased?.(created.caseId);
+      lifecycle.onCaseCleaned?.(created.caseId);
     } catch (cleanupError) {
       throw new ClaimDonePendingCleanupError(
         created.caseId,
@@ -574,21 +683,56 @@ function parseGateHistory(value: unknown): readonly GateDecision[] {
   return value.map((item, index) => {
     const gate = asRecord(item);
     const expectedGateId = FLOW_GATE_IDS[index];
+    if (!gate || !hasExactKeys(gate, GATE_DECISION_KEYS)) {
+      throw invalidResponse(`The ${expectedGateId ?? "unknown"} gate decision is not closed.`);
+    }
+    const reasonCodes = gate.reasonCodes;
+    const evidenceRefs = gate.evidenceRefs;
     if (
-      !gate ||
       gate.gateId !== expectedGateId ||
       gate.contractVersion !== "1.0.0" ||
-      typeof gate.decidedAt !== "string" ||
-      !Array.isArray(gate.evidenceRefs) ||
-      !gate.evidenceRefs.every((reference) => typeof reference === "string") ||
+      !isWireAwareDatetime(gate.decidedAt) ||
+      !Array.isArray(evidenceRefs) ||
+      !evidenceRefs.every(
+        (reference) =>
+          typeof reference === "string" && IDENTIFIER_PATTERN.test(reference),
+      ) ||
       typeof gate.passed !== "boolean" ||
       typeof gate.deterministicPassed !== "boolean" ||
       typeof gate.modelBlocked !== "boolean" ||
-      (gate.passed && (!gate.deterministicPassed || gate.modelBlocked)) ||
-      !Array.isArray(gate.reasonCodes) ||
-      !gate.reasonCodes.every(isGateReasonCode)
+      !Array.isArray(reasonCodes) ||
+      !reasonCodes.every(isGateReasonCode)
     ) {
       throw invalidResponse(`The ${expectedGateId ?? "unknown"} gate decision is invalid.`);
+    }
+    const canonicalReasons = reasonCodes as GateReasonCode[];
+    const reasonsAreUnique = new Set(canonicalReasons).size === canonicalReasons.length;
+    const reasonsBelongToGate = canonicalReasons.every((reason) =>
+      reason.startsWith(`${expectedGateId}_`),
+    );
+    const modelReasonPresent = canonicalReasons.includes("G3_MODEL_UNCERTAIN");
+    const modelBlockIsCanonical = gate.modelBlocked
+      ? expectedGateId === "G3" && modelReasonPresent
+      : !modelReasonPresent;
+    const deterministicReasons = canonicalReasons.filter(
+      (reason) => reason !== "G3_MODEL_UNCERTAIN",
+    );
+    const deterministicFlagMatches =
+      gate.deterministicPassed === (deterministicReasons.length === 0);
+    const passedFlagMatches =
+      gate.passed === (gate.deterministicPassed && !gate.modelBlocked);
+    const reasonsMatchPass = gate.passed === (canonicalReasons.length === 0);
+    if (
+      !reasonsAreUnique ||
+      !reasonsBelongToGate ||
+      !modelBlockIsCanonical ||
+      !deterministicFlagMatches ||
+      !passedFlagMatches ||
+      !reasonsMatchPass
+    ) {
+      throw invalidResponse(
+        `The ${expectedGateId ?? "unknown"} gate decision violates authority semantics.`,
+      );
     }
     return gate as unknown as GateDecision;
   });
@@ -715,10 +859,19 @@ function isPortalState(value: unknown): value is PortalState {
 }
 
 function isGateReasonCode(value: unknown): value is GateReasonCode {
-  return typeof value === "string" && /^G(?:[0-9]|1[01])_[A-Z0-9_]+$/.test(value);
+  return typeof value === "string" && GATE_REASON_CODE_SET.has(value as GateReasonCode);
 }
 
-function normalizeConfiguredOrigin(value: string, label: string): string {
+function normalizeConfiguredOrigin(
+  value: string,
+  label: string,
+  allowedOrigin: string,
+): string {
+  if (value !== allowedOrigin) {
+    throw clientInputError(
+      `The configured ${label} value must be the approved loopback origin.`,
+    );
+  }
   let url: URL;
   try {
     url = new URL(value);
@@ -731,11 +884,34 @@ function normalizeConfiguredOrigin(value: string, label: string): string {
     url.password !== "" ||
     (url.pathname !== "" && url.pathname !== "/") ||
     url.search !== "" ||
-    url.hash !== ""
+    url.hash !== "" ||
+    url.origin !== allowedOrigin
   ) {
-    throw clientInputError(`The configured ${label} value must be an exact HTTP origin.`);
+    throw clientInputError(
+      `The configured ${label} value must be the approved loopback origin.`,
+    );
   }
   return url.origin;
+}
+
+function hasExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  expectedKeys: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+}
+
+function isWireAwareDatetime(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    WIRE_AWARE_DATETIME_PATTERN.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
 }
 
 // These imports are deliberately type-checked against the canonical contract.

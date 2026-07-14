@@ -146,13 +146,19 @@ describe("intake reducer authority and validation", () => {
       type: "BEGIN_SERVER_REQUEST",
     });
     expect(submitting.stage).toBe("intake");
-    const clarified = intakeReducer(submitting, {
+    const owned = intakeReducer(submitting, {
+      caseId: "case-intake-001",
+      token: 1,
+      type: "SERVER_CASE_CREATED",
+    });
+    const clarified = intakeReducer(owned, {
       response: awaitingResponse(),
       token: 1,
       type: "SERVER_SUCCEEDED",
     });
     expect(clarified.stage).toBe("awaiting_clarification");
     expect(clarified.serverAuthority?.requestId).toBe("request-intake-001");
+    expect(clarified.pendingCaseId).toBeNull();
   });
 
   it("never starts an authoritative request when local G0 or G1 preflight fails", () => {
@@ -218,7 +224,12 @@ describe("intake reducer authority and validation", () => {
       token: 3,
       type: "BEGIN_SERVER_REQUEST",
     });
-    const clarified = intakeReducer(submitting, {
+    const owned = intakeReducer(submitting, {
+      caseId: "case-intake-001",
+      token: 3,
+      type: "SERVER_CASE_CREATED",
+    });
+    const clarified = intakeReducer(owned, {
       response: awaitingResponse(),
       token: 3,
       type: "SERVER_SUCCEEDED",
@@ -232,26 +243,116 @@ describe("intake reducer authority and validation", () => {
     expect(edited.serverAuthority).toBeNull();
   });
 
-  it("ignores stale responses after a newer request token", () => {
+  it("rejects intake mutations and a second case until owned cleanup completes", () => {
     const first = intakeReducer(validTextState(), {
       kind: "intake",
       token: 10,
       type: "BEGIN_SERVER_REQUEST",
     });
-    const second = intakeReducer(first, {
+    const owned = intakeReducer(first, {
+      caseId: "case-intake-001",
+      token: 10,
+      type: "SERVER_CASE_CREATED",
+    });
+    const edited = intakeReducer(owned, {
+      type: "SET_TEXT_STATEMENT",
+      value: "A racing edit",
+    });
+    const dropped = intakeReducer(owned, {
+      error: null,
+      images: [image("racing-drop")],
+      type: "ADD_IMAGES",
+    });
+    const reset = intakeReducer(owned, { type: "RESET" });
+    const secondRequest = intakeReducer(owned, {
       kind: "intake",
       token: 11,
       type: "BEGIN_SERVER_REQUEST",
     });
-    const stale = intakeReducer(second, {
-      response: awaitingResponse(),
+    const secondCase = intakeReducer(owned, {
+      caseId: "case-intake-002",
       token: 10,
+      type: "SERVER_CASE_CREATED",
+    });
+    const stale = intakeReducer(owned, {
+      response: awaitingResponse(),
+      token: 11,
       type: "SERVER_SUCCEEDED",
     });
 
+    expect(edited).toBe(owned);
+    expect(dropped).toBe(owned);
+    expect(reset).toBe(owned);
+    expect(secondRequest).toBe(owned);
+    expect(secondCase).toBe(owned);
     expect(stale.stage).toBe("intake");
-    expect(stale.serverRequest?.token).toBe(11);
+    expect(stale.serverRequest?.token).toBe(10);
+    expect(stale.pendingCaseId).toBe("case-intake-001");
     expect(stale.serverAuthority).toBeNull();
+
+    const failed = intakeReducer(owned, {
+      code: "INTAKE_FAILED",
+      currentVersion: 2,
+      errors: [],
+      message: "The intake failed and cleanup must finish.",
+      reasonCodes: ["G0_IMAGE_TYPE_INVALID"],
+      token: 10,
+      type: "SERVER_FAILED",
+    });
+    const retry = intakeReducer(failed, {
+      kind: "intake",
+      token: 11,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const prematureSecondCase = intakeReducer(retry, {
+      caseId: "case-intake-002",
+      token: 11,
+      type: "SERVER_CASE_CREATED",
+    });
+    const cleaned = intakeReducer(retry, {
+      caseId: "case-intake-001",
+      type: "SERVER_CASE_CLEANED",
+    });
+    const replacement = intakeReducer(cleaned, {
+      caseId: "case-intake-002",
+      token: 11,
+      type: "SERVER_CASE_CREATED",
+    });
+
+    expect(prematureSecondCase.pendingCaseId).toBe("case-intake-001");
+    expect(cleaned.pendingCaseId).toBeNull();
+    expect(replacement.pendingCaseId).toBe("case-intake-002");
+  });
+
+  it("rejects intake mutations while a clarification answer is pending", () => {
+    const intakeRequest = intakeReducer(validTextState(), {
+      kind: "intake",
+      token: 20,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const owned = intakeReducer(intakeRequest, {
+      caseId: "case-intake-001",
+      token: 20,
+      type: "SERVER_CASE_CREATED",
+    });
+    const clarified = intakeReducer(owned, {
+      response: awaitingResponse(),
+      token: 20,
+      type: "SERVER_SUCCEEDED",
+    });
+    const answering = intakeReducer(clarified, {
+      kind: "clarification",
+      token: 21,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+
+    expect(
+      intakeReducer(answering, {
+        type: "SET_TEXT_STATEMENT",
+        value: "A racing clarification edit",
+      }),
+    ).toBe(answering);
+    expect(intakeReducer(answering, { type: "RESET" })).toBe(answering);
   });
 
   it("treats an in-flight image check as pending, not as a fabricated type failure", () => {

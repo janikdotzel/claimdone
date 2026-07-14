@@ -70,6 +70,7 @@ export type IntakeState = Readonly<{
   disclosureAccepted: boolean;
   images: ReadonlyArray<IntakeImage>;
   inputRevision: number;
+  pendingCaseId: string | null;
   serverAuthority: IntakeFlowResponse | null;
   serverError: ServerErrorState | null;
   serverRequest: ServerRequest | null;
@@ -123,6 +124,15 @@ export type IntakeAction =
       kind: ServerRequestKind;
       token: number;
       type: "BEGIN_SERVER_REQUEST";
+    }>
+  | Readonly<{
+      caseId: string;
+      token: number;
+      type: "SERVER_CASE_CREATED";
+    }>
+  | Readonly<{
+      caseId: string;
+      type: "SERVER_CASE_CLEANED";
     }>
   | Readonly<{
       response: IntakeFlowResponse;
