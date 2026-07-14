@@ -110,6 +110,7 @@ export interface EvalExpectation {
 }
 
 export interface EvalInput {
+  readonly completedClarificationRounds: number;
   readonly fixtureIds: ReadonlyArray<string>;
   readonly language: "de" | "en";
   readonly portalVariant: "A" | "B";

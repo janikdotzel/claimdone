@@ -11,8 +11,10 @@ from pydantic import ValidationError
 
 from claimdone_api.contracts import EvalCase
 from claimdone_api.contracts.enums import (
+    AllowedTool,
     CaseState,
     GateId,
+    GateReasonCode,
     RequiredClaimField,
     VerificationState,
 )
@@ -82,6 +84,8 @@ def _validate_case(case: EvalCase) -> None:
         raise DatasetValidationError(f"{case.eval_id}: tags must be unique")
     if any(not fixture_id.startswith("synthetic-") for fixture_id in case.input.fixture_ids):
         raise DatasetValidationError(f"{case.eval_id}: fixture IDs must use the synthetic- prefix")
+    if len(set(case.input.fixture_ids)) != len(case.input.fixture_ids):
+        raise DatasetValidationError(f"{case.eval_id}: fixture IDs must be unique")
 
     allowed_fields = [fact.field for fact in case.expectation.allowed_facts]
     if len(set(allowed_fields)) != len(allowed_fields):
@@ -95,6 +99,39 @@ def _validate_case(case: EvalCase) -> None:
     portal_fields = [value.field for value in case.expectation.expected_portal_values]
     if len(set(portal_fields)) != len(portal_fields):
         raise DatasetValidationError(f"{case.eval_id}: portal fields must be unique")
+    source_catalog = set(case.input.fixture_ids)
+    for portal_value in case.expectation.expected_portal_values:
+        if len(set(portal_value.source_refs)) != len(portal_value.source_refs):
+            raise DatasetValidationError(
+                f"{case.eval_id}: portal source refs must be unique per value"
+            )
+        if not set(portal_value.source_refs) <= source_catalog:
+            raise DatasetValidationError(
+                f"{case.eval_id}: portal source refs must resolve to input fixture IDs"
+            )
+
+    clarification_limit_expected = any(
+        decision.gate_id is GateId.G5_COMPLETENESS
+        and GateReasonCode.G5_CLARIFICATION_LIMIT in decision.reason_codes
+        for decision in case.expectation.expected_gate_decisions
+    )
+    if clarification_limit_expected and case.input.completed_clarification_rounds != 3:
+        raise DatasetValidationError(
+            f"{case.eval_id}: clarification limit requires three completed rounds"
+        )
+    if case.input.completed_clarification_rounds == 3:
+        if case.expectation.expected_clarification is not None:
+            raise DatasetValidationError(
+                f"{case.eval_id}: exhausted clarification budget cannot expect another question"
+            )
+        if (
+            AllowedTool.ASK_CLARIFICATION in case.expectation.allowed_tools
+            or AllowedTool.ASK_CLARIFICATION
+            in case.expectation.expected_tool_sequence
+        ):
+            raise DatasetValidationError(
+                f"{case.eval_id}: exhausted clarification budget cannot allow another question"
+            )
 
     if case.expectation.expected_final_state is CaseState.REVIEW:
         if case.expectation.expected_missing_fields:
