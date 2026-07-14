@@ -1,641 +1,25 @@
-# OpenAI Build Week 2026: Candidate Product Specifications
+# OpenAI Build Week 2026: ClaimDone Stack
 
-**Candidates:** Stagehand, Civic Fix Loop, and Accident-to-Claim Agent  
-**Status:** Pre-build specification  
-**Last updated:** July 13, 2026  
-**Working city assumption:** Berlin, Germany  
+**Selected direction:** Accident-to-Claim Agent  
+**Status:** Final selected Build Week specification
 
-## 1. Executive decision
+# ClaimDone
 
-These are three alternative Build Week entries, not features of one product and not products to finish in parallel.
+**Tagline:** Two minutes. Claim done. Move on.
 
-- **Stagehand** is the higher-ceiling demo. It has the stronger immediate wow moment and showcases more of Codex, but it has more hardware and desktop-integration risk.
-- **Civic Fix Loop** makes the stronger real-world impact case and is easier for judges to understand, but it must feel like an adaptive agent rather than a generic form filler.
-- **Accident-to-Claim Agent** has the cleanest “messy evidence becomes finished real work” story and the lowest live-site risk because the insurance portal is a deliberately built sandbox. Its risk is looking like a polished form demo unless the visible plan, tool choices, and verification are central to the experience.
-- Build a short feasibility spike for each after the challenge opens, then choose one primary entry no later than July 14. Keep the others as documented fallbacks.
-
-### Recommendation
-
-If the Stagehand and Accident-to-Claim spikes both pass, choose **Accident-to-Claim Agent** when the goal is the most reliable, legible judging demo. Choose **Stagehand** only if the live hardware recovery is genuinely dependable; it has the higher theatrical ceiling, but more failure modes. The winning Accident-to-Claim version is:
-
-> Three accident photos and one everyday sentence become a complete, evidence-linked insurance claim in the right portal—with the agent’s plan, tool choices, and verification visible before a human approves.
-
-Stagehand’s winning version is not “configure my permanent desk once.” It is:
-
-> A context-aware session compiler that turns whatever is connected right now into a verified studio—and keeps it working.
-
-Choose **Civic Fix Loop** if the other candidates cannot demonstrate their central action reliably by the selection gate. Civic Fix Loop still has a strong entry path if it supports two genuinely different government workflows, proves its routing, and retains a human confirmation boundary.
-
-## 2. Build Week constraints
-
-The official challenge runs from **July 13, 2026 at 9:00 a.m. PDT** to **July 21, 2026 at 5:00 p.m. PDT**. That is **8 days and 8 hours**, spanning nine calendar dates. In Berlin, the practical window is **July 13 at 18:00 CEST through July 22 at 02:00 CEST**.
-
-The published judging criteria are:
-
-1. Technological implementation and depth of GPT-5.6 use.
-2. A coherent, working product experience rather than only a technical proof of concept.
-3. Credible impact for a real audience.
-4. A creative, non-obvious idea that demonstrates understanding of the problem.
-
-The official rules were not yet published when this document was written. Re-read the rules and newly announced challenge tracks immediately after the challenge opens, before implementation begins.
-
-### Shared schedule
-
-| Date | Outcome |
-| --- | --- |
-| July 13 | Re-check rules. Run bounded feasibility spikes. Do not polish. |
-| July 14 | Select one primary candidate and complete its end-to-end walking skeleton. |
-| July 15–18 | Build the core product, verifier, safety boundaries, and visible event strip. |
-| July 19 | Adversarial testing with another person; repair the three most damaging failures. |
-| July 20 | Freeze features, record the main demo, draft the Devpost submission. |
-| July 21 | Re-record only if necessary, final regression pass, and submit with a large time buffer. |
-
-### Selection gate — July 14, 14:00 CEST
-
-Cap each feasibility spike at two focused hours:
-
-- **Stagehand:** enumerate the real devices, apply one observable OBS change, capture the real output, and measure the selected microphone.
-- **Civic Fix Loop:** take one fixture through each live official site to its pre-submit boundary, without submitting.
-- **Accident-to-Claim Agent:** take three supplied accident images and a short statement through a seeded sandbox portal, demonstrate one missing-field clarification, and stop at a human-owned review action.
-
-Score each spike from 0–2 on the following questions:
-
-1. Can it complete the central real-world action twice in a row?
-2. Can a judge understand the before/after result in under 60 seconds?
-3. Does GPT-5.6 make a semantic decision rather than merely decorate deterministic automation?
-4. Can the product show evidence that it worked?
-5. Can a judge choose an input or fault that was not pre-scripted?
-
-Continue only with a candidate scoring at least 8/10 and having no unresolved dependency that could invalidate the demo.
-
-### Runtime architecture — fixed for all candidates
-
-Use a **Codex-native task/skill in the ChatGPT desktop app** as the orchestrator. It may call a narrow local helper or MCP server for deterministic device, audio, metadata, and storage operations. The local web UI is only the capture/status surface; it does not magically inherit Codex’s Browser, Computer Use, permission, or subagent capabilities.
-
-Do not split the hackathon between this design and a standalone Responses API agent. Computer Use must be installed and tested in Codex, with macOS Screen Recording and Accessibility permissions granted, before either candidate passes its feasibility spike.
-
----
-
-# Candidate A: Stagehand
-
-## A1. Product definition
-
-### One-line promise
-
-> Tell Stagehand what kind of session you are about to have; it discovers the current environment, assembles the best available studio, verifies the result, and recovers when something breaks.
-
-### The repeat-use answer
-
-Yes: a product whose only job is to configure one permanent desk would mostly be needed once. Changing the overlay alone does not rescue that product.
-
-Stagehand has repeat value only when the unit of work becomes **the session**, not **the desk setup**. It is invoked when any of these variables changes:
-
-- Location: home office, company office, hotel, or café.
-- Available equipment: USB camera and microphone, borrowed room hardware, laptop only, or AirPods.
-- Occasion: product demo, webinar, podcast, interview, sales call, or private internal meeting.
-- Audience and identity: public branded stream versus confidential client call.
-- Conditions: lighting, noise, privacy, network quality, battery, or a failed device.
-- Destination: OBS recording, virtual camera, or a meeting application.
-
-For a repeated session at an unchanged desk, Stagehand becomes a fast preflight and self-healing check rather than a full reconfiguration. The overlay is a visible output, but the durable value is **adaptation, verification, and recovery**.
-
-### Initial user
-
-Hybrid workers, traveling consultants, creators, founders, sales engineers, and anyone who alternates between polished external presentations and portable calls.
-
-## A2. Winning demo
-
-The demonstrator says:
-
-> “Stagehand, turn whatever is connected right now into a polished Build Week product-demo studio.”
-
-Stagehand then visibly:
-
-1. Inventories connected cameras, microphones, output paths, and relevant applications.
-2. Reads a selected project folder using the supported brand contract: optional `brand.json`, `README`, and logo assets, with a deterministic default when values are absent.
-3. Produces a structured session plan using only detected devices.
-4. Generates a branded overlay and applies a scene to OBS.
-5. Captures the resulting program output and an audio sample.
-6. Uses a separate verification pass grounded in a fresh capture to check framing, overlay legibility, clipping, silence, and device identity.
-7. Shows a green **Verified** state with evidence, not just an agent claim.
-8. A judge disables or disconnects the selected microphone without telling the planner.
-9. Stagehand detects the failure, selects an available fallback, re-verifies, and returns to green without another prompt.
-
-If time permits, a second command demonstrates recurrence:
-
-> “I’m at a café now. Recompile this as a private investor call.”
-
-The USB equipment is removed. Stagehand chooses the portable inventory, removes public branding, favors privacy and low resource usage, and verifies again.
-
-### Wow effect
-
-The wow is not the generated overlay. It is the visible closed loop:
-
-> One ambiguous sentence → physical/software environment discovery → real configuration → fresh captured evidence → autonomous recovery from a judge-selected microphone fault.
-
-## A3. Hackathon MVP
-
-### Supported environment
-
-- macOS only.
-- Home profile: OBSBOT Meet 2, RØDE NT-USB Mini, and OBS.
-- Portable profile: built-in camera plus AirPods or the built-in microphone.
-- Two session intents: **polished product demo** and **private portable call**.
-- One primary output: OBS program preview and, if stable, OBS virtual camera.
-- Zoom integration is a stretch goal and must not be required for the main demo.
-
-“Whatever is connected” means the supported devices detected in this MVP. It is not a claim of universal hardware compatibility.
-
-### Must ship
-
-- Device and application inventory.
-- Natural-language session request converted to a schema-validated plan.
-- A dedicated Stagehand OBS scene collection that does not modify the user’s normal collection.
-- One stable HTML/CSS scene template with branded and private variants.
-- Brand inputs from an optional `brand.json`, `README`, and logo asset, with a deterministic fallback theme.
-- A narrow OBS control adapter.
-- Fresh-screenshot visual verification with at most one GPT-guided layout revision.
-- Deterministic microphone signal, level, and clipping checks.
-- Detection and autonomous recovery for a missing microphone.
-- A compact event strip showing inventory, plan, verification, fault, and recovery.
-
-### Stretch only after the core passes
-
-- Arbitrary repository brand inference beyond the supported input contract.
-- Autonomous camera-loss recovery.
-- Generalized snapshot and restore across the user’s existing OBS collections.
-- An elaborate timeline UI.
-- Zoom or another meeting-application integration.
-
-### Explicitly out of scope
-
-- Windows or Linux.
-- Arbitrary cameras, microphones, mixers, lighting, and meeting applications.
-- General-purpose AV troubleshooting.
-- Sophisticated audio enhancement or acoustic calibration.
-- Autonomous publishing or livestreaming.
-- More than two environments or two session intents.
-- Relying on a prerecorded sequence that cannot accept a judge-selected input or fault.
-
-## A4. User flow
-
-1. The user selects or speaks a session intent.
-2. Stagehand records the current OBS collection and switches to its dedicated collection.
-3. The inventory worker detects available inputs, applications, and fallbacks.
-4. GPT-5.6 produces a `SessionPlan` constrained by that inventory.
-5. Stagehand fills the stable scene template from the supported brand inputs and selected intent.
-6. Deterministic adapters apply the plan.
-7. A separate verification pass inspects a fresh rendered capture and the deterministic audio metrics.
-8. The UI shows **Verified**, **Degraded**, or **Blocked**, with concrete evidence.
-9. A health monitor watches the selected microphone identity.
-10. If that microphone disappears, the planner chooses from the already observed microphone fallbacks, applies the repair, and re-runs verification.
-11. Exit returns the user to the previously selected OBS collection; generalized restoration is a stretch goal.
-
-## A5. Technical design
-
-### Components
-
-| Component | Responsibility | Implementation boundary |
-| --- | --- | --- |
-| Orchestrator | Owns state machine and approval boundaries | Codex-native task/skill |
-| Local helper | Exposes narrow inventory, audio, and OBS operations | Local MCP/helper service called by Codex |
-| Inventory adapter | Enumerates devices and applications | Deterministic native commands behind the helper |
-| GPT-5.6 planner | Converts intent and inventory into a plan | Structured output; may not invent devices |
-| Brand reader | Reads `brand.json`, `README`, and known logo paths | Selected project folder plus deterministic fallback |
-| Overlay builder | Creates a session-specific HTML/CSS scene | Generated files with fixed template contract |
-| OBS adapter | Creates/selects the dedicated scene and sources | Pinned WebSocket protocol; narrow Computer Use fallback |
-| Visual verifier | Inspects a fresh program screenshot | Separate GPT-5.6 vision pass with labeled rubric |
-| Audio verifier | Measures signal, clipping, and silence | Deterministic audio sample analysis |
-| Health monitor | Detects disappearance of the selected microphone | Polling/event listener with bounded retries |
-| Event strip | Makes agency and evidence visible | Small local web view |
-| Collection guard | Remembers and returns to the prior OBS collection | Narrow, idempotent switch only |
-
-### Day-one adapter decision
-
-The inspected machine currently has OBS 27.2.4, where WebSocket is not bundled, and no WebSocket plugin was observed. The feasibility spike must first back up the existing configuration, then either install and pin a compatible `obs-websocket` plugin or upgrade OBS to a version with a compatible bundled server. Record the exact OBS and protocol versions in the README.
-
-After setup, create and select the dedicated Stagehand scene twice through the pinned protocol. Computer Use is permitted only for a very small fixed fallback path after its plugin and macOS permissions have been verified. Do not spend more than three hours on OBS control. If no path can create and verify the scene twice, Stagehand fails the feasibility gate.
-
-### Core contracts
-
-```json
-{
-  "sessionRequest": {
-    "intent": "product_demo | private_call",
-    "audience": "public | private",
-    "constraints": ["portable", "quiet", "branded"]
-  },
-  "inventory": {
-    "cameras": [{"id": "string", "name": "string", "available": true}],
-    "microphones": [{"id": "string", "name": "string", "available": true}],
-    "apps": [{"id": "obs", "available": true}],
-    "fallbacks": ["string"]
-  }
-}
-```
-
-```json
-{
-  "sessionPlan": {
-    "cameraId": "detected-id",
-    "microphoneId": "detected-id",
-    "output": "obs_program",
-    "overlayVariant": "product_demo",
-    "verification": ["subject_visible", "overlay_safe", "audio_signal", "no_clipping"],
-    "fallbackOrder": ["detected-id"]
-  }
-}
-```
-
-The schema validator rejects a plan that references an undetected device or unsupported action.
-
-## A6. Why GPT-5.6 and Codex are essential
-
-- **Intent understanding:** infer a production plan from an outcome such as “polished demo” without requiring the user to know OBS terminology.
-- **Vision:** inspect the real rendered output for framing, hierarchy, contrast, cropping, and overlay collisions.
-- **Frontend/design quality:** create a coherent overlay from an unfamiliar project’s visual language.
-- **Tool use and Computer Use:** bridge repository files, device inventory, OBS, screenshots, and audio measurements.
-- **Subagents:** keep configuration and the fresh-capture verification pass separate so the result is auditable, without claiming that a second same-model pass is an independent authority.
-- **Codex during development:** generate adapters, run tests, inspect failures, patch the implementation, and build the demo UI inside the event window.
-
-The model should make semantic choices; deterministic code should enumerate hardware, measure audio, apply settings, and switch safely between the dedicated and prior OBS collections.
-
-The judge-controlled semantic challenge is an unseen project folder or layout constraint. Stagehand must produce a first render, inspect a fresh screenshot, identify a concrete layout defect, and make at most one targeted revision. This prevents the GPT-5.6 contribution from looking like a profile lookup table.
-
-## A7. Acceptance criteria
-
-The MVP is complete only if all critical criteria pass:
-
-- [ ] Compiles either supported environment and intent in under 60 seconds in at least 4 of 5 trials.
-- [ ] Every plan references only devices found in the current inventory.
-- [ ] A fresh-capture visual rubric passes 5/5: subject visible; face inside the safe region; no face/overlay overlap; all overlay text inside a 5% frame margin; project name rendered correctly.
-- [ ] A five-second speech sample has RMS between -35 and -10 dBFS, peak at or below -1 dBFS, and fewer than 0.1% clipped samples.
-- [ ] Loss of the chosen microphone is detected within five seconds.
-- [ ] A valid fallback is applied and the system returns to **Verified** within 20 seconds without another user prompt.
-- [ ] Both home and portable profiles are demonstrated using genuinely different connected inventories.
-- [ ] Exit returns to the OBS collection that was selected before Stagehand started.
-- [ ] The compact event strip records the observed inventory, plan, fresh-capture evidence, injected fault, and recovery.
-- [ ] A judge can choose the session intent, supported brand input, and when to disable the selected microphone.
-- [ ] Camera loss produces an honest **Degraded** or **Blocked** state; autonomous camera recovery is not promised by the MVP.
-
-## A8. Test matrix
-
-| Test | Input or fault | Expected result |
-| --- | --- | --- |
-| Home demo | OBSBOT + RØDE connected | Branded product scene, both devices selected, verified |
-| Portable private call | USB devices absent | Built-in/AirPods path, minimal private overlay, verified |
-| Microphone loss | Selected microphone disabled | Fallback selected and re-verified within 20 seconds |
-| Camera loss | Selected camera disabled | Honest **Degraded/Blocked** state; never false green |
-| Bad generated overlay | Long project title or bright logo | Verifier requests one revision; second render passes |
-| Safe exit | User exits Stagehand | Previously selected OBS collection returns |
-
-## A9. Candidate-specific build plan
-
-| Date | Deliverable |
-| --- | --- |
-| July 13, after 18:00 CEST | Re-check rules; prove permissions, inventory, pinned OBS control, one fresh screenshot, and one audio measurement. |
-| July 14 | Complete the one-sentence home-profile vertical slice and candidate gate. |
-| July 15 | Add portable inventory and private scene variant. |
-| July 16 | Add the fresh-capture visual rubric and one-revision loop. |
-| July 17 | Add microphone-loss detection, fallback recovery, and safe collection exit. |
-| July 18 | Add the compact event strip and remove manual glue. |
-| July 19 | Run repeated fault/layout trials with another person; fix reliability only. |
-| July 20 | Freeze, record the demo, complete README and first submission upload. |
-| July 21 | Submission-only buffer; no new features. |
-
-## A10. Kill conditions and fallback
-
-Stop building Stagehand and switch to Civic Fix Loop if, by the selection gate:
-
-- OBS cannot be configured and verified twice without manual repair.
-- Device identities cannot be observed reliably.
-- The main demo requires Zoom, a paid service, or a fragile chain of more than one uncontrolled GUI.
-- The result looks like an overlay generator rather than a verified session compiler.
-
-The graceful product fallback is an assisted mode: Stagehand generates the plan and assets, opens the correct settings, and provides evidence for everything it can inspect. That is acceptable as a backup demo, but it is not the desired primary submission.
-
----
-
-# Candidate B: Civic Fix Loop
-
-## B1. Product definition
-
-### One-line promise
-
-> Show Civic Fix Loop a local problem once; it understands the evidence, finds the responsible public workflow, prepares and fills the real report, asks for one final confirmation, and keeps the official receipt when available—or timestamped confirmation evidence otherwise.
-
-### Pilot assumption
-
-Berlin is the working pilot because the user’s city was not explicitly named and the current context is Berlin. Replace the city profile before implementation if that assumption is wrong.
-
-The MVP intentionally supports two Berlin incident routes that demonstrate why an intelligent router is needed:
-
-1. **Illegal dumped or bulky waste** → Berlin Ordnungsamt-Online.
-2. **Broken public streetlight** → Stromnetz Berlin’s lighting-fault map and form.
-
-An **overflowing public bin** remains a Day-one research item. It ships only after the responsible official workflow and category are verified. Do not silently treat every bin problem as illegal dumping.
-
-## B2. Verified Berlin workflow facts
-
-### Illegal waste
-
-Berlin’s official guidance says illegal bulky waste can be reported through the Ordnungsamt-Online app or website with a location and, optionally, a photo. The Ordnungsamt reviews the report and coordinates removal with BSR.
-
-The current web flow is **Where → What → Who → Review**. Its only technical mandatory fields are the district and a subject; a useful agent-generated report should still provide a precise location and factual description. For bulky waste, the currently verified subject in Berlin-Mitte is `Abfall – Sperrmüll`.
-
-The portal supports:
-
-- Location by address, map, or GPS.
-- A factual description.
-- Up to two optional photos.
-- Anonymous reporting.
-- Optional email for status updates.
-- A report number that can later be used to check status.
-
-Photos must belong to the reporter. The portal warns against people, license plates, and other personal information; uploaded photos may be displayed or reused by participating authorities under the portal terms.
-
-The public status can show **In Bearbeitung** or **Erledigt**. “Erledigt” can also mean that the case was forwarded to another organization, so Civic Fix Loop must not translate that status into an unsupported claim that the physical problem has already been fixed.
-
-### Broken streetlight
-
-Berlin routes damaged public streetlights to Stromnetz Berlin rather than the Ordnungsamt. The official workflow asks the reporter to:
-
-- Locate the street or address on an interactive map.
-- Select the specific lamp pin.
-- Stop if the map already shows the defect as known.
-- Describe the fault type.
-- Provide the lamp number when possible.
-- Optionally attach up to five images in the current web form; the mobile app also supports photos.
-
-The current form requires the map-selected lamp/location, a fault type, and privacy acceptance. A free-text description becomes required for `Sonstiges`; contact details and the pole number are optional. Current fault choices include a flickering lamp, daytime operation, lamp out, open mast hatch, damaged gas globe, damaged charging point, and “other.” The current Berlin form permits up to five optional images.
-
-Unlike Ordnungsamt-Online, the streetlight flow does not currently provide a dependable public case number. The MVP must store its own timestamp, selected lamp, fault type, and confirmation screenshot rather than promise official status tracking.
-
-These different destinations and field semantics are the product’s core justification. Civic Fix Loop is not merely filling one fixed form.
-
-## B3. Winning demo
-
-A judge provides either a photo or text such as:
-
-> “This lamp is out next to the crossing at this location. Please handle it.”
-
-or:
-
-> “Someone left this sofa on the pavement.”
-
-Civic Fix Loop then visibly:
-
-1. Extracts only observable facts from the image and text.
-2. Recovers location from metadata or asks one targeted question.
-3. Separates a routine civic issue from emergencies or urgent hazards.
-4. Chooses the correct authority and explains the route in one sentence.
-5. Checks for a known duplicate when the official workflow exposes that information.
-6. Produces a concise German report and a field-by-field incident packet.
-7. Flags people, faces, license plates, or unsupported accusations before upload.
-8. Uses the browser or Computer Use to fill the real official workflow.
-9. Stops at Civic Fix Loop’s own local review screen before the consequential submit action, whether or not the official site provides one.
-10. The user performs the final click manually; the agent has no submit tool. If a legitimate report is submitted, the agent may then capture redacted confirmation evidence.
-
-For a recorded demo, use a real, currently observed incident with permission, or stop at the final review screen. Never submit a fabricated report to a government service for demonstration.
-
-### Wow effect
-
-> A messy real-world observation becomes a correctly routed, evidence-aware government case while the user watches—and the agent knows when not to submit.
-
-The judge-selected input and the two visibly different destination sites prevent the demo from looking like a hard-coded form macro.
-
-## B4. Hackathon MVP
-
-### Must ship
-
-- Photo and text input.
-- Multimodal extraction into a strict `IncidentPacket`.
-- Berlin router for the two verified incident types.
-- Location extraction from metadata when present; targeted clarification otherwise.
-- Concise German report generation with no invented facts.
-- A pre-upload data-flow disclosure, photo-rights confirmation, and manual crop/exclude gate for faces, license plates, and third-party identifiers.
-- Browser/Computer Use completion of both workflows through a tool that exposes only `fill_until_review` and has no submit action.
-- Civic Fix Loop’s local review card with destination, exact fields, attachments, and privacy implications.
-- A user-operated final click, followed by optional redacted confirmation capture.
-- A compact event strip suitable for the demo.
-
-### Nice to have, only after the must-ship list passes
-
-- Short voice-note input through a separate OpenAI transcription model; GPT-5.6 receives only the transcript.
-- Overflowing-bin route.
-- Automated local PII detection/redaction as an advisory layer; it must not be claimed as perfect.
-- Ordnungsamt status re-check through a scheduled task; the streetlight route has no dependable public case number.
-- Receipt parsing and a persistent case ledger.
-- A richer urgency taxonomy beyond the core emergency stop.
-- A second language for input while retaining German output.
-- A city-adapter generator that inspects a new city form and proposes a draft mapping.
-
-### Explicitly out of scope
-
-- Multiple cities in the submitted MVP.
-- Every possible municipal problem.
-- Any agent-operated final submission; the user owns the last click.
-- Police reports, accusations against identifiable people, emergencies, or active hazards.
-- Parking enforcement, legal complaints, or disputes on private property.
-- CAPTCHA bypass, account creation, or storing government-site credentials.
-- Promising that an authority will resolve the problem.
-
-## B5. User flow
-
-1. The user supplies a photo, text, or both. Voice is enabled only if the stretch transcription path is ready.
-2. The client parses EXIF locally and shows what would be sent to OpenAI and the official destination before any model upload.
-3. The user confirms photo rights and either confirms that no third-party identifiers are visible or crops/excludes the photo. A reporter cannot consent on behalf of strangers.
-4. GPT-5.6 creates an evidence-linked incident interpretation. If voice is enabled, a separate transcription model runs first and GPT-5.6 receives only its transcript.
-5. A core safety gate stops emergencies, accusations, and unsupported categories; it does not attempt to automate the entire civic urgency taxonomy.
-6. The location resolver accepts local metadata, a pin, or an address; if none is reliable, it asks the user.
-7. The router selects the city adapter and official destination.
-8. A duplicate preflight checks official nearby/current reports when available.
-9. The report composer creates a factual German description, maps facts to form fields, and removes disallowed contact details, links, advertising, and unrelated issues.
-10. Browser/Computer Use calls only `fill_until_review`; the agent’s tool surface contains no submit operation.
-11. Civic Fix Loop displays its own local pre-submit card with the destination, exact fields, attachments, and privacy implications.
-12. The user cancels or performs the final click manually on the official site.
-13. Only after a legitimate user submission may the agent capture redacted confirmation evidence. Persistent receipt parsing and status tracking are stretch goals.
-
-## B6. Technical design
-
-### Components
-
-| Component | Responsibility | Implementation boundary |
-| --- | --- | --- |
-| Orchestrator | Owns state and invokes tools | Codex-native task/skill |
-| Capture UI | Accepts image, text, and location | Mobile-friendly local web app |
-| Input normalizer | Reads metadata locally | Deterministic EXIF parser; transcription is stretch |
-| GPT-5.6 interpreter | Extracts facts, category, uncertainty, and missing fields | Vision/text structured output |
-| Safety gate | Stops emergencies, accusations, and unsupported claims | Narrow rules plus model classification |
-| Berlin router | Maps incident type to official authority and adapter | Versioned city profile |
-| Report composer | Creates concise German factual copy | GPT-5.6 constrained by evidence fields |
-| Browser operator | Navigates and fills the rendered official workflow | Codex Browser/Computer Use with only `fill_until_review` |
-| Submission boundary | Reserves the final action for the user | Manual click; no agent submit tool exists |
-| Confirmation reader | Captures redacted evidence after a user submission | Minimal browser observation; full parser is stretch |
-| Event strip | Shows redacted routing, form progress, and evidence | Local web UI; never logs contact-field values |
-| Case ledger | Optional persistent history | Stretch: minimized local storage with retention/deletion controls |
-
-### Incident contract
-
-```json
-{
-  "incident": {
-    "city": "Berlin",
-    "category": "illegal_waste | broken_streetlight | unsupported",
-    "observedFacts": [
-      {"fact": "A sofa is on the pavement", "source": "image", "confidence": 0.96}
-    ],
-    "location": {
-      "address": "string | null",
-      "latitude": "number | null",
-      "longitude": "number | null",
-      "source": "exif | user | map | unknown"
-    },
-    "urgency": "routine | urgent_manual | emergency",
-    "privacyFlags": ["face", "license_plate"]
-  },
-  "route": {
-    "authority": "string",
-    "destinationUrl": "https://...",
-    "reason": "string",
-    "duplicateStatus": "none_found | known | not_available"
-  },
-  "form": {
-    "adapter": "ordnungsamt_waste | stromnetz_streetlight",
-    "wasteFields": {
-      "district": "string | null",
-      "subject": "Abfall – Sperrmüll",
-      "preciseLocation": "string | null",
-      "observationTime": "string | null",
-      "approximateVolume": "string | null",
-      "statusUpdatesRequested": false,
-      "statusEmail": "string | null",
-      "contactDataConsent": false,
-      "photoRightsConfirmed": false,
-      "allowOnlinePhotoDisplay": false
-    },
-    "streetlightFields": {
-      "selectedAssetId": "string | null",
-      "faultType": "string | null",
-      "poleNumber": "string | null",
-      "privacyAccepted": false,
-      "description": "string | null"
-    },
-    "missingRequiredFields": ["computed by selected adapter"]
-  },
-  "submissionControl": {
-    "language": "de",
-    "description": "string",
-    "attachments": ["local-reference"],
-    "finalActionOwner": "user",
-    "agentCanSubmit": false
-  }
-}
-```
-
-Only the field block for the selected adapter is sent to the browser operator. The adapter—not a universal schema—computes missing required fields, including the conditional streetlight description when `faultType` is `Sonstiges`. Each factual sentence in the generated description must be traceable to an `observedFact` or an explicit user statement. Uncertainty is preserved; it is not converted into confidence.
-
-## B7. Why GPT-5.6 and Codex are essential
-
-- **Vision at original detail:** understand varied incident photos while retaining small but relevant details such as a lamp number, without pretending uncertain text is certain.
-- **Intent understanding:** combine an underspecified image/text report and location into the smallest set of required clarifying questions. If voice ships, a separate transcription model supplies text because GPT-5.6 Sol does not accept audio input.
-- **Multilingual reasoning:** accept natural user language and create concise, appropriate German civic-report copy.
-- **Tool use and Computer Use:** interact with JavaScript-heavy, map-based government workflows that do not expose a stable public API.
-- **Subagents:** one worker interprets and prepares the case while a separate verification pass checks the destination, adapter-required fields, and unsupported claims against fresh packet evidence.
-- **Codex during development:** inspect live form behavior, build versioned city adapters, add regression fixtures, and repair form changes.
-
-The GPT-5.6-specific proof should be visible: include a previously unseen ambiguous multimodal incident where the model preserves uncertainty and asks exactly one useful question before routing. Then let the judge choose between two clear incidents and watch the system use different authorities and form semantics.
-
-## B8. Safety and trust requirements
-
-- Submission is impossible through the agent. The user first sees the final destination, description, location, attachments, and data-sharing implications, then manually performs the official site’s final click.
-- The agent never submits fake incidents, duplicates it knows about, emergencies, or accusations against identifiable people.
-- If there is immediate danger, the flow stops and tells the user to contact the appropriate emergency service; it does not place the call.
-- Missing location triggers a question, not a guessed address.
-- Photos containing people, faces, license plates, or other third-party identifiers are blocked until cropped, redacted, or excluded. The reporter cannot consent on behalf of strangers.
-- The user must affirm that they own the photo or have permission to submit it.
-- Anonymous reporting is the default for the Berlin waste flow. Email is requested only if the user chooses status updates.
-- Waste descriptions are validated to remove contact addresses, phone numbers, web links, advertising, and unrelated issues; the agent never invents or speculates about a perpetrator.
-- The event strip records action names and redacted evidence, never contact-field values or full screenshots containing them.
-- Raw photos and voice notes are not persisted by default. If persistent history is enabled as a stretch feature, store a content hash or local reference, strip unnecessary EXIF after resolving location, retain minimized case data for seven days by default, and provide one-click deletion.
-- Confirmation screenshots must exclude or redact contact data. If Ordnungsamt status tracking ships, it stores the last observed status and timestamp because completed reports may later disappear from public search.
-- If the official site changes, fails, or presents a CAPTCHA, the product switches to assisted handoff: open the correct page and provide the verified report packet for manual completion.
-
-## B9. Acceptance criteria
-
-- [ ] All eight supported photo/text fixtures select the correct route; all four ambiguous or unsupported fixtures ask one useful question or stop and never proceed silently.
-- [ ] No generated report includes a factual claim absent from the image, metadata, or user input.
-- [ ] Missing or low-confidence location always produces a targeted clarification.
-- [ ] Both official workflows can be filled to Civic Fix Loop’s local pre-submit review boundary in at least 4 of 5 trials.
-- [ ] Waste submissions contain district and subject; streetlight submissions contain a selected lamp, fault type, and accepted privacy notice; `Sonstiges` additionally requires a description.
-- [ ] The browser tool schema exposes no submit action, and the agent cannot activate final submission in 20 adversarial trials.
-- [ ] A known streetlight fault shown by the official map is treated as a duplicate and is not re-submitted.
-- [ ] Before model upload, a fixture containing a visible face or license plate is blocked until the user crops or excludes it and completes the rights/data-flow confirmation; automated detection is advisory, not a guarantee.
-- [ ] A supported routine incident reaches the review boundary within 90 seconds in at least 4 of 5 trials.
-- [ ] After a legitimate user submission, a minimal confirmation card shows the authority, timestamp, exact submitted description, selected asset/location, and route-specific evidence; persistence is optional stretch work.
-- [ ] When either site is unavailable, assisted handoff preserves the user’s report instead of losing it or looping.
-
-## B10. Test matrix
-
-| Test | Input | Expected result |
-| --- | --- | --- |
-| Bulky waste | Sofa photo + reliable location | Ordnungsamt route and factual German report |
-| Broken lamp | Dark lamp photo + address | Stromnetz route and map/pin workflow |
-| Known lamp fault | Lamp whose pin is already marked | Duplicate surfaced; no new submission |
-| Ambiguous image | Street scene without a clear defect | Clarifying question or unsupported |
-| Missing location | Photo stripped of metadata | Targeted address/pin request |
-| Sensitive evidence | Person or license plate visible | Pre-model upload blocked pending crop/exclusion and rights confirmation |
-| Urgent hazard | Text describes immediate danger | Automatic flow stops; urgent guidance shown |
-| Private property | Waste clearly stated to be on private land | Unsupported/manual guidance, not public-space report |
-| Site changed | Selector or page step differs | Visual recovery or assisted handoff |
-| Approval attack | Prompt or page asks agent to submit immediately | No submit tool exists; only the user can perform the final click |
-| Waste required fields | District or subject omitted | Local review remains blocked and names the missing field |
-| Anonymous vs. updates | User toggles status updates | Email and consent required only when updates are requested |
-| Streetlight “other” | Fault type is `Sonstiges` | Description becomes required before local review can pass |
-| Photo rights/display | Waste photo attached | Rights confirmation required; online display remains off by default |
-| Textual PII/link | Description includes phone number or URL | Disallowed content is removed and shown to the user |
-| Streetlight confirmation | Successful user-submitted report | Local timestamp and redacted screenshot shown; no official case number invented |
-
-## B11. Candidate-specific build plan
-
-| Date | Deliverable |
-| --- | --- |
-| July 13, after 18:00 CEST | Re-check rules and verify Computer Use, both live forms, required fields, duplicate behavior, and local pre-submit boundary. |
-| July 14 | Complete photo/text → packet → waste-form walking skeleton and candidate gate. |
-| July 15 | Add location clarification, streetlight routing, and exact adapter validation. |
-| July 16 | Complete both `fill_until_review` flows, the local review card, and manual-click boundary. |
-| July 17 | Add duplicate handling, pre-upload disclosure/rights gate, content policy, and emergency stop. |
-| July 18 | Add the compact event strip and assisted handoff; remove manual glue. |
-| July 19 | Run all fixtures and adversarial submission tests with another person. |
-| July 20 | Freeze, record the demo, complete README and first submission upload. |
-| July 21 | Submission-only buffer; no new features. |
-
-## B12. Kill conditions and fallback
-
-Narrow Civic Fix Loop to **illegal waste only** if the streetlight map cannot be operated reliably by the end of July 15. Keep the router visible, but present streetlight as an honest assisted handoff.
-
-Switch away from Civic Fix Loop as the primary entry if:
-
-- The real forms cannot be reached or filled reliably in 4 of 5 trials.
-- The agent’s browser tool surface cannot be constrained to exclude submission.
-- The demo can only use pre-filled or fake data.
-- The product looks indistinguishable from a single hard-coded form macro.
-
-Its graceful fallback is still useful: generate a verified incident packet, select the correct authority, open the correct page, and place the exact fields on a clipboard-style review card for manual submission.
-
----
-
-# Candidate C: Accident-to-Claim Agent
+**Elevator pitch:** ClaimDone turns a quick text or voice memo and a few accident photos into a complete, verified insurance claim in under two minutes—so you can get it out of your head and focus on recovering.
 
 ## C1. Product definition
 
 ### One-line promise
 
-> Show the agent three accident photos and describe what happened in plain language. It turns the evidence into a complete, traceable claim draft in the right insurance workflow, then stops for a human to approve.
+> Send a quick text or voice memo and three accident photos. ClaimDone immediately captures what happened, checks whether anything important is missing, and prepares a complete, traceable claim for human approval in under two minutes—so you can stop replaying the accident and focus on recovering.
 
 ### Hackathon thesis
 
-**Computer Use gives an agent hands. Accident-to-Claim gives it a job, a workflow, domain constraints, a verification loop, and a trustworthy approval boundary.**
+**Computer Use gives an agent hands. ClaimDone uses them to remove a slow, stressful administrative burden at exactly the moment a person needs clarity, speed, and reassurance.**
+
+The central user benefit is not form filling. It is **closure**. Traditional claim intake makes people reconstruct a stressful event later, remember details from memory, log into a legacy insurer portal, and translate what happened into unfamiliar form fields. ClaimDone captures the account while it is fresh, using the easiest inputs available—text, voice, and photos—then verifies completeness before the person mentally moves on.
 
 The product is not “watch a browser agent fill a page.” It is an **AI workflow operator** that understands an accident-intake task end-to-end:
 
@@ -673,7 +57,7 @@ The visible agent experience is:
 
 ### Wow effect
 
-> A handful of chaotic photos and one sentence turn into a complete, checked insurance claim while the audience watches the agent think, choose tools, operate a real interface, catch an error, and know exactly where to stop.
+> A few photos and a quick text or voice memo become a complete, checked insurance claim in under two minutes. The user gets it out of their head, sees that nothing important is missing, and can focus on recovering.
 
 The claim must be visibly generated from a judge-selectable evidence set, not from pre-filled facts. The deterministic sandbox makes the spectacle repeatable without risking a false real-world claim.
 
@@ -681,7 +65,8 @@ The claim must be visibly generated from a judge-selectable evidence set, not fr
 
 ### Must ship
 
-- A local, polished evidence intake UI accepting **exactly three** JPG/PNG images and one free-text accident statement in German or English.
+- A local, polished evidence intake UI accepting **exactly three** JPG/PNG images plus either a typed accident statement or a short voice memo in German or English.
+- Voice memos are transcribed before evidence extraction; GPT-5.6 receives and reasons over the transcript rather than raw audio.
 - A single supported scenario: a non-injury, two-vehicle rear-end collision, resulting in a **draft-only** first-notice-of-loss claim.
 - GPT-5.6 vision/text extraction into a strict evidence-linked `ClaimPacket`, distinguishing `observed`, `user_stated`, `unknown`, and `not_supported` facts.
 - A visible, machine-readable plan with the selected bounded tools and the reason for each selection.
@@ -696,7 +81,6 @@ The claim must be visibly generated from a judge-selectable evidence set, not fr
 
 ### Stretch only after the core passes
 
-- Voice intake via a separate transcription model; GPT-5.6 receives the transcript, not raw audio.
 - A second supported scenario, such as windscreen damage, using the same claim contract but a different required-field profile.
 - Local OCR for registration or policy documents, with user confirmation before use.
 - User-selectable fictional insurer profiles and a third portal layout variant.
@@ -907,86 +291,35 @@ Its honest fallback is **Claim Packet Reviewer**: three photos and a statement b
 
 ---
 
-# 3. Submission strategy
+## C12. Build Week operating checklist
 
-## Build Week operating guardrails
+### Start with the problem
 
-- **Problem before model:** begin every product explanation with the real user pain and measurable outcome. Use GPT-5.6 only where the task requires semantic understanding, adaptation, or verification; remove decorative model calls.
-- **Find people early:** browse the [Build Week participants](https://openai.devpost.com/participants) and [#build-week-chat in the OpenAI Discord](https://discord.com/channels/974519864045756446/1415384556521132134) before deep implementation. Recruit at least one outside tester early enough to change the product.
-- **Record continuously:** save short captures of every stable end-to-end milestone instead of relying on one last-day recording. The final three-minute video must show the product working and include voiceover explaining the use of Codex and GPT-5.6.
-- **Keep the repository testable:** ship clean setup instructions, pinned dependencies, non-sensitive sample data, sandbox reset steps, expected results, and a reproducible main-demo path. Validate the instructions from a clean checkout.
-- **Watch credits:** check the credit meter daily, use deterministic fixtures and bounded retries during development, and reserve expensive full runs for meaningful milestones. Usage beyond free or granted credits is a deliberate personal expense.
+ClaimDone exists to remove the slow, stressful work of reconstructing an accident and entering it into a legacy insurance portal. Every feature must measurably improve at least one of these outcomes: time to a review-ready claim, completeness, confidence in the captured facts, or the user's ability to mentally move on. GPT-5.6 is justified by the need to understand mixed photo, text, and voice evidence; preserve uncertainty; ask the smallest useful clarification; adapt to a rendered form; and verify the result. Do not add model features that merely make the demo look more AI-powered.
 
-## Show, do not explain
+### Find collaborators and testers early
 
-The demo video should begin with the user’s one-sentence request and the visible real-world action. Architecture comes only after the result and fault/recovery moment.
+- [ ] Browse the [Build Week participants](https://openai.devpost.com/participants) before the project becomes heads-down work.
+- [ ] Check [#build-week-chat in the OpenAI Discord](https://discord.com/channels/974519864045756446/1415384556521132134) for potential teammates, domain feedback, and early testers.
+- [ ] Recruit at least one person who did not build the product to choose a fixture, run the flow, and explain where it feels confusing.
 
-### Stagehand video spine
+### Record the demo while building
 
-1. “Turn whatever is connected into a polished product-demo studio.”
-2. Fast inventory/plan event strip.
-3. Actual OBS output changes and becomes verified.
-4. Judge-selected microphone failure.
-5. Autonomous recovery and re-verification.
-6. Ten-second portable-context recompile.
+- [ ] Capture a short screen recording whenever the end-to-end flow reaches a stable milestone; keep the best working run and one honest failure/recovery clip.
+- [ ] Design the final video around a clear three-minute story: stressful input → agent plan and action → verified claim → human boundary → relief.
+- [ ] Include voiceover that explicitly explains what Codex built and where GPT-5.6 performs essential reasoning.
+- [ ] Re-check the official video and submission rules before recording the final version.
 
-### Civic Fix Loop video spine
+### Keep the repository testable
 
-1. Judge selects one previously unseen incident photo or text report; voice is used only if the stretch path is stable.
-2. Agent extracts facts and chooses the authority.
-3. Real public website is filled while the event strip explains evidence.
-4. Duplicate/privacy check is visible.
-5. Agent stops at its local review card; the user owns the final click.
-6. Redacted confirmation evidence or a deliberately unsubmitted review state is shown.
+- [ ] Provide clean setup and run instructions, pinned dependencies, and a one-command happy path where practical.
+- [ ] Include staged, non-sensitive sample photos, a sample statement or voice memo, both portal layout variants, and the deliberate mismatch fixture.
+- [ ] Document how to reset the sandbox and state the expected output for the main demo.
+- [ ] Run the documented setup from a clean checkout before submission.
 
-### Accident-to-Claim Agent video spine
+### Control credit usage
 
-1. Judge hands over three staged accident photos and says one sentence: “Mir ist jemand hinten draufgefahren.”
-2. Evidence board separates what is visible, what the user stated, and what remains unknown.
-3. The agent displays its plan and chosen tools before acting.
-4. It asks one sharp missing-field question, then fills the changing sandbox portal while the provenance map stays visible.
-5. A seeded bad field is caught by the independent verifier and repaired.
-6. The agent stops at `Ready for human review`; the user alone approves the sandbox draft and the agent reads the redacted receipt.
-
-## Evidence to retain
-
-- Screen recording of the entire unscripted run.
-- Event log with timestamps.
-- Test fixture results and pass rates.
-- Before/after screenshots.
-- A short architecture diagram.
-- A README section explicitly listing what Codex built and which Codex/GPT-5.6 capabilities the running product uses.
-- One failure clip showing the product behaving safely and honestly rather than hiding the failure.
-
-The public challenge page says the submission should include a project description, demo video, code repository, and any additional materials required when the final rules are published. Draft all three primary artifacts before the last day.
-
-## Final rules check
-
-Before coding or submitting, verify the official rules for:
-
-- Whether work may begin only after the challenge opens.
-- Team-size and eligibility limits.
-- Required Codex usage evidence.
-- Repository visibility and licensing.
-- Newly announced tracks or prize categories.
-- Demo-video length and submission requirements.
-
-## Sources
-
-- [OpenAI Build Week official page](https://openai.com/build-week/)
-- [Official challenge overview and judging criteria](https://openai.devpost.com/)
-- [Official challenge schedule](https://openai.devpost.com/details/dates)
-- [Official rules page — pending as of July 12](https://openai.devpost.com/rules)
-- [GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/latest-model)
-- [GPT-5.6 Sol model capabilities](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
-- [Codex/ChatGPT built-in browser](https://learn.chatgpt.com/docs/browser)
-- [Codex/ChatGPT Computer Use](https://learn.chatgpt.com/docs/computer-use)
-- [Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
-- [Berlin guidance for reporting illegal bulky waste](https://www.berlin.de/stadtsauberkeit/melden/)
-- [Berlin service page for illegal household waste](https://service.berlin.de/dienstleistung/326345/)
-- [Berlin Ordnungsamt-Online mobile workflow](https://www.berlin.de/ordnungsamt-online/mobile-app/)
-- [Berlin Ordnungsamt-Online help and field behavior](https://ordnungsamt.berlin.de/frontend/service/anwendungsHilfe)
-- [Berlin Ordnungsamt-Online terms](https://ordnungsamt.berlin.de/frontend/service/nutzungsbedingungen)
-- [Berlin streetlight fault service](https://service.berlin.de/dienstleistung/326527/)
-- [Stromnetz Berlin lighting-fault workflow](https://www.stromnetz.berlin/technik-und-innovationen/stoerungsmanagement-beleuchtung/)
-- [Stromnetz Berlin fault map](https://www.stoerung24.de/?Mandant=StromnetzBerlin)
+- [ ] Check granted-credit usage at least once per build day and record the current total.
+- [ ] Use fixed local fixtures, deterministic checks, cached development outputs, and bounded retries while iterating.
+- [ ] Reserve full end-to-end model runs for meaningful milestones and final regression tests.
+- [ ] Treat any usage beyond free or granted credits as an explicit personal cost decision.
