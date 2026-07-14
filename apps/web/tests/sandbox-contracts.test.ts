@@ -17,6 +17,9 @@ import {
   type PortalFieldName,
   type PortalVariant,
 } from "../src/features/sandbox/contracts";
+import { COMPLETE_PORTAL_FIELDS } from "../src/features/sandbox/fixtures";
+import { demoAssetIdsForFiles } from "../src/features/sandbox/portal-client";
+import { parsePortalFields, PortalInputError } from "../src/features/sandbox/validation";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends <Value>() =>
@@ -91,5 +94,49 @@ describe("sandbox portal contract coupling", () => {
         Equal<PortalDraftFields["incidentDate"], NonNullable<ClaimData["incidentDate"]>>
       >(),
     ).toBe(true);
+  });
+
+  it("accepts closed server asset IDs unchanged", () => {
+    const attachments = [
+      "model-0123456789abcdef0123456789abcdef.jpg",
+      "model-fedcba9876543210fedcba9876543210.png",
+      "asset-demo-context",
+    ];
+
+    expect(parsePortalFields({ ...COMPLETE_PORTAL_FIELDS, attachments }).attachments).toEqual(
+      attachments,
+    );
+  });
+
+  it("creates deterministic closed demo IDs without exposing local file names", () => {
+    const ids = demoAssetIdsForFiles([
+      { name: "Rear Overview (Private).JPG" },
+      { name: "Detail.png" },
+      { name: "Übersicht.jpg" },
+    ]);
+
+    expect(ids).toEqual([
+      "asset-demo-local-1-rear-overview-private",
+      "asset-demo-local-2-detail",
+      "asset-demo-local-3-bersicht",
+    ]);
+    expect(
+      parsePortalFields({ ...COMPLETE_PORTAL_FIELDS, attachments: ids }).attachments,
+    ).toEqual(ids);
+  });
+
+  it.each([
+    ["path traversal", ["../model-0123456789abcdef0123456789abcdef.jpg"]],
+    ["slash", ["folder/model-0123456789abcdef0123456789abcdef.jpg"]],
+    ["control", ["asset-demo-context\u0000"]],
+    ["empty", [""]],
+    ["too long", [`asset-demo-${"a".repeat(130)}`]],
+    ["wrong digest length", ["model-deadbeef.jpg"]],
+    ["uppercase digest", ["model-ABCDEFABCDEFABCDEFABCDEFABCDEFAB.jpg"]],
+    ["duplicate", ["asset-demo-context", "asset-demo-context"]],
+  ])("rejects %s attachment references", (_label, attachments) => {
+    expect(() => parsePortalFields({ ...COMPLETE_PORTAL_FIELDS, attachments })).toThrow(
+      PortalInputError,
+    );
   });
 });

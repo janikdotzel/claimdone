@@ -11,3 +11,7 @@ export async function POST(request: Request): Promise<Response> {
     return portalErrorResponse(error);
   }
 }
+
+export async function DELETE(): Promise<Response> {
+  return Response.json({ deletedCount: sandboxPortalStore.resetAll() });
+}

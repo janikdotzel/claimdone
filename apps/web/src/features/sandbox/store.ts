@@ -63,7 +63,7 @@ export class SandboxPortalStore {
         version: current.version + 1,
       },
       "draft_saved",
-      "human",
+      "portal_client",
     );
     this.#sessions.set(caseId, updated);
     return toView(updated);
@@ -88,7 +88,7 @@ export class SandboxPortalStore {
         version: current.version + 1,
       },
       "review_started",
-      "human",
+      "portal_client",
     );
     this.#sessions.set(caseId, updated);
     return toView(updated);
@@ -109,6 +109,17 @@ export class SandboxPortalStore {
     const reset = this.#fixtureSession(caseId, variant, fixture);
     this.#sessions.set(caseId, reset);
     return toView(reset);
+  }
+
+  delete(caseId: string): boolean {
+    assertCaseId(caseId);
+    return this.#sessions.delete(caseId);
+  }
+
+  resetAll(): number {
+    const deletedCount = this.#sessions.size;
+    this.#sessions.clear();
+    return deletedCount;
   }
 
   audit(caseId: string): readonly PortalAuditEntry[] {

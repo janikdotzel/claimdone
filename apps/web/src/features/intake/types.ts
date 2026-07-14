@@ -1,3 +1,6 @@
+import type { GateReasonCode } from "../../../../../contracts/generated/claimdone";
+import type { IntakeFlowResponse } from "./api";
+
 export const REQUIRED_IMAGE_COUNT = 3;
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_AUDIO_SECONDS = 60;
@@ -38,7 +41,26 @@ export type IntakeConsents = Readonly<{
   sandbox: boolean;
 }>;
 
-export type IntakeStage = "disclosure" | "intake" | "ready";
+export type IntakeStage =
+  | "disclosure"
+  | "intake"
+  | "awaiting_clarification"
+  | "review";
+
+export type ServerRequestKind = "intake" | "clarification";
+
+export type ServerRequest = Readonly<{
+  inputRevision: number;
+  kind: ServerRequestKind;
+  token: number;
+}>;
+
+export type ServerErrorState = Readonly<{
+  code: string;
+  currentVersion: number | null;
+  message: string;
+  reasonCodes: ReadonlyArray<GateReasonCode>;
+}>;
 
 export type IntakeState = Readonly<{
   audio: AudioStatement | null;
@@ -47,6 +69,10 @@ export type IntakeState = Readonly<{
   consents: IntakeConsents;
   disclosureAccepted: boolean;
   images: ReadonlyArray<IntakeImage>;
+  inputRevision: number;
+  serverAuthority: IntakeFlowResponse | null;
+  serverError: ServerErrorState | null;
+  serverRequest: ServerRequest | null;
   stage: IntakeStage;
   statementMode: StatementMode;
   textStatement: string;
@@ -93,7 +119,25 @@ export type IntakeAction =
       value: boolean;
     }>
   | Readonly<{ errors: ReadonlyArray<BackendValidationError>; type: "SET_BACKEND_ERRORS" }>
-  | Readonly<{ type: "ADVANCE_TO_READY" }>
+  | Readonly<{
+      kind: ServerRequestKind;
+      token: number;
+      type: "BEGIN_SERVER_REQUEST";
+    }>
+  | Readonly<{
+      response: IntakeFlowResponse;
+      token: number;
+      type: "SERVER_SUCCEEDED";
+    }>
+  | Readonly<{
+      currentVersion: number | null;
+      errors: ReadonlyArray<BackendValidationError>;
+      message: string;
+      reasonCodes: ReadonlyArray<GateReasonCode>;
+      code: string;
+      token: number;
+      type: "SERVER_FAILED";
+    }>
   | Readonly<{ type: "RESET" }>;
 
 export type GateCheck = Readonly<{
@@ -107,4 +151,3 @@ export type IntakeGateResult = Readonly<{
   g0: GateCheck;
   g1: GateCheck;
 }>;
-import type { GateReasonCode } from "../../../../../contracts/generated/claimdone";

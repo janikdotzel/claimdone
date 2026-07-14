@@ -5,6 +5,7 @@ import {
   initialIntakeState,
   intakeReducer,
   mapBackendValidationErrors,
+  type AwaitingClarificationResponse,
   type IntakeImage,
   type IntakeState,
 } from "../src/features/intake";
@@ -58,6 +59,46 @@ function validTextState(): IntakeState {
   return state;
 }
 
+function awaitingResponse(): AwaitingClarificationResponse {
+  return {
+    case: {
+      activeClarification: null,
+      caseId: "case-intake-001",
+      claimPacket: null,
+      createdAt: "2026-07-14T12:00:00Z",
+      intakeSummary: null,
+      portalState: "draft",
+      redactedMetadata: {},
+      state: "awaiting_clarification",
+      updatedAt: "2026-07-14T12:00:01Z",
+      version: 4,
+    },
+    clarification: {
+      clarificationId: "clarification-001",
+      expectedVersion: 4,
+      field: "incident_time",
+      question: "What time did the staged incident happen?",
+      round: 1,
+    },
+    draftRevision: 4,
+    gateHistory: (["G0", "G1", "G2", "G3", "G4", "G5"] as const).map(
+      (gateId) => ({
+        contractVersion: "1.0.0" as const,
+        decidedAt: "2026-07-14T12:00:01Z",
+        deterministicPassed: gateId !== "G5",
+        evidenceRefs: [],
+        gateId,
+        modelBlocked: false,
+        passed: gateId !== "G5",
+        reasonCodes: gateId === "G5" ? (["G5_REQUIRED_FIELD_MISSING"] as const) : [],
+      }),
+    ),
+    phase: "awaiting_clarification",
+    portal: null,
+    requestId: "request-intake-001",
+  };
+}
+
 describe("intake reducer authority and validation", () => {
   it("keeps disclosure separate and cannot skip its acknowledgement", () => {
     const skipped = intakeReducer(initialIntakeState, { type: "BEGIN_INTAKE" });
@@ -98,14 +139,31 @@ describe("intake reducer authority and validation", () => {
     expect(result.g1).toEqual({ passed: true, reasonCodes: [] });
     expect(result.canContinue).toBe(true);
 
-    const advanced = intakeReducer(state, { type: "ADVANCE_TO_READY" });
-    expect(advanced.stage).toBe("ready");
+    expect(state.stage).toBe("intake");
+    const submitting = intakeReducer(state, {
+      kind: "intake",
+      token: 1,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    expect(submitting.stage).toBe("intake");
+    const clarified = intakeReducer(submitting, {
+      response: awaitingResponse(),
+      token: 1,
+      type: "SERVER_SUCCEEDED",
+    });
+    expect(clarified.stage).toBe("awaiting_clarification");
+    expect(clarified.serverAuthority?.requestId).toBe("request-intake-001");
   });
 
-  it("never lets an action advance when deterministic G0 or G1 fails", () => {
+  it("never starts an authoritative request when local G0 or G1 preflight fails", () => {
     const invalid = beginIntake();
-    const advanced = intakeReducer(invalid, { type: "ADVANCE_TO_READY" });
+    const advanced = intakeReducer(invalid, {
+      kind: "intake",
+      token: 1,
+      type: "BEGIN_SERVER_REQUEST",
+    });
     expect(advanced.stage).toBe("intake");
+    expect(advanced.serverRequest).toBeNull();
 
     let missingPrivacy = validTextState();
     missingPrivacy = {
@@ -116,8 +174,84 @@ describe("intake reducer authority and validation", () => {
     };
     expect(evaluateIntakeGates(missingPrivacy).g1.passed).toBe(false);
     expect(
-      intakeReducer(missingPrivacy, { type: "ADVANCE_TO_READY" }).stage,
+      intakeReducer(missingPrivacy, {
+        kind: "intake",
+        token: 1,
+        type: "BEGIN_SERVER_REQUEST",
+      }).serverRequest,
+    ).toBeNull();
+    expect(
+      intakeReducer(missingPrivacy, {
+        kind: "intake",
+        token: 1,
+        type: "BEGIN_SERVER_REQUEST",
+      }).stage,
     ).toBe("intake");
+  });
+
+  it("does not let a local pass override a server failure", () => {
+    const valid = validTextState();
+    const submitting = intakeReducer(valid, {
+      kind: "intake",
+      token: 7,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const failed = intakeReducer(submitting, {
+      code: "GATE_FAILED",
+      currentVersion: 3,
+      errors: [{ field: "images", message: "Server rejected an image." }],
+      message: "Authoritative G0 failed.",
+      reasonCodes: ["G0_IMAGE_TYPE_INVALID"],
+      token: 7,
+      type: "SERVER_FAILED",
+    });
+
+    expect(evaluateIntakeGates(valid).canContinue).toBe(true);
+    expect(failed.stage).toBe("intake");
+    expect(failed.serverAuthority).toBeNull();
+    expect(failed.serverError?.code).toBe("GATE_FAILED");
+  });
+
+  it("invalidates server authority after any edit", () => {
+    const submitting = intakeReducer(validTextState(), {
+      kind: "intake",
+      token: 3,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const clarified = intakeReducer(submitting, {
+      response: awaitingResponse(),
+      token: 3,
+      type: "SERVER_SUCCEEDED",
+    });
+    const edited = intakeReducer(clarified, {
+      type: "SET_TEXT_STATEMENT",
+      value: "Edited after the server pass",
+    });
+
+    expect(edited.stage).toBe("intake");
+    expect(edited.serverAuthority).toBeNull();
+  });
+
+  it("ignores stale responses after a newer request token", () => {
+    const first = intakeReducer(validTextState(), {
+      kind: "intake",
+      token: 10,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const second = intakeReducer(first, {
+      kind: "intake",
+      token: 11,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const stale = intakeReducer(second, {
+      response: awaitingResponse(),
+      token: 10,
+      type: "SERVER_SUCCEEDED",
+    });
+
+    expect(stale.stage).toBe("intake");
+    expect(stale.serverRequest?.token).toBe(11);
+    expect(stale.serverAuthority).toBeNull();
   });
 
   it("treats an in-flight image check as pending, not as a fabricated type failure", () => {

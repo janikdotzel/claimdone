@@ -19,10 +19,29 @@ export const initialIntakeState: IntakeState = {
   },
   disclosureAccepted: false,
   images: [],
+  inputRevision: 0,
+  serverAuthority: null,
+  serverError: null,
+  serverRequest: null,
   stage: "disclosure",
   statementMode: "text",
   textStatement: "",
 };
+
+function withInputMutation(
+  state: IntakeState,
+  mutation: Partial<IntakeState>,
+): IntakeState {
+  return {
+    ...state,
+    ...mutation,
+    inputRevision: state.inputRevision + 1,
+    serverAuthority: null,
+    serverError: null,
+    serverRequest: null,
+    stage: state.stage === "disclosure" ? "disclosure" : "intake",
+  };
+}
 
 function omitErrorPrefixes(
   errors: Readonly<Record<string, string>>,
@@ -174,12 +193,19 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
   switch (action.type) {
     case "SET_DISCLOSURE_ACCEPTED":
       return state.stage === "disclosure"
-        ? { ...state, disclosureAccepted: action.value }
+        ? withInputMutation(state, { disclosureAccepted: action.value })
         : state;
 
     case "BEGIN_INTAKE":
       return state.stage === "disclosure" && state.disclosureAccepted
-        ? { ...state, stage: "intake" }
+        ? {
+            ...state,
+            inputRevision: state.inputRevision + 1,
+            serverAuthority: null,
+            serverError: null,
+            serverRequest: null,
+            stage: "intake",
+          }
         : state;
 
     case "ADD_IMAGES": {
@@ -196,28 +222,25 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
         additions.push(image);
         existing.add(image.fingerprint);
       }
-      return {
-        ...state,
+      return withInputMutation(state, {
         backendErrors: omitErrorPrefixes(state.backendErrors, ["images"]),
         clientErrors: action.error === null ? {} : { images: action.error },
         images: [...state.images, ...additions],
-      };
+      });
     }
 
     case "REMOVE_IMAGE":
-      return {
-        ...state,
+      return withInputMutation(state, {
         backendErrors: omitErrorPrefixes(state.backendErrors, [
           "images",
           `images.${action.id}`,
         ]),
         clientErrors: {},
         images: state.images.filter((image) => image.id !== action.id),
-      };
+      });
 
     case "COMPLETE_IMAGE_INSPECTION":
-      return {
-        ...state,
+      return withInputMutation(state, {
         images: state.images.map((image) =>
           image.id === action.id
             ? {
@@ -230,11 +253,10 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
               }
             : image,
         ),
-      };
+      });
 
     case "SET_EXIF_DECISION":
-      return {
-        ...state,
+      return withInputMutation(state, {
         backendErrors: omitErrorPrefixes(state.backendErrors, [
           `images.${action.id}.metadataDecision`,
           "privacy",
@@ -244,71 +266,130 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
             ? { ...image, decision: action.decision }
             : image,
         ),
-      };
+      });
 
     case "SET_STATEMENT_MODE":
-      return {
-        ...state,
+      return withInputMutation(state, {
         audio: action.mode === "text" ? null : state.audio,
         backendErrors: omitErrorPrefixes(state.backendErrors, ["statement"]),
         statementMode: action.mode,
         textStatement: action.mode === "audio" ? "" : state.textStatement,
-      };
+      });
 
     case "SET_TEXT_STATEMENT":
       return state.statementMode === "text"
-        ? {
-            ...state,
+        ? withInputMutation(state, {
             backendErrors: omitErrorPrefixes(state.backendErrors, ["statement"]),
             textStatement: action.value,
-          }
+          })
         : state;
 
     case "SET_AUDIO":
       return state.statementMode === "audio"
-        ? {
-            ...state,
+        ? withInputMutation(state, {
             audio: action.audio,
             backendErrors: omitErrorPrefixes(state.backendErrors, ["statement"]),
-          }
+          })
         : state;
 
     case "COMPLETE_AUDIO_INSPECTION":
       return state.audio?.id === action.id
-        ? {
-            ...state,
+        ? withInputMutation(state, {
             audio: {
               ...state.audio,
               durationSeconds: action.durationSeconds,
               error: action.error,
               status: action.status,
             },
-          }
+          })
         : state;
 
     case "REMOVE_AUDIO":
-      return {
-        ...state,
+      return withInputMutation(state, {
         audio: null,
         backendErrors: omitErrorPrefixes(state.backendErrors, ["statement.audio"]),
-      };
+      });
 
     case "SET_CONSENT":
-      return {
-        ...state,
+      return withInputMutation(state, {
         backendErrors: omitErrorPrefixes(state.backendErrors, [
           `consents.${action.consent}`,
         ]),
         consents: { ...state.consents, [action.consent]: action.value },
-      };
+      });
 
     case "SET_BACKEND_ERRORS":
       return { ...state, backendErrors: mapBackendValidationErrors(action.errors) };
 
-    case "ADVANCE_TO_READY":
-      return evaluateIntakeGates(state).canContinue ? { ...state, stage: "ready" } : state;
+    case "BEGIN_SERVER_REQUEST":
+      if (
+        action.kind === "intake" &&
+        (state.stage !== "intake" || !evaluateIntakeGates(state).canContinue)
+      ) {
+        return state;
+      }
+      if (
+        action.kind === "clarification" &&
+        (state.stage !== "awaiting_clarification" ||
+          state.serverAuthority?.phase !== "awaiting_clarification")
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        backendErrors: {},
+        serverError: null,
+        serverRequest: {
+          inputRevision: state.inputRevision,
+          kind: action.kind,
+          token: action.token,
+        },
+      };
+
+    case "SERVER_SUCCEEDED": {
+      const request = state.serverRequest;
+      if (
+        request === null ||
+        request.token !== action.token ||
+        request.inputRevision !== state.inputRevision ||
+        (request.kind === "intake" && action.response.phase !== "awaiting_clarification") ||
+        (request.kind === "clarification" && action.response.phase !== "review")
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        backendErrors: {},
+        serverAuthority: action.response,
+        serverError: null,
+        serverRequest: null,
+        stage: action.response.phase,
+      };
+    }
+
+    case "SERVER_FAILED": {
+      const request = state.serverRequest;
+      if (
+        request === null ||
+        request.token !== action.token ||
+        request.inputRevision !== state.inputRevision
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        backendErrors: mapBackendValidationErrors(action.errors),
+        serverError: {
+          code: action.code,
+          currentVersion: action.currentVersion,
+          message: action.message,
+          reasonCodes: action.reasonCodes,
+        },
+        serverRequest: null,
+      };
+    }
 
     case "RESET":
-      return initialIntakeState;
+      return { ...initialIntakeState, inputRevision: state.inputRevision + 1 };
   }
 }
