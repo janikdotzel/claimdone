@@ -74,15 +74,15 @@ Der lokale Checkout ist aktuell nicht sauber: Es gibt bestehende Änderungen und
 - **Aufgabe:** Zwei inszenierte, nicht sensible Dreier-Bildsets auswählen oder erstellen. Echte Personen, Kennzeichen, Adressen und Versicherungsdaten dürfen nicht sichtbar sein. Zusätzlich ein deutsches, ein englisches Statement und ein kurzes Audiofixture bereitstellen.
 - **Akzeptanz:** Rechte zur Nutzung und Veröffentlichung sind geklärt; Dateien enthalten keine realen sensiblen Daten; ein Hauptfixture erzeugt fachlich genau eine sinnvolle Rückfrage.
 
-### UX-001 – Figma-Kernflow und visuelle Richtung freigeben
+### UX-001 – Code-first Designsystem und visuelle Richtung freigeben
 
 - **Owner:** Hybrid; Codex erstellt, Mensch entscheidet
-- **Ausführung:** Figma, kein Code-Worktree
+- **Ausführung:** Frontend-Experience-Worktree und technische Design-Dokumentation
 - **Abhängigkeiten:** freigegebener Build-Week-Plan
 - **Parallel:** HUM-000 bis HUM-002 und Welle 0
-- **Ziel:** Vor der Frontend-Implementierung Interaktionsfluss, Informationshierarchie und zentrale Zustände sichtbar entscheiden.
-- **Aufgabe:** Einen kompakten klickbaren Flow für Disclosure, Intake, EXIF-Entscheidung, Evidence Board, Clarification, Agent Run, Mismatch, Review, Human Approval und Receipt erstellen. Designrichtung Navy/Teal, Statusfarben, Desktop-Viewport und Kernkomponenten dokumentieren. Bei Ausführung durch Codex sind die passenden Figma-Skills vor Figma-Schreibaktionen zu laden.
-- **Akzeptanz:** Alle P0-Zustände sind abgebildet; Sandbox- und Human-Boundary-Hinweise sind auf Intake und Review sichtbar; Mensch gibt Flow und visuelle Richtung frei; keine vollständige High-Fidelity-Ausarbeitung aller Responsive-Varianten erforderlich.
+- **Ziel:** Interaktionsfluss, Informationshierarchie und zentrale Zustände als direkt nutzbare, codebasierte Produktgrundlage entscheiden. Für Version 1 ist kein Figma-Artefakt erforderlich.
+- **Aufgabe:** Design-Tokens für Navy/Teal, Statusfarben, Typografie, Abstände, Radien und Fokuszustände definieren; zugängliche Kernkomponenten und ihre Varianten in einer lokalen Komponentenübersicht abbilden; daraus Disclosure, Intake, EXIF-Entscheidung, Evidence Board, Clarification, Agent Run, Mismatch, Review, Human Approval und Receipt konsistent zusammensetzen. Zustands- und Responsive-Regeln werden im Repository dokumentiert und getestet.
+- **Akzeptanz:** Alle P0-Zustände sind in Code oder Komponentenbeispielen abgebildet; Sandbox- und Human-Boundary-Hinweise sind auf Intake und Review sichtbar; Tokens und Komponenten werden wiederverwendet; Tastaturfokus und semantische Struktur sind geprüft; Mensch gibt Flow und visuelle Richtung frei. Ein Figma-Deliverable ist ausdrücklich kein V1-Gate.
 
 ### HUM-008 – Repository-Sichtbarkeit und Lizenz festlegen
 

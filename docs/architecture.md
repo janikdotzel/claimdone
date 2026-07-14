@@ -2,10 +2,11 @@
 
 ## Document status
 
-This document describes the Welle-1 code present on the INT-001 integration base and the frozen
-INT-001 composition currently being integrated. A module marked implemented has source and focused
-tests; the complete no-live-AI walkthrough remains **pending** until backend, web, dependency, and
-quality branches are merged and verified from one commit.
+This document describes the Welle-1 code and the completed INT-001 composition verified at
+integration anchor `ae2763bff760114a82bfb23620bcf4d01723466e`. The canonical checks, production
+web build, two-service startup, deterministic text and synthetic-WAV walkthroughs, cleanup, reset,
+and restart all passed at that anchor. This status covers only the no-live-AI walking skeleton; it
+does not imply G8 verification, human approval, release readiness, or a measured quality score.
 
 ## Welle-1 implementation map
 
@@ -38,10 +39,10 @@ flowchart LR
     Dataset --> Tests
 ```
 
-The component implementations exist, but Welle 1 deliberately kept several boundaries
-independent: the base FastAPI app did not compose every case/media route, the product intake did not
-trust itself to advance backend state, and the portal was not yet driven by the backend. INT-001
-exists to connect those boundaries without changing the canonical contracts ad hoc.
+Welle 1 deliberately kept several boundaries independent: the base FastAPI app did not compose
+every case/media route, the product intake did not trust itself to advance backend state, and the
+portal was not yet driven by the backend. INT-001 connected those boundaries without changing the
+canonical contracts ad hoc.
 
 ## INT-001 local architecture
 
@@ -90,10 +91,16 @@ frontend may run local preflight checks for fast feedback, but it advances only 
 server response. The server does not expose its private media storage name as a public case ID or
 audit value.
 
-## Frozen INT-001 request flow
+V1 follows a code-first design workflow. The approved visual direction is implemented through
+frontend tokens, components, explicit states, and accessibility behavior; a Figma artifact is not
+a V1 dependency. Human accessibility review remains a separate later checkpoint.
 
-The sequence below is the integration contract. Its final pass/fail evidence has not yet been
-recorded.
+## Verified INT-001 request flow
+
+The sequence below is the integration contract. It was exercised against both live local services
+before and after repository reset. Each round covered a text statement and a hash-fixed synthetic
+PCM WAV input, including one clarification per path, stale and duplicate conflict paths, exact
+portal-value comparison, cleanup, and restart.
 
 ```mermaid
 sequenceDiagram
@@ -149,16 +156,16 @@ would falsely claim later-wave authority.
 
 | Component | Responsibility | Current status |
 | --- | --- | --- |
-| `apps/web/src/features/intake/` | Disclosure, local preflight, multipart client, clarification UI, stale-response protection | Welle-1 shell implemented; INT-001 server wiring in progress |
-| `apps/web/src/features/sandbox/` | Local portal state, variants, validation, rendered values, reset | PORT-001 implemented; INT-001 delete/reset additions in progress |
-| `services/api/.../cases/` | Case identity, optimistic versioning, state transitions, delete | BE-001 implemented; app composition in progress |
-| `services/api/.../media/` | G0/G1, safe local names, EXIF review, deletable case media | MEDIA-001 implemented; persistent case-to-media binding in progress |
+| `apps/web/src/features/intake/` | Disclosure, local preflight, multipart client, clarification UI, stale-response protection | Implemented and integrated with authoritative FastAPI responses |
+| `apps/web/src/features/sandbox/` | Local portal state, variants, validation, rendered values, reset | Implemented; variant A fill/review and delete/reset verified in INT-001 |
+| `services/api/.../cases/` | Case identity, optimistic versioning, state transitions, delete | Implemented, composed, and verified with stale/duplicate conflicts |
+| `services/api/.../media/` | G0/G1, safe local names, EXIF review, deletable case media | Implemented with persistent case-to-media binding and verified cleanup |
 | `services/api/.../gates/` | Authoritative G2-G5 decisions and clarification boundary | GATE-001 implemented |
-| INT-001 workflow package | Mock packet, one clarification, portal port, response snapshots | In progress; not yet verified in this document |
+| INT-001 workflow package | Mock packet, one clarification, portal port, response snapshots | Implemented and locally verified for text and synthetic-WAV paths |
 | `contracts/` | Only canonical cross-runtime contract artifacts | Implemented |
-| `evals/` | Static datasets, future graders/reports; never production gate authority | EVAL-001 implemented and included in Make verification |
-| `scripts/` | Exact runtime setup, canonical verification, safe reset | Implemented; INT-001 state path included |
-| `docs/` | Technical status and reproducible evidence | Updated for integration; measured results remain pending |
+| `evals/` | Static datasets, future graders/reports; never production gate authority | EVAL-001 implemented and included in passing Make verification |
+| `scripts/` | Exact runtime setup, canonical verification, safe reset | Implemented; setup idempotence and reset/restart verified |
+| `docs/` | Technical status and reproducible evidence | INT-001 results recorded; later-wave and release checkpoints remain pending |
 
 ## Authority and gate ordering
 
@@ -218,8 +225,10 @@ and receipt withholding are AUTH-001 work. No INT-001 response represents approv
 ### Persistence and observability
 
 The default local state is `.local/claimdone/cases.db` plus `.local/claimdone/media/`. Case APIs use
-optimistic version checks. Audit records are intended to contain stable IDs and safe summaries, not
-raw image bytes, private media storage names, or full identifying/insurance values.
+optimistic version checks. Audit records are designed to contain stable IDs and safe summaries
+rather than raw image bytes, private media storage names, or full identifying/insurance values. The
+recorded walkthrough observed no private storage handle in API responses and verified case/media
+and portal cleanup.
 
 ## Contract flow
 
@@ -249,16 +258,17 @@ reports. Deterministic graders remain authoritative; model graders may report on
 failures. G11 will eventually consume verified artifacts and human checkpoints, but its runtime
 runner does not exist yet.
 
-## Planned integration sequence
+## Implementation status and next sequence
 
-1. Foundation, canonical contracts, and Welle-1 modules — present on the INT-001 base.
-2. Backend/web/quality composition into one no-live-AI walking skeleton — currently in progress.
-3. Merge once, regenerate the root Python lockfile under one owner, run setup twice, and execute all
-   canonical checks plus the local walkthrough and clean reset.
-4. Begin AI, Computer Use, verifier, human authority, events, and deterministic eval runners only
-   after INT-001 is stable.
-5. Complete security, accessibility, reliability, external product tests, final documentation, and
-   the human-authorized submission path.
+1. Foundation, canonical contracts, and Welle-1 modules — complete on the INT-001 base.
+2. Backend/web/quality composition into one no-live-AI walking skeleton — complete.
+3. Root Python lockfile ownership and integration verification — complete at the recorded anchor:
+   `python-multipart==0.0.32` and production `httpx==0.28.1`, setup twice, canonical checks,
+   production web build, live walkthroughs, cleanup, reset, and restart.
+4. AI, Computer Use, verifier, human authority, events, and deterministic eval runners — later-wave
+   work; none is implied by the INT-001 pass.
+5. Security, accessibility, reliability, external product tests, final documentation, and the
+   human-authorized submission path — still required before release.
 
 See [the implementation task list](../CLAIMDONE_IMPLEMENTATION_TASKS.md) for task dependencies and
 worktree ownership. Record only actual integrated commands and results in

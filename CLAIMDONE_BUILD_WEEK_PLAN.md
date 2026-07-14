@@ -253,8 +253,8 @@ Jeder relevante Prompt-, Schema-, Tool- oder Gate-Change führt mindestens die b
 
 ### Design und Frontend
 
-- Kompakten Figma-Kernflow für Disclosure, Intake, Evidence, Clarification, Agent Run, Review und Receipt erstellen.
-- Calm-trustworthy Designsystem mit Navy/Teal, klaren Statusfarben und barrierearmen Fokuszuständen definieren.
+- Code-first Kernflow für Disclosure, Intake, Evidence, Clarification, Agent Run, Review und Receipt aus wiederverwendbaren Komponenten erstellen; ein Figma-Artefakt ist für Version 1 nicht erforderlich.
+- Calm-trustworthy Designsystem mit Navy/Teal, klaren Statusfarben, Tokens, dokumentierten Komponenten und barrierearmen Fokuszuständen definieren.
 - Exakt drei Bilder, Text/Audio, Einwilligungen und EXIF-Auswahl umsetzen.
 - Evidence Board, Provenance Chips, Plan, Tool Events und Gate-Entscheidungen anzeigen.
 - Split View für Portal und Agent-Status bauen.
@@ -341,7 +341,7 @@ Wesentliche API-Endpunkte:
 ### 14. Juli
 
 - Toolchain, Verträge, Zustandsmaschine und Gate Registry aufsetzen.
-- Figma-Kernflow erstellen.
+- Code-first Designsystem und Kernflow im Frontend erstellen.
 - Walking Skeleton mit gemocktem ClaimPacket bauen.
 - GPT-5.6- und Computer-Use-Zugriff prüfen.
 

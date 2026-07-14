@@ -10,20 +10,22 @@ workflow state are authoritative; model output, browser content, and UI state ar
 
 ## Repository status
 
-The Welle-1 branches are present on the INT-001 integration base. INT-001 is currently being wired
-and verified, so source code being present is not yet proof that the complete walking skeleton
-passes. The status below deliberately distinguishes implemented modules from pending integration.
+INT-001 is integrated and locally verified at integration anchor
+`ae2763bff760114a82bfb23620bcf4d01723466e`. The evidence is scoped to the deterministic,
+no-live-AI walking skeleton: canonical checks passed, both services ran together, and the text and
+synthetic-WAV paths each reached the intended review boundary. This is implementation evidence,
+not release approval or a product-quality benchmark.
 
 | Area | Status on the INT-001 integration base |
 | --- | --- |
 | Pinned Node.js, pnpm, Python, and uv setup | **Implemented** |
 | Canonical Pydantic contracts, generated JSON Schema, and generated TypeScript types | **Implemented** |
-| Case service, SQLite persistence, version checks, and redacted audit primitives | **Implemented as modules; FastAPI composition is part of INT-001** |
-| Media validation and deterministic gates G0-G5 | **Implemented as modules with negative tests; end-to-end orchestration is part of INT-001** |
-| Product shell, disclosure, intake preflight, and local accessibility states | **Implemented; server-owned gate reconciliation is part of INT-001** |
-| Local sandbox portal with variants A/B and server-owned transitions | **Implemented; INT-001 uses variant A** |
+| Case service, SQLite persistence, version checks, and redacted audit primitives | **Implemented and composed in FastAPI** |
+| Media validation and deterministic gates G0-G5 | **Implemented, composed, and covered by negative tests** |
+| Product shell, disclosure, intake preflight, and local accessibility states | **Implemented and wired to server-owned responses** |
+| Local sandbox portal with variants A/B and server-owned transitions | **Implemented; INT-001 verified variant A** |
 | EVAL-001 static dataset and validator | **Implemented: exactly 12 synthetic cases, included in canonical Make checks** |
-| No-live-AI walking skeleton | **Integration in progress; frozen transport and expected boundary are documented below, final run is not yet recorded** |
+| No-live-AI walking skeleton | **Locally verified in two rounds, before and after reset; each covered text and synthetic-WAV paths** |
 | GPT-5.6, transcription, Computer Use, independent G8 verification, and G9/G10 human authority | **Planned for later waves** |
 | Deterministic eval runners, reports, and G11 release gate | **Planned; EVAL-001 is a dataset and validator, not a measured product-quality report** |
 
@@ -114,6 +116,10 @@ need network access when the pinned dependencies are not cached. `.env.example` 
 loopback origins used by the local integration. No OpenAI key is needed for INT-001; do not
 put a real key in a committed file.
 
+At the recorded anchor, the lock resolves `python-multipart==0.0.32` and production
+`httpx==0.28.1`. The first successful setup installed one unavailable package after approved
+network access; the second setup audited 27 packages and produced no tracked diff.
+
 ## Run the local integration
 
 Start both processes from the repository root:
@@ -129,11 +135,12 @@ The canonical local origins are:
 - web health: <http://127.0.0.1:3000/health>
 - API health: <http://127.0.0.1:8000/health>
 
-The INT-001 UI walkthrough is pending its final integration run. When the frontend and backend
-integration commits are merged, open <http://127.0.0.1:3000/claim/new>, acknowledge the sandbox
-disclosure, use only staged synthetic media, submit exactly three images plus one statement mode,
-answer the single clarification, and follow the server-provided link to
-`/sandbox/A/cases/{caseId}`.
+The integrated route <http://127.0.0.1:3000/claim/new> returned HTTP `200` in the recorded local
+run. To reproduce the user flow, acknowledge the sandbox disclosure, use only staged synthetic
+media, submit exactly three images plus one statement mode, answer the single clarification, and
+follow the server-provided link to `/sandbox/A/cases/{caseId}`. The recorded evidence used direct
+HTTP requests against both running services; it was not a browser-based visual or accessibility
+approval.
 
 The frozen integration transport is:
 
@@ -145,9 +152,9 @@ The frozen integration transport is:
 
 Successful integration responses bind `requestId`, `case`, `draftRevision`, `gateHistory`, `phase`,
 `clarification`, and `portal`. After the one answer, the required boundary is backend
-`case.state=verifying`, portal `portalState=review`, and `verificationState=pending`. These values
-are an integration contract, not a recorded pass; reproducible evidence belongs in
-[docs/verification-results.md](docs/verification-results.md).
+`case.state=verifying`, portal `portalState=review`, and `verificationState=pending`. Both the text
+and synthetic-WAV walkthroughs reached those three values together; request IDs and the scoped
+evidence are recorded in [docs/verification-results.md](docs/verification-results.md).
 
 Stop `make dev` with `Ctrl-C`.
 
@@ -167,6 +174,14 @@ discovers `services/api/tests`, `scripts/tests`, and `evals/tests`. The EVAL-001
 dataset with anything other than exactly twelve cases. No live model or network service is invoked
 by these eval checks.
 
+At the INT-001 anchor, `make lint` and `make typecheck` passed, with mypy checking 64 Python source
+files, and `make test` passed with 87 Vitest and 264 pytest tests. The pinned-runtime production
+build also passed. It can be reproduced without a machine-specific runtime path with:
+
+```bash
+bash -c 'source scripts/runtime.sh; claimdone_resolve_runtime; "$CLAIMDONE_PNPM_BIN" build:web'
+```
+
 ## Reset
 
 Stop the development processes, then run:
@@ -179,12 +194,16 @@ The reset command removes only generated caches and repository-local runtime sta
 default `.local/claimdone/` SQLite/media directory. It preserves environment files, installed
 dependencies, source files, fixtures, and tool installations, and is safe to run repeatedly.
 
-INT-001 also composes two application-level reset surfaces that still require final integrated
-verification: backend `POST /api/dev/reset` clears ClaimDone-owned demo cases/media, while the
-portal's visible **Reset fixture** action calls the web `POST /api/dev/reset` route for its own
-fixture state. `DELETE /api/cases/{caseId}` is the case-scoped backend cleanup. Do not assume one
-service's reset implicitly clears the other service; use `make reset` with both processes stopped
-for a clean repository-local restart.
+INT-001 also composes two application-level reset surfaces: backend `POST /api/dev/reset` clears
+ClaimDone-owned demo cases/media, while the portal's visible **Reset fixture** action calls the web
+`POST /api/dev/reset` route for its own fixture state. `DELETE /api/cases/{caseId}` is the
+case-scoped backend cleanup. The integrated walkthrough verified case/media and portal deletion,
+then observed both developer resets report zero remaining entries after cleanup. The repository
+reset removed 22 generated entries on its first run and zero on its second, while preserving
+environment files, dependencies, source files, fixtures, and tool installations; the services and
+full walkthrough passed again after restart. Do not assume one service's reset implicitly clears
+the other service; use `make reset` with both processes stopped for a clean repository-local
+restart.
 
 ## Evaluation
 
@@ -197,9 +216,10 @@ Deterministic graders, product-flow runners, model graders, versioned reports, a
 decision are planned for EVAL-002 and later tasks. Model graders may eventually add failures for
 qualitative properties; they will never be allowed to override deterministic graders or gates.
 
-Measured commands, environments, commit SHAs, and artifacts will be recorded in
-[docs/verification-results.md](docs/verification-results.md). `PENDING` is never evidence of a
-pass.
+Measured INT-001 commands, runtime versions, commit SHA, and walkthrough observations are recorded
+in [docs/verification-results.md](docs/verification-results.md). Unmeasured product-quality,
+model-graded, security, human, and release checkpoints remain explicitly `PENDING`; `PENDING` is
+never evidence of a pass.
 
 ## How Codex is used
 
@@ -223,8 +243,8 @@ only after the adapters and corresponding runs exist.
 
 ## Limitations
 
-- INT-001 is not complete until the backend/web integration, clean reset, and canonical checks have
-  been run together from one commit.
+- INT-001 evidence is local and scoped to the deterministic walking skeleton at the recorded
+  integration anchor; it is not a release decision.
 - The current walking skeleton uses a deterministic mock packet and portal API calls, not live AI
   or adaptive Computer Use.
 - Portal `review` plus backend `verifying` and verification `pending` is an intermediate boundary,
@@ -232,13 +252,16 @@ only after the adapters and corresponding runs exist.
 - EVAL-001 validates 12 expected cases structurally; it does not execute them against the product.
 - Only staged synthetic fixtures are permitted. Never use real insurance information, genuine
   credentials, or identifying media.
+- The user approved the visual direction. V1 is intentionally code-first: tokens, components,
+  states, and accessibility behavior live with the frontend, and a Figma artifact is not required.
+  A complete accessibility review is still pending.
 - Security, accessibility, performance, external product testing, repository licensing, and
   submission authorization remain pending their listed human or later-wave tasks.
 
 ## Documentation map
 
 - [Architecture and trust boundaries](docs/architecture.md)
-- [Verification results and pending integration checklist](docs/verification-results.md)
+- [INT-001 verification results and remaining checkpoints](docs/verification-results.md)
 - [Evaluation dataset](evals/README.md)
 - [Canonical contracts](contracts/README.md)
 - [Build Week plan](CLAIMDONE_BUILD_WEEK_PLAN.md)

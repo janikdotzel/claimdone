@@ -1,11 +1,25 @@
 # ClaimDone verification results
 
-> Status: **INT-001 WORKING RECORD — NOT RELEASE EVIDENCE**
+> Status: **INT-001 LOCALLY VERIFIED — NOT RELEASE EVIDENCE**
 
-The Welle-1 source branches are present on the INT-001 base, but the no-live-AI walking skeleton is
-still being integrated. A blank, `PENDING`, `NOT RUN`, planned row, or expectation is not a pass. Do
-not replace a missing measurement with an estimate, model judgment, screenshot impression, or a
-result from a different commit.
+The deterministic no-live-AI walking skeleton was integrated and verified at commit
+`ae2763bff760114a82bfb23620bcf4d01723466e`. Canonical checks, the production web build, live local
+services, text and synthetic-WAV flows, cleanup, repository reset, and restart passed at that
+anchor. A blank, `PENDING`, `NOT RUN`, planned row, or expectation is still not a pass, and this
+scoped INT-001 record must not be presented as release approval or a product-quality benchmark.
+
+## Recorded run identity
+
+| Field | Recorded value |
+| --- | --- |
+| Integration anchor | `ae2763bff760114a82bfb23620bcf4d01723466e` |
+| Date / timezone | 2026-07-14 / Europe/Berlin |
+| Operating system | Darwin |
+| Runtime | Node.js 24.14.0; pnpm 11.7.0; Python 3.12.13; uv 0.8.3 |
+| Input boundary | Staged synthetic inputs only; text and hash-fixed synthetic PCM WAV |
+| External services | No OpenAI, transcription, browser-runner, or other live-AI call |
+| Evidence type | Canonical command output and direct HTTP observations against both local services |
+| Known record gap | Exact wall-clock durations and a versioned report artifact were not captured |
 
 ## How to record a run
 
@@ -24,38 +38,41 @@ storage names, access tokens, or complete prompts containing input data.
 
 ## Current evidence boundary
 
-The current repository can make only these scoped implementation statements:
+The recorded evidence supports these scoped statements:
 
-- Welle-1 contains focused case/persistence, media, G0-G5, frontend intake, portal, and contract
-  implementations.
-- EVAL-001 contains exactly twelve static synthetic cases and a validator. Canonical lint,
-  typecheck, and test configuration includes `evals/`.
-- INT-001 is specified as a deterministic no-live-AI mock flow with exactly one clarification.
-- The required INT-001 end boundary is backend `verifying`, portal `review`, and verification
-  `pending`.
+- the Welle-1 case/persistence, media, G0-G5, frontend intake, portal, contract, and INT-001 workflow
+  implementations are composed in one local integration;
+- EVAL-001 contains exactly twelve static synthetic cases and its validator is included in the
+  passing canonical lint, typecheck, and test runs;
+- the deterministic mock flow asks exactly one clarification and rejects stale and duplicate
+  answers without portal mutation; and
+- both statement modes reached backend `verifying`, portal `review`, and verification `pending`,
+  with exact rendered-value comparison and no private media storage handle in the API response.
 
-None of those statements is a recorded successful integrated walkthrough. The backend and web
-composition commits, lockfile update, and one-commit verification must happen before any INT-001
-row below becomes `PASS`.
+This does not measure EVAL-001 as a product benchmark, exercise a live model, implement independent
+G8 verification, approve or submit a claim, or satisfy the future G11 release gate.
 
 ## INT-001 integration checklist
 
-Use one final integration commit for this table. Record commands and state observations verbatim;
-do not pre-fill results from a component branch.
+Every result in this table refers to the single integration anchor named above. Component-branch
+results were not substituted for integrated measurements.
 
 | Commit | Check | Expected | Result | Evidence / notes |
 | --- | --- | --- | --- | --- |
-| `PENDING` | Worktree before setup | Clean, focused INT-001 branch | `PENDING` | `PENDING` |
-| `PENDING` | `make check-runtime` | Node 24.14.0, pnpm 11.7.0, Python 3.12.13 | `PENDING` | Include uv check from setup |
-| `PENDING` | `make setup` (first run) | Frozen environments install | `PENDING` | Record network/cache use |
-| `PENDING` | `make setup` (second run) | Idempotent and no tracked diff | `PENDING` | `PENDING` |
-| `PENDING` | `make lint` | Shell, ESLint, ruff, including `evals/` | `PENDING` | `PENDING` |
-| `PENDING` | `make typecheck` | Strict TypeScript and mypy, including `evals/` | `PENDING` | `PENDING` |
-| `PENDING` | `make test` | Vitest and all configured pytest paths pass | `PENDING` | Must include `evals/tests` |
-| `PENDING` | `pnpm build:web` or canonical equivalent | Production Next.js build passes | `PENDING` | Record exact command |
-| `PENDING` | `make dev` and both `/health` routes | Both services return expected health response | `PENDING` | Record status codes |
-| `PENDING` | `make reset` with services stopped | `.local/claimdone/` and generated caches removed; sources, fixtures, env, deps preserved | `PENDING` | Repeat once to prove idempotence |
-| `PENDING` | Restart after reset | Fresh local state without manual DB edits | `PENDING` | `PENDING` |
+| `ae2763b` | Worktree at measurement anchor | Focused INT-001 integration | `PASS` | Canonical verification ran from the named anchor; later documentation edits are not part of that measurement |
+| `ae2763b` | `make check-runtime` | Exact pinned runtimes available | `PASS` | Node.js 24.14.0, pnpm 11.7.0, Python 3.12.13, uv 0.8.3 |
+| `ae2763b` | `make setup` (first successful run) | Frozen environments install | `PASS` | Installed one previously unavailable package after approved network access |
+| `ae2763b` | `make setup` (second run) | Idempotent and no tracked diff | `PASS` | Audited 27 packages; produced no tracked diff |
+| `ae2763b` | `make lint` | Shell, ESLint, ruff, including `evals/` | `PASS` | All configured lint stages passed |
+| `ae2763b` | `make typecheck` | Strict TypeScript and mypy, including `evals/` | `PASS` | Next.js/TypeScript checks passed; mypy checked 64 Python source files |
+| `ae2763b` | `make test` | Vitest and all configured pytest paths pass | `PASS` | 87 Vitest tests and 264 pytest tests passed, including `evals/tests` |
+| `ae2763b` | Pinned-runtime `pnpm build:web` equivalent | Production Next.js build passes | `PASS` | Portable runtime resolver selected the pinned Node.js and pnpm versions; Next.js production build passed |
+| `ae2763b` | `make dev`, both `/health` routes, and `/claim/new` | Both services healthy and product route served | `PASS` | Web health `200`; API health `200`; `/claim/new` `200` |
+| `ae2763b` | `make reset` twice with services stopped | Generated state removed; protected files preserved; repeat is idempotent | `PASS` | First run removed 22 generated entries; second removed 0; environment files, dependencies, sources, fixtures, and tools were preserved |
+| `ae2763b` | Restart after reset | Fresh local state without manual DB edits | `PASS` | Both services restarted and the complete text plus synthetic-WAV walkthrough passed again |
+
+The dependency lock at the anchor resolves `python-multipart==0.0.32` and production
+`httpx==0.28.1`. No machine-specific binary path is recorded or committed.
 
 ## INT-001 no-live-AI walkthrough
 
@@ -64,18 +81,27 @@ service, a transcription API, or a browser runner.
 
 | Step | Expected deterministic observation | Result | Evidence / notes |
 | --- | --- | --- | --- |
-| Open `/claim/new` | Disclosure visible; no case can advance on UI assertion alone | `PENDING` | `PENDING` |
-| Submit invalid intake | Server G0 or G1 failure blocks mock extraction and portal calls | `PENDING` | Include one negative path |
-| Submit valid multipart intake | Positive expected version, exactly 3 JPG/PNG images, text XOR PCM WAV, 3 consents, 3 EXIF decisions accepted | `PENDING` | Version checked before media/mock work; record request ID, never raw values |
-| Receive clarification | Exactly one structured, version-bound question | `PENDING` | `PENDING` |
-| Submit stale or wrong clarification | HTTP conflict/not-found boundary; no portal mutation | `PENDING` | Record status/code |
-| Submit valid clarification once | Packet rebuilt and authoritative G2-G5 path reruns | `PENDING` | `PENDING` |
-| Portal fill | Server-provided loopback link opens `/sandbox/A/cases/{caseId}` | `PENDING` | `PENDING` |
-| Final INT-001 boundary | Backend `verifying`; portal `review`; verification `pending` | `PENDING` | Must observe all three together |
-| Duplicate clarification | Rejected; no second clarification round or duplicate portal mutation | `PENDING` | `PENDING` |
-| Case delete | Associated media removed, then case DB rows cascade | `PENDING` | No private storage name in API/audit |
-| Backend developer reset | ClaimDone-owned cases, mapped media, and recognized orphans removed | `PENDING` | `PENDING` |
-| Portal fixture reset | Portal state returns to its selected fixture | `PENDING` | Separate from backend reset |
+| Open `/claim/new` | Product route loads; no case can advance on UI assertion alone | `PASS` (HTTP scope) | Route returned `200`; visual/accessibility approval was not part of this direct-HTTP run |
+| Submit invalid intake | Server G0 or G1 failure blocks mock extraction and portal calls | `PASS` | Missing consent produced G0 HTTP `422`; no portal mutation was observed |
+| Submit valid multipart intake | Positive expected version, exactly 3 JPG/PNG images, text XOR PCM WAV, 3 consents, 3 EXIF decisions accepted | `PASS` | Both text and hash-fixed synthetic-WAV modes passed before and after reset |
+| Receive clarification | Exactly one structured, version-bound question | `PASS` | Exactly one clarification was observed for each valid path |
+| Submit stale clarification | HTTP conflict boundary; no portal mutation | `PASS` | HTTP `409`; portal snapshot remained unchanged |
+| Submit valid clarification once | Packet rebuilt and authoritative G2-G5 path reruns | `PASS` | The valid version-bound answer advanced both statement modes |
+| Portal fill | Server-provided loopback link opens `/sandbox/A/cases/{caseId}` | `PASS` | Variant A was filled; returned rendered values matched the expected draft values exactly |
+| Final INT-001 boundary | Backend `verifying`; portal `review`; verification `pending` | `PASS` | All three states were observed together for text and audio paths |
+| Duplicate clarification | Rejected; no second round or duplicate portal mutation | `PASS` | HTTP `409`; portal snapshot remained unchanged |
+| API privacy boundary | No private media storage name in public responses | `PASS` | No storage handle leak was observed in the HTTP walkthrough |
+| Case and portal delete | Associated media, case rows, and portal case removed | `PASS` | Backend case/media cleanup and portal deletion both succeeded |
+| Backend developer reset | ClaimDone-owned cases, mapped media, and recognized orphans removed | `PASS` | Reported 0 remaining entries after case-scoped cleanup |
+| Portal fixture reset | Portal state returns to its selected fixture | `PASS` | Separate portal reset reported 0 remaining entries after cleanup |
+
+The HTTP walkthrough ran once before and once after repository reset; each round covered text and
+synthetic-WAV input. The second round recorded these redacted-safe correlation IDs:
+
+| Path | Intake request ID | Review request ID |
+| --- | --- | --- |
+| Text | `request-c416e6c8ed7f4f9d95f56aa83e941760` | `request-49e0546332744800ba0403fa96bde7cc` |
+| Synthetic WAV | `request-96fdc9277dbc4a65b59d8cc3aae2c16a` | `request-976b026b0e36493d9000b2ba8f2798a4` |
 
 ## EVAL-001 structural dataset
 
@@ -86,9 +112,9 @@ deterministic pre-tool G3 block.
 
 | Commit | Command | Expected | Result | Evidence / notes |
 | --- | --- | --- | --- | --- |
-| `PENDING` | `make lint` | Validator and eval tests pass ruff | `PENDING` | Integration commit only |
-| `PENDING` | `make typecheck` | Validator and eval tests pass strict mypy | `PENDING` | Integration commit only |
-| `PENDING` | `make test` | Dataset tests discover exactly 12 cases without live services | `PENDING` | Integration commit only |
+| `ae2763b` | `make lint` | Validator and eval tests pass ruff | `PASS` | Included in the integrated canonical lint run |
+| `ae2763b` | `make typecheck` | Validator and eval tests pass strict mypy | `PASS` | Included in the integrated 64-source-file mypy run |
+| `ae2763b` | `make test` | Dataset tests discover exactly 12 cases without live services | `PASS` | Included in the 264 passing pytest tests; no live service or model invoked by EVAL-001 |
 
 The following are target product metrics from the Build Week plan. They are not measured by loading
 the EVAL-001 JSON file.
@@ -124,30 +150,35 @@ implemented or run in INT-001.
 
 ## End-to-end reliability
 
-| Commit | Fixture | Portal variant | Runs reaching verified review | Runs under 120 s | Notes |
+| Commit | Fixture | Portal variant | Runs reaching the INT-001 boundary | Runs under 120 s | Notes |
 | --- | --- | --- | ---: | ---: | --- |
-| `PENDING` | `PENDING` | A | `PENDING` | `PENDING` | INT-001 stops before verified review |
+| `ae2763b` | Synthetic text plus hash-fixed synthetic WAV | A | 2 complete rounds | `NOT RECORDED` | One round before and one after reset; each covered both input modes; INT-001 stops before independent G8 verification |
 | `PENDING` | `PENDING` | B | `PENDING` | `PENDING` | Planned later-wave path |
+
+Two successful local rounds are integration evidence, not a statistically meaningful reliability
+rate. No latency claim is made because exact durations were not captured.
 
 ## Security and authority checks
 
 | Check | Expected | Result | Evidence |
 | --- | --- | --- | --- |
-| Deterministic failure cannot be overridden by mock/model/UI | Always blocked | `PENDING` | `PENDING` |
-| Intake body exceeds configured bound | HTTP `413`, no model/portal work | `PENDING` | `PENDING` |
+| Deterministic failure cannot be overridden by mock/model/UI | Always blocked | `PASS` (INT-001 scope) | Live G0 consent failure returned `422`; negative gate paths are included in the passing automated suite |
+| Intake body exceeds configured bound | HTTP `413`, no model/portal work | `PASS` (automated) | Covered by the passing pytest suite; not repeated as a live HTTP measurement |
 | Agent role calls future human-approval API | HTTP `403` | `PENDING` | AUTH-001 planned |
 | Human token reuse | Rejected | `PENDING` | AUTH-001 planned |
 | Receipt before human approval | Rejected | `PENDING` | AUTH-001 planned |
 | External browser navigation | Blocked | `PENDING` | CU-001 planned |
 | Portal prompt/tool injection | No authority increase | `PENDING` | CU-002/SEC-001 planned |
-| Reset/delete removes temporary case media | Complete removal | `PENDING` | `PENDING` |
-| Logs/events expose only safe summaries | No sensitive values or private media names | `PENDING` | `PENDING` |
+| Reset/delete removes temporary case media | Complete removal | `PASS` | Live case/media and portal deletion succeeded; both app resets reported 0 after cleanup |
+| Logs/events expose only safe summaries | No sensitive values or private media names | `PARTIAL` | No storage handle appeared in the observed API responses; comprehensive observability review remains pending |
 
 ## Human checkpoints
 
 | Checkpoint | Owner | Status | Evidence location |
 | --- | --- | --- | --- |
-| Visual and accessibility review | Human | `PENDING` | `PENDING` |
+| Visual direction | Human | `APPROVED` | User approved the code-first UX direction |
+| Figma artifact for V1 | Product decision | `N/A` | V1 uses code-first tokens, components, states, and accessibility implementation; Figma is not required |
+| Complete accessibility review | Human | `PENDING` | Later checkpoint; not implied by visual-direction approval |
 | Ground-truth fixture review | Human | `PENDING` | `PENDING` |
 | External product tests | Human | `PENDING` | `PENDING` |
 | Computer Use go/fallback decision | Human | `PENDING` | `PENDING` |
