@@ -1,9 +1,10 @@
 import {
+  COUNTERPARTY_KNOWN_VALUES,
+  PORTAL_FIELD_NAMES,
   PORTAL_FIXTURES,
   PORTAL_VARIANTS,
-  type CounterpartyKnown,
+  type PortalDraftFields,
   type PortalFieldIssue,
-  type PortalFields,
   type PortalFixture,
   type PortalState,
   type PortalVariant,
@@ -12,18 +13,6 @@ import {
 const CASE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/;
-const FIELD_KEYS = [
-  "attachments",
-  "claimantName",
-  "counterpartyKnown",
-  "incidentDate",
-  "incidentTime",
-  "location",
-  "narrative",
-  "policyReference",
-  "vehicleRegistration",
-] as const satisfies readonly (keyof PortalFields)[];
-
 export class PortalInputError extends Error {
   readonly code = "PORTAL_INPUT_INVALID";
   readonly status = 422;
@@ -64,17 +53,19 @@ export function parseExpectedVersion(value: unknown): number {
   return value;
 }
 
-export function parsePortalFields(value: unknown): PortalFields {
+export function parsePortalFields(value: unknown): PortalDraftFields {
   if (!isRecord(value)) {
     throw new PortalInputError("fields must be an object.");
   }
   const actualKeys = Object.keys(value).sort();
-  const expectedKeys = [...FIELD_KEYS].sort();
+  const expectedKeys = [...PORTAL_FIELD_NAMES].sort();
   if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
     throw new PortalInputError("fields must contain exactly the known sandbox fields.");
   }
 
-  const stringKeys = FIELD_KEYS.filter((key) => key !== "attachments" && key !== "counterpartyKnown");
+  const stringKeys = PORTAL_FIELD_NAMES.filter(
+    (key) => key !== "attachments" && key !== "counterpartyKnown",
+  );
   for (const key of stringKeys) {
     if (typeof value[key] !== "string") {
       throw new PortalInputError(`${key} must be a string.`);
@@ -104,7 +95,7 @@ export function parsePortalFields(value: unknown): PortalFields {
   };
 }
 
-export function validateReviewFields(fields: PortalFields): readonly PortalFieldIssue[] {
+export function validateReviewFields(fields: PortalDraftFields): readonly PortalFieldIssue[] {
   const issues: PortalFieldIssue[] = [];
   requireText(issues, "incidentDate", fields.incidentDate, "Incident date is required.");
   requireText(issues, "incidentTime", fields.incidentTime, "Incident time is required.");
@@ -158,7 +149,7 @@ export function assertPortalTransition(current: PortalState, target: PortalState
 
 function requireText(
   issues: PortalFieldIssue[],
-  field: Exclude<keyof PortalFields, "attachments" | "counterpartyKnown">,
+  field: Exclude<keyof PortalDraftFields, "attachments" | "counterpartyKnown">,
   value: string,
   message: string,
 ): void {
@@ -190,8 +181,10 @@ function sanitizeAttachmentName(value: string): string {
   return basename.replace(/[\u0000-\u001F\u007F]/g, "").slice(0, 128) || "image";
 }
 
-function isCounterpartyKnown(value: unknown): value is CounterpartyKnown {
-  return value === "" || value === "yes" || value === "no" || value === "unknown";
+function isCounterpartyKnown(
+  value: unknown,
+): value is PortalDraftFields["counterpartyKnown"] {
+  return value === "" || COUNTERPARTY_KNOWN_VALUES.some((candidate) => candidate === value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

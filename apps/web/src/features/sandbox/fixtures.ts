@@ -1,6 +1,6 @@
-import type { PortalFields, PortalFixture } from "./contracts";
+import type { PortalDraftFields, PortalFixture } from "./contracts";
 
-export const EMPTY_PORTAL_FIELDS: PortalFields = Object.freeze({
+export const EMPTY_PORTAL_FIELDS: PortalDraftFields = Object.freeze({
   attachments: Object.freeze([]),
   claimantName: "",
   counterpartyKnown: "",
@@ -12,7 +12,7 @@ export const EMPTY_PORTAL_FIELDS: PortalFields = Object.freeze({
   vehicleRegistration: "",
 });
 
-export const COMPLETE_PORTAL_FIELDS: PortalFields = Object.freeze({
+export const COMPLETE_PORTAL_FIELDS: PortalDraftFields = Object.freeze({
   attachments: Object.freeze(["rear-overview.jpg", "rear-detail.jpg", "context.png"]),
   claimantName: "Demo Claimant",
   counterpartyKnown: "yes",
@@ -25,11 +25,11 @@ export const COMPLETE_PORTAL_FIELDS: PortalFields = Object.freeze({
   vehicleRegistration: "DEMO-CD-1",
 });
 
-export function fieldsForFixture(fixture: PortalFixture): PortalFields {
+export function fieldsForFixture(fixture: PortalFixture): PortalDraftFields {
   return clonePortalFields(fixture === "complete" ? COMPLETE_PORTAL_FIELDS : EMPTY_PORTAL_FIELDS);
 }
 
-export function clonePortalFields(fields: PortalFields): PortalFields {
+export function clonePortalFields(fields: PortalDraftFields): PortalDraftFields {
   return {
     ...fields,
     attachments: [...fields.attachments],

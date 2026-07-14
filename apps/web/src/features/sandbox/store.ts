@@ -1,6 +1,6 @@
 import type {
   PortalAuditEntry,
-  PortalFields,
+  PortalDraftFields,
   PortalFixture,
   PortalSession,
   PortalVariant,
@@ -49,7 +49,7 @@ export class SandboxPortalStore {
     caseId: string,
     variant: PortalVariant,
     expectedVersion: number,
-    fields: PortalFields,
+    fields: PortalDraftFields,
   ): PortalView {
     const current = this.#requireSession(caseId, variant);
     this.#assertVersion(current, expectedVersion);

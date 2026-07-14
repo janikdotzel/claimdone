@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   PortalFieldIssue,
   PortalFieldName,
-  PortalFields,
+  PortalDraftFields,
   PortalFixture,
   PortalState,
   PortalVariant,
@@ -78,7 +78,9 @@ const FIELD_LABELS: Readonly<Record<PortalFieldName, string>> = {
 
 export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProps) {
   const [view, setView] = useState<PortalView | null>(null);
-  const [fields, setFields] = useState<PortalFields>(() => clonePortalFields(EMPTY_PORTAL_FIELDS));
+  const [fields, setFields] = useState<PortalDraftFields>(() =>
+    clonePortalFields(EMPTY_PORTAL_FIELDS),
+  );
   const [fixture, setFixture] = useState<PortalFixture>("complete");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -197,7 +199,7 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
     setFields((current) => ({ ...current, [field]: value }));
   }
 
-  function setCounterparty(value: PortalFields["counterpartyKnown"]): void {
+  function setCounterparty(value: PortalDraftFields["counterpartyKnown"]): void {
     setFields((current) => ({ ...current, counterpartyKnown: value }));
   }
 
@@ -349,9 +351,9 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
 interface PortalFieldProps {
   readonly error: string | undefined;
   readonly field: PortalFieldName;
-  readonly fields: PortalFields;
+  readonly fields: PortalDraftFields;
   readonly onAttachments: (event: ChangeEvent<HTMLInputElement>) => void;
-  readonly onCounterparty: (value: PortalFields["counterpartyKnown"]) => void;
+  readonly onCounterparty: (value: PortalDraftFields["counterpartyKnown"]) => void;
   readonly onRemoveAttachment: (index: number) => void;
   readonly onText: (
     field: Exclude<PortalFieldName, "attachments" | "counterpartyKnown">,
@@ -416,7 +418,7 @@ function PortalField(props: PortalFieldProps) {
           aria-labelledby={variant === "B" ? labelId : undefined}
           id={inputId}
           onChange={(event) =>
-            props.onCounterparty(event.target.value as PortalFields["counterpartyKnown"])
+            props.onCounterparty(event.target.value as PortalDraftFields["counterpartyKnown"])
           }
           value={fields.counterpartyKnown}
         >
@@ -475,7 +477,7 @@ function FieldError({ error, id }: Readonly<{ error: string | undefined; id: str
 export function PortalStateView({
   fields,
   state,
-}: Readonly<{ fields: PortalFields; state: Exclude<PortalState, "draft"> }>) {
+}: Readonly<{ fields: PortalDraftFields; state: Exclude<PortalState, "draft"> }>) {
   const isReceipt = state === "receipt";
   return (
     <section className={styles.reviewPanel} aria-labelledby="portal-review-heading">
@@ -574,7 +576,7 @@ async function putDraft(
   caseId: string,
   variant: PortalVariant,
   expectedVersion: number,
-  fields: PortalFields,
+  fields: PortalDraftFields,
 ): Promise<PortalView> {
   return requestPortal<PortalView>(portalUrl(caseId, variant, "/draft"), {
     body: JSON.stringify({ expectedVersion, fields }),

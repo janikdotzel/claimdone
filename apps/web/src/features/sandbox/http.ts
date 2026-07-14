@@ -1,4 +1,9 @@
-import type { PortalErrorBody, PortalFields, PortalFixture, PortalVariant } from "./contracts";
+import type {
+  PortalDraftFields,
+  PortalErrorBody,
+  PortalFixture,
+  PortalVariant,
+} from "./contracts";
 import { PortalConflictError } from "./store";
 import {
   assertCaseId,
@@ -11,7 +16,7 @@ import {
 
 export interface SaveDraftRequest {
   readonly expectedVersion: number;
-  readonly fields: PortalFields;
+  readonly fields: PortalDraftFields;
 }
 
 export interface ReviewRequest {
