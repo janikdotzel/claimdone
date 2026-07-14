@@ -1,0 +1,1900 @@
+{
+  "$defs": {
+    "ActorType": {
+      "enum": [
+        "system",
+        "agent",
+        "human"
+      ],
+      "title": "ActorType",
+      "type": "string"
+    },
+    "AllowedTool": {
+      "enum": [
+        "inspect_evidence",
+        "check_required_fields",
+        "ask_clarification",
+        "inspect_form",
+        "fill_until_review",
+        "verify_rendered_fields",
+        "read_receipt"
+      ],
+      "title": "AllowedTool",
+      "type": "string"
+    },
+    "AuditDetail": {
+      "additionalProperties": false,
+      "description": "A deliberately redacted audit attribute.",
+      "properties": {
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Key",
+          "type": "string"
+        },
+        "redacted": {
+          "const": true,
+          "title": "Redacted",
+          "type": "boolean"
+        },
+        "valueSummary": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Valuesummary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "valueSummary",
+        "redacted"
+      ],
+      "title": "AuditDetail",
+      "type": "object"
+    },
+    "AuditEvent": {
+      "additionalProperties": false,
+      "description": "Redacted event suitable for persistence and the UI event strip.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorType"
+        },
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "1.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "details": {
+          "items": {
+            "$ref": "#/$defs/AuditDetail"
+          },
+          "title": "Details",
+          "type": "array"
+        },
+        "eventId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Eventid",
+          "type": "string"
+        },
+        "eventType": {
+          "$ref": "#/$defs/AuditEventType"
+        },
+        "fromState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaseState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "occurredAt": {
+          "format": "date-time",
+          "title": "Occurredat",
+          "type": "string"
+        },
+        "reasonCodes": {
+          "items": {
+            "$ref": "#/$defs/GateReasonCode"
+          },
+          "title": "Reasoncodes",
+          "type": "array"
+        },
+        "toState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaseState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contractVersion",
+        "eventId",
+        "caseId",
+        "eventType",
+        "actor",
+        "occurredAt",
+        "fromState",
+        "toState",
+        "reasonCodes",
+        "details"
+      ],
+      "title": "AuditEvent",
+      "type": "object"
+    },
+    "AuditEventType": {
+      "enum": [
+        "case_state_changed",
+        "gate_decision",
+        "plan_step",
+        "tool_call",
+        "verification",
+        "human_approval",
+        "receipt",
+        "reset"
+      ],
+      "title": "AuditEventType",
+      "type": "string"
+    },
+    "CaseState": {
+      "description": "Canonical orchestrator states.",
+      "enum": [
+        "created",
+        "disclosed",
+        "analyzing",
+        "awaiting_clarification",
+        "ready_to_fill",
+        "filling",
+        "verifying",
+        "review",
+        "blocked",
+        "human_approved",
+        "receipt",
+        "emergency_stopped",
+        "abandoned",
+        "failed"
+      ],
+      "title": "CaseState",
+      "type": "string"
+    },
+    "CheckpointStatus": {
+      "enum": [
+        "pending",
+        "passed",
+        "failed"
+      ],
+      "title": "CheckpointStatus",
+      "type": "string"
+    },
+    "ClaimData": {
+      "additionalProperties": false,
+      "description": "The complete draft payload and deterministic required-field result.",
+      "properties": {
+        "attachments": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Attachments",
+          "type": "array"
+        },
+        "claimantName": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Claimantname"
+        },
+        "counterpartyKnown": {
+          "$ref": "#/$defs/CounterpartyKnown"
+        },
+        "fieldProvenance": {
+          "items": {
+            "$ref": "#/$defs/FieldProvenance"
+          },
+          "title": "Fieldprovenance",
+          "type": "array"
+        },
+        "incidentDate": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Incidentdate"
+        },
+        "incidentTime": {
+          "anyOf": [
+            {
+              "format": "time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Incidenttime"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Location"
+        },
+        "missingRequiredFields": {
+          "items": {
+            "$ref": "#/$defs/RequiredClaimField"
+          },
+          "title": "Missingrequiredfields",
+          "type": "array"
+        },
+        "narrative": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Narrative"
+        },
+        "policyReference": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Policyreference"
+        },
+        "vehicleRegistration": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Vehicleregistration"
+        }
+      },
+      "required": [
+        "incidentDate",
+        "incidentTime",
+        "location",
+        "claimantName",
+        "policyReference",
+        "vehicleRegistration",
+        "counterpartyKnown",
+        "narrative",
+        "attachments",
+        "missingRequiredFields",
+        "fieldProvenance"
+      ],
+      "title": "ClaimData",
+      "type": "object"
+    },
+    "ClaimPacket": {
+      "additionalProperties": false,
+      "description": "Canonical evidence-linked claim draft consumed by every subsystem.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "claim": {
+          "$ref": "#/$defs/ClaimData"
+        },
+        "contractVersion": {
+          "const": "1.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceItem"
+          },
+          "minItems": 4,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/EvidenceFact"
+          },
+          "title": "Facts",
+          "type": "array"
+        },
+        "gateDecisions": {
+          "items": {
+            "$ref": "#/$defs/GateDecision"
+          },
+          "title": "Gatedecisions",
+          "type": "array"
+        },
+        "plan": {
+          "$ref": "#/$defs/ToolPlan"
+        },
+        "portalState": {
+          "$ref": "#/$defs/PortalState"
+        },
+        "provenance": {
+          "items": {
+            "$ref": "#/$defs/ProvenanceRef"
+          },
+          "minItems": 1,
+          "title": "Provenance",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/ClaimScope"
+        },
+        "state": {
+          "$ref": "#/$defs/CaseState"
+        },
+        "verification": {
+          "$ref": "#/$defs/VerificationReport"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "caseId",
+        "state",
+        "portalState",
+        "scope",
+        "evidence",
+        "provenance",
+        "facts",
+        "claim",
+        "plan",
+        "gateDecisions",
+        "verification"
+      ],
+      "title": "ClaimPacket",
+      "type": "object"
+    },
+    "ClaimScope": {
+      "additionalProperties": false,
+      "description": "Immutable sandbox and final-action authority boundary.",
+      "properties": {
+        "agentCanSubmit": {
+          "const": false,
+          "title": "Agentcansubmit",
+          "type": "boolean"
+        },
+        "environment": {
+          "const": "sandbox",
+          "title": "Environment",
+          "type": "string"
+        },
+        "finalActionOwner": {
+          "const": "human",
+          "title": "Finalactionowner",
+          "type": "string"
+        },
+        "scenario": {
+          "const": "two_vehicle_rear_end_no_injury",
+          "title": "Scenario",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "scenario",
+        "agentCanSubmit",
+        "finalActionOwner"
+      ],
+      "title": "ClaimScope",
+      "type": "object"
+    },
+    "CounterpartyKnown": {
+      "enum": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "title": "CounterpartyKnown",
+      "type": "string"
+    },
+    "DeterministicEvalExpectation": {
+      "additionalProperties": false,
+      "description": "A binary or structured check that never delegates to a model grader.",
+      "properties": {
+        "checkId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Checkid",
+          "type": "string"
+        },
+        "deterministic": {
+          "const": true,
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "expectedPassed": {
+          "title": "Expectedpassed",
+          "type": "boolean"
+        },
+        "expectedReasonCodes": {
+          "items": {
+            "$ref": "#/$defs/GateReasonCode"
+          },
+          "title": "Expectedreasoncodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "checkId",
+        "deterministic",
+        "expectedPassed",
+        "expectedReasonCodes"
+      ],
+      "title": "DeterministicEvalExpectation",
+      "type": "object"
+    },
+    "EvalCase": {
+      "additionalProperties": false,
+      "description": "Versioned eval input and ground truth, usable without a live model.",
+      "properties": {
+        "contractVersion": {
+          "const": "1.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "evalId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evalid",
+          "type": "string"
+        },
+        "evaluationMode": {
+          "$ref": "#/$defs/EvaluationMode"
+        },
+        "expectation": {
+          "$ref": "#/$defs/EvalExpectation"
+        },
+        "input": {
+          "$ref": "#/$defs/EvalInput"
+        },
+        "priority": {
+          "$ref": "#/$defs/EvalPriority"
+        },
+        "releaseBlocking": {
+          "title": "Releaseblocking",
+          "type": "boolean"
+        },
+        "tags": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "title": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "evalId",
+        "title",
+        "priority",
+        "evaluationMode",
+        "releaseBlocking",
+        "tags",
+        "input",
+        "expectation"
+      ],
+      "title": "EvalCase",
+      "type": "object"
+    },
+    "EvalExpectation": {
+      "additionalProperties": false,
+      "description": "Complete, machine-readable ground truth for an eval case.",
+      "properties": {
+        "allowedFacts": {
+          "items": {
+            "$ref": "#/$defs/FactExpectation"
+          },
+          "title": "Allowedfacts",
+          "type": "array"
+        },
+        "allowedTools": {
+          "items": {
+            "$ref": "#/$defs/AllowedTool"
+          },
+          "title": "Allowedtools",
+          "type": "array"
+        },
+        "deterministicChecks": {
+          "items": {
+            "$ref": "#/$defs/DeterministicEvalExpectation"
+          },
+          "minItems": 1,
+          "title": "Deterministicchecks",
+          "type": "array"
+        },
+        "expectedClarification": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expectedclarification"
+        },
+        "expectedFinalState": {
+          "$ref": "#/$defs/CaseState"
+        },
+        "expectedGateDecisions": {
+          "items": {
+            "$ref": "#/$defs/ExpectedGateDecision"
+          },
+          "minItems": 1,
+          "title": "Expectedgatedecisions",
+          "type": "array"
+        },
+        "expectedMissingFields": {
+          "items": {
+            "$ref": "#/$defs/RequiredClaimField"
+          },
+          "title": "Expectedmissingfields",
+          "type": "array"
+        },
+        "expectedPortalValues": {
+          "items": {
+            "$ref": "#/$defs/PortalValueExpectation"
+          },
+          "title": "Expectedportalvalues",
+          "type": "array"
+        },
+        "expectedToolSequence": {
+          "items": {
+            "$ref": "#/$defs/AllowedTool"
+          },
+          "title": "Expectedtoolsequence",
+          "type": "array"
+        },
+        "expectedVerificationState": {
+          "$ref": "#/$defs/VerificationState"
+        },
+        "forbiddenFactFields": {
+          "items": {
+            "$ref": "#/$defs/EvidenceField"
+          },
+          "title": "Forbiddenfactfields",
+          "type": "array"
+        },
+        "modelGraderThresholds": {
+          "items": {
+            "$ref": "#/$defs/ModelGraderExpectation"
+          },
+          "title": "Modelgraderthresholds",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowedFacts",
+        "forbiddenFactFields",
+        "expectedMissingFields",
+        "expectedClarification",
+        "allowedTools",
+        "expectedToolSequence",
+        "expectedGateDecisions",
+        "expectedPortalValues",
+        "expectedVerificationState",
+        "expectedFinalState",
+        "deterministicChecks",
+        "modelGraderThresholds"
+      ],
+      "title": "EvalExpectation",
+      "type": "object"
+    },
+    "EvalInput": {
+      "additionalProperties": false,
+      "description": "Non-sensitive fixture references and natural-language input.",
+      "properties": {
+        "fixtureIds": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Fixtureids",
+          "type": "array"
+        },
+        "language": {
+          "enum": [
+            "de",
+            "en"
+          ],
+          "title": "Language",
+          "type": "string"
+        },
+        "portalVariant": {
+          "enum": [
+            "A",
+            "B"
+          ],
+          "title": "Portalvariant",
+          "type": "string"
+        },
+        "statement": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Statement"
+        },
+        "transcript": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Transcript"
+        }
+      },
+      "required": [
+        "fixtureIds",
+        "statement",
+        "transcript",
+        "language",
+        "portalVariant"
+      ],
+      "title": "EvalInput",
+      "type": "object"
+    },
+    "EvalPriority": {
+      "enum": [
+        "P0",
+        "P1",
+        "P2"
+      ],
+      "title": "EvalPriority",
+      "type": "string"
+    },
+    "EvaluationMode": {
+      "enum": [
+        "deterministic",
+        "live",
+        "hybrid"
+      ],
+      "title": "EvaluationMode",
+      "type": "string"
+    },
+    "EvidenceFact": {
+      "additionalProperties": false,
+      "description": "A bounded fact with explicit support status and source references.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "factId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Factid",
+          "type": "string"
+        },
+        "field": {
+          "$ref": "#/$defs/EvidenceField"
+        },
+        "sourceRefs": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Sourcerefs",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/FactStatus"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "factId",
+        "field",
+        "value",
+        "status",
+        "sourceRefs",
+        "confidence"
+      ],
+      "title": "EvidenceFact",
+      "type": "object"
+    },
+    "EvidenceField": {
+      "enum": [
+        "visible_damage",
+        "collision_type",
+        "vehicle_count",
+        "impact_area",
+        "incident_date",
+        "incident_time",
+        "location",
+        "claimant_name",
+        "policy_reference",
+        "vehicle_registration",
+        "counterparty_known",
+        "narrative",
+        "injury_status",
+        "immediate_danger"
+      ],
+      "title": "EvidenceField",
+      "type": "string"
+    },
+    "EvidenceItem": {
+      "additionalProperties": false,
+      "description": "A local, content-addressed evidence input approved for the active case.",
+      "properties": {
+        "evidenceId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidenceid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "localRef": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Localref",
+          "type": "string"
+        },
+        "mediaType": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "text/plain"
+          ],
+          "title": "Mediatype",
+          "type": "string"
+        },
+        "modelCopyApproved": {
+          "title": "Modelcopyapproved",
+          "type": "boolean"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Text"
+        }
+      },
+      "required": [
+        "evidenceId",
+        "kind",
+        "localRef",
+        "mediaType",
+        "sha256",
+        "text",
+        "modelCopyApproved"
+      ],
+      "title": "EvidenceItem",
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "enum": [
+        "image",
+        "user_statement",
+        "transcript",
+        "clarification"
+      ],
+      "title": "EvidenceKind",
+      "type": "string"
+    },
+    "ExpectedGateDecision": {
+      "additionalProperties": false,
+      "description": "Expected deterministic outcome for one gate in an eval case.",
+      "properties": {
+        "deterministic": {
+          "const": true,
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "gateId": {
+          "$ref": "#/$defs/GateId"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reasonCodes": {
+          "items": {
+            "$ref": "#/$defs/GateReasonCode"
+          },
+          "title": "Reasoncodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "gateId",
+        "deterministic",
+        "passed",
+        "reasonCodes"
+      ],
+      "title": "ExpectedGateDecision",
+      "type": "object"
+    },
+    "FactExpectation": {
+      "additionalProperties": false,
+      "description": "Ground truth for one allowed evidence fact.",
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/EvidenceField"
+        },
+        "minimumConfidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Minimumconfidence"
+        },
+        "status": {
+          "$ref": "#/$defs/FactStatus"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "status",
+        "value",
+        "minimumConfidence"
+      ],
+      "title": "FactExpectation",
+      "type": "object"
+    },
+    "FactStatus": {
+      "description": "How strongly an evidence fact is supported.",
+      "enum": [
+        "observed",
+        "user_stated",
+        "unknown",
+        "not_supported"
+      ],
+      "title": "FactStatus",
+      "type": "string"
+    },
+    "FieldProvenance": {
+      "additionalProperties": false,
+      "description": "All source pointers supporting one portal-writable claim field.",
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/RequiredClaimField"
+        },
+        "sourceRefs": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Sourcerefs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "sourceRefs"
+      ],
+      "title": "FieldProvenance",
+      "type": "object"
+    },
+    "GateDecision": {
+      "additionalProperties": false,
+      "description": "Immutable gate event; model signals can only add a block.",
+      "properties": {
+        "contractVersion": {
+          "const": "1.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "decidedAt": {
+          "format": "date-time",
+          "title": "Decidedat",
+          "type": "string"
+        },
+        "deterministicPassed": {
+          "title": "Deterministicpassed",
+          "type": "boolean"
+        },
+        "evidenceRefs": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Evidencerefs",
+          "type": "array"
+        },
+        "gateId": {
+          "$ref": "#/$defs/GateId"
+        },
+        "modelBlocked": {
+          "title": "Modelblocked",
+          "type": "boolean"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reasonCodes": {
+          "items": {
+            "$ref": "#/$defs/GateReasonCode"
+          },
+          "title": "Reasoncodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "gateId",
+        "deterministicPassed",
+        "modelBlocked",
+        "passed",
+        "reasonCodes",
+        "evidenceRefs",
+        "decidedAt"
+      ],
+      "title": "GateDecision",
+      "type": "object"
+    },
+    "GateId": {
+      "description": "Ordered deterministic gate registry identifiers.",
+      "enum": [
+        "G0",
+        "G1",
+        "G2",
+        "G3",
+        "G4",
+        "G5",
+        "G6",
+        "G7",
+        "G8",
+        "G9",
+        "G10",
+        "G11"
+      ],
+      "title": "GateId",
+      "type": "string"
+    },
+    "GateReasonCode": {
+      "description": "Machine-readable deterministic reasons for blocking a gate.",
+      "enum": [
+        "G0_IMAGE_COUNT_INVALID",
+        "G0_IMAGE_TYPE_INVALID",
+        "G0_IMAGE_TOO_LARGE",
+        "G0_INPUT_MODE_INVALID",
+        "G0_AUDIO_TOO_LONG",
+        "G0_CONSENT_MISSING",
+        "G1_EXIF_UNREVIEWED",
+        "G1_MODEL_COPY_NOT_APPROVED",
+        "G1_SENSITIVE_LOG_DATA",
+        "G2_SCHEMA_INVALID",
+        "G2_REFUSAL",
+        "G2_OUTPUT_TRUNCATED",
+        "G2_REFERENCE_MISSING",
+        "G2_RETRY_EXHAUSTED",
+        "G3_INJURY_OR_EMERGENCY",
+        "G3_REAL_PORTAL",
+        "G3_LEGAL_OR_LIABILITY",
+        "G3_PAYMENT_OR_COVERAGE",
+        "G3_SUBMISSION_ACTION",
+        "G3_MODEL_UNCERTAIN",
+        "G4_PROVENANCE_MISSING",
+        "G4_SENSITIVE_IMAGE_INFERENCE",
+        "G4_FACT_NOT_WRITABLE",
+        "G4_CONFIDENCE_BELOW_THRESHOLD",
+        "G4_CONFLICTING_SOURCES",
+        "G4_NARRATIVE_UNSUPPORTED",
+        "G5_REQUIRED_FIELD_MISSING",
+        "G5_QUESTION_INVALID",
+        "G5_CLARIFICATION_LIMIT",
+        "G6_TOOL_UNKNOWN",
+        "G6_ARGUMENTS_INVALID",
+        "G6_STATE_INVALID",
+        "G6_URL_NOT_ALLOWED",
+        "G6_LIMIT_EXCEEDED",
+        "G6_FORBIDDEN_ACTION",
+        "G7_FIELD_NOT_ALLOWED",
+        "G7_VALUE_NOT_FROM_PACKET",
+        "G7_PROVENANCE_MISSING",
+        "G7_FIELD_NOT_EDITABLE",
+        "G7_ATTACHMENT_MISMATCH",
+        "G8_FIELD_MISMATCH",
+        "G8_ATTACHMENT_MISMATCH",
+        "G8_REQUIRED_FIELD_MISSING",
+        "G8_MODEL_MISMATCH",
+        "G9_AGENT_FORBIDDEN",
+        "G9_ROLE_INVALID",
+        "G9_TOKEN_INVALID",
+        "G10_BEFORE_APPROVAL",
+        "G10_REDACTION_FAILED",
+        "G11_DETERMINISTIC_TESTS_FAILED",
+        "G11_SAFETY_EVAL_FAILED",
+        "G11_THRESHOLD_FAILED",
+        "G11_PORTAL_SUCCESS_FAILED",
+        "G11_APPROVAL_ATTACK_FAILED",
+        "G11_CLEAN_CHECKOUT_FAILED",
+        "G11_DOCUMENTATION_MISSING",
+        "G11_LICENSE_MISSING",
+        "G11_FIXTURES_MISSING",
+        "G11_TEST_REPORT_MISSING",
+        "G11_HUMAN_CHECKPOINT_MISSING"
+      ],
+      "title": "GateReasonCode",
+      "type": "string"
+    },
+    "HumanCheckpoint": {
+      "additionalProperties": false,
+      "description": "Explicit human-owned release prerequisite.",
+      "properties": {
+        "checkpointId": {
+          "$ref": "#/$defs/HumanCheckpointId"
+        },
+        "confirmedAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confirmedat"
+        },
+        "confirmedBy": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confirmedby"
+        },
+        "status": {
+          "$ref": "#/$defs/CheckpointStatus"
+        }
+      },
+      "required": [
+        "checkpointId",
+        "status",
+        "confirmedBy",
+        "confirmedAt"
+      ],
+      "title": "HumanCheckpoint",
+      "type": "object"
+    },
+    "HumanCheckpointId": {
+      "enum": [
+        "demo_video",
+        "feedback_session",
+        "repository_access"
+      ],
+      "title": "HumanCheckpointId",
+      "type": "string"
+    },
+    "ModelGradeResult": {
+      "additionalProperties": false,
+      "description": "Supplementary quality result with no deterministic-gate authority.",
+      "properties": {
+        "graderId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Graderid",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "threshold": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "graderId",
+        "score",
+        "threshold",
+        "passed"
+      ],
+      "title": "ModelGradeResult",
+      "type": "object"
+    },
+    "ModelGraderExpectation": {
+      "additionalProperties": false,
+      "description": "Quality-only threshold; it has no authority over deterministic gates.",
+      "properties": {
+        "graderId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Graderid",
+          "type": "string"
+        },
+        "hardFloor": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Hardfloor",
+          "type": "number"
+        },
+        "minimumScore": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Minimumscore",
+          "type": "number"
+        }
+      },
+      "required": [
+        "graderId",
+        "minimumScore",
+        "hardFloor"
+      ],
+      "title": "ModelGraderExpectation",
+      "type": "object"
+    },
+    "PlanStep": {
+      "additionalProperties": false,
+      "description": "One visible, bounded tool selection.",
+      "properties": {
+        "reason": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "sequence": {
+          "maximum": 40,
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "tool": {
+          "$ref": "#/$defs/AllowedTool"
+        }
+      },
+      "required": [
+        "sequence",
+        "tool",
+        "reason"
+      ],
+      "title": "PlanStep",
+      "type": "object"
+    },
+    "PortalState": {
+      "description": "States exposed by the local sandbox portal.",
+      "enum": [
+        "draft",
+        "review",
+        "human_approved",
+        "receipt"
+      ],
+      "title": "PortalState",
+      "type": "string"
+    },
+    "PortalValueExpectation": {
+      "additionalProperties": false,
+      "description": "Exact portal value and its expected source pointers.",
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/RequiredClaimField"
+        },
+        "sourceRefs": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Sourcerefs",
+          "type": "array"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "value",
+        "sourceRefs"
+      ],
+      "title": "PortalValueExpectation",
+      "type": "object"
+    },
+    "ProvenanceRef": {
+      "additionalProperties": false,
+      "description": "Stable pointer from a fact or claim field to one evidence item.",
+      "properties": {
+        "evidenceId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Evidenceid",
+          "type": "string"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Locator"
+        },
+        "provenanceId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Provenanceid",
+          "type": "string"
+        },
+        "userConfirmed": {
+          "title": "Userconfirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provenanceId",
+        "evidenceId",
+        "locator",
+        "userConfirmed"
+      ],
+      "title": "ProvenanceRef",
+      "type": "object"
+    },
+    "ReleaseCheck": {
+      "additionalProperties": false,
+      "description": "One authoritative deterministic G11 prerequisite.",
+      "properties": {
+        "checkId": {
+          "$ref": "#/$defs/ReleaseCheckId"
+        },
+        "deterministic": {
+          "const": true,
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reasonCode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateReasonCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "checkId",
+        "deterministic",
+        "passed",
+        "reasonCode"
+      ],
+      "title": "ReleaseCheck",
+      "type": "object"
+    },
+    "ReleaseCheckId": {
+      "enum": [
+        "deterministic_tests",
+        "safety_evals",
+        "eval_thresholds",
+        "portal_success_rate",
+        "approval_attacks",
+        "clean_checkout",
+        "readme",
+        "license",
+        "fixtures",
+        "test_report"
+      ],
+      "title": "ReleaseCheckId",
+      "type": "string"
+    },
+    "ReleaseDecision": {
+      "additionalProperties": false,
+      "description": "Final release result derived from separated deterministic, model, and human inputs.",
+      "properties": {
+        "commitSha": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Commitsha",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "1.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "deterministicChecks": {
+          "items": {
+            "$ref": "#/$defs/ReleaseCheck"
+          },
+          "minItems": 1,
+          "title": "Deterministicchecks",
+          "type": "array"
+        },
+        "deterministicPassed": {
+          "title": "Deterministicpassed",
+          "type": "boolean"
+        },
+        "evaluatedAt": {
+          "format": "date-time",
+          "title": "Evaluatedat",
+          "type": "string"
+        },
+        "humanCheckpoints": {
+          "items": {
+            "$ref": "#/$defs/HumanCheckpoint"
+          },
+          "minItems": 1,
+          "title": "Humancheckpoints",
+          "type": "array"
+        },
+        "humanCheckpointsPassed": {
+          "title": "Humancheckpointspassed",
+          "type": "boolean"
+        },
+        "modelGrades": {
+          "items": {
+            "$ref": "#/$defs/ModelGradeResult"
+          },
+          "minItems": 1,
+          "title": "Modelgrades",
+          "type": "array"
+        },
+        "modelQualityPassed": {
+          "title": "Modelqualitypassed",
+          "type": "boolean"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reasonCodes": {
+          "items": {
+            "$ref": "#/$defs/GateReasonCode"
+          },
+          "title": "Reasoncodes",
+          "type": "array"
+        },
+        "releaseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Releaseid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "releaseId",
+        "commitSha",
+        "evaluatedAt",
+        "deterministicChecks",
+        "modelGrades",
+        "humanCheckpoints",
+        "deterministicPassed",
+        "modelQualityPassed",
+        "humanCheckpointsPassed",
+        "passed",
+        "reasonCodes"
+      ],
+      "title": "ReleaseDecision",
+      "type": "object"
+    },
+    "RequiredClaimField": {
+      "enum": [
+        "incident_date",
+        "incident_time",
+        "location",
+        "claimant_name",
+        "policy_reference",
+        "vehicle_registration",
+        "counterparty_known",
+        "narrative",
+        "attachments"
+      ],
+      "title": "RequiredClaimField",
+      "type": "string"
+    },
+    "ToolPlan": {
+      "additionalProperties": false,
+      "description": "Ordered plan whose type surface cannot express submission authority.",
+      "properties": {
+        "agentCanSubmit": {
+          "const": false,
+          "title": "Agentcansubmit",
+          "type": "boolean"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          },
+          "maxItems": 40,
+          "minItems": 1,
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentCanSubmit",
+        "steps"
+      ],
+      "title": "ToolPlan",
+      "type": "object"
+    },
+    "VerificationFieldResult": {
+      "additionalProperties": false,
+      "description": "Fresh rendered-value comparison for one required portal field.",
+      "properties": {
+        "actual": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actual"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expected"
+        },
+        "field": {
+          "$ref": "#/$defs/RequiredClaimField"
+        },
+        "sourceRefs": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Sourcerefs",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/VerificationFieldStatus"
+        }
+      },
+      "required": [
+        "field",
+        "expected",
+        "actual",
+        "status",
+        "sourceRefs"
+      ],
+      "title": "VerificationFieldResult",
+      "type": "object"
+    },
+    "VerificationFieldStatus": {
+      "enum": [
+        "match",
+        "mismatch",
+        "missing"
+      ],
+      "title": "VerificationFieldStatus",
+      "type": "string"
+    },
+    "VerificationReport": {
+      "additionalProperties": false,
+      "description": "Deterministic comparison plus an optional additional model block.",
+      "properties": {
+        "actualAttachmentCount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actualattachmentcount"
+        },
+        "deterministicMatch": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Deterministicmatch"
+        },
+        "expectedAttachmentCount": {
+          "const": 3,
+          "title": "Expectedattachmentcount",
+          "type": "integer"
+        },
+        "fieldResults": {
+          "items": {
+            "$ref": "#/$defs/VerificationFieldResult"
+          },
+          "title": "Fieldresults",
+          "type": "array"
+        },
+        "modelReportedMismatch": {
+          "title": "Modelreportedmismatch",
+          "type": "boolean"
+        },
+        "reviewAllowed": {
+          "title": "Reviewallowed",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/VerificationState"
+        },
+        "verifiedAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verifiedat"
+        }
+      },
+      "required": [
+        "status",
+        "deterministicMatch",
+        "modelReportedMismatch",
+        "fieldResults",
+        "expectedAttachmentCount",
+        "actualAttachmentCount",
+        "reviewAllowed",
+        "verifiedAt"
+      ],
+      "title": "VerificationReport",
+      "type": "object"
+    },
+    "VerificationState": {
+      "description": "Outcome of the independent verification pass.",
+      "enum": [
+        "pending",
+        "verified",
+        "mismatch",
+        "blocked"
+      ],
+      "title": "VerificationState",
+      "type": "string"
+    }
+  },
+  "$id": "https://claimdone.local/contracts/1.0.0/claimdone.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "JSON Schema 2020-12 catalog compatible with the OpenAPI 3.1 schema dialect.",
+  "title": "ClaimDone canonical contracts",
+  "x-agent-can-submit": false,
+  "x-case-transitions": {
+    "abandoned": [],
+    "analyzing": [
+      "abandoned",
+      "awaiting_clarification",
+      "blocked",
+      "emergency_stopped",
+      "failed"
+    ],
+    "awaiting_clarification": [
+      "abandoned",
+      "blocked",
+      "emergency_stopped",
+      "failed",
+      "ready_to_fill"
+    ],
+    "blocked": [],
+    "created": [
+      "abandoned",
+      "disclosed",
+      "failed"
+    ],
+    "disclosed": [
+      "abandoned",
+      "analyzing",
+      "blocked",
+      "emergency_stopped",
+      "failed"
+    ],
+    "emergency_stopped": [],
+    "failed": [],
+    "filling": [
+      "abandoned",
+      "blocked",
+      "emergency_stopped",
+      "failed",
+      "verifying"
+    ],
+    "human_approved": [
+      "failed",
+      "receipt"
+    ],
+    "ready_to_fill": [
+      "abandoned",
+      "blocked",
+      "emergency_stopped",
+      "failed",
+      "filling"
+    ],
+    "receipt": [],
+    "review": [
+      "abandoned",
+      "failed",
+      "human_approved"
+    ],
+    "verifying": [
+      "abandoned",
+      "blocked",
+      "emergency_stopped",
+      "failed",
+      "review"
+    ]
+  },
+  "x-contract-version": "1.0.0",
+  "x-root-models": {
+    "AuditEvent": {
+      "$ref": "#/$defs/AuditEvent"
+    },
+    "ClaimData": {
+      "$ref": "#/$defs/ClaimData"
+    },
+    "ClaimPacket": {
+      "$ref": "#/$defs/ClaimPacket"
+    },
+    "ClaimScope": {
+      "$ref": "#/$defs/ClaimScope"
+    },
+    "EvalCase": {
+      "$ref": "#/$defs/EvalCase"
+    },
+    "EvidenceFact": {
+      "$ref": "#/$defs/EvidenceFact"
+    },
+    "EvidenceItem": {
+      "$ref": "#/$defs/EvidenceItem"
+    },
+    "GateDecision": {
+      "$ref": "#/$defs/GateDecision"
+    },
+    "PlanStep": {
+      "$ref": "#/$defs/PlanStep"
+    },
+    "ProvenanceRef": {
+      "$ref": "#/$defs/ProvenanceRef"
+    },
+    "ReleaseDecision": {
+      "$ref": "#/$defs/ReleaseDecision"
+    },
+    "ToolPlan": {
+      "$ref": "#/$defs/ToolPlan"
+    },
+    "VerificationReport": {
+      "$ref": "#/$defs/VerificationReport"
+    }
+  },
+  "x-terminal-case-states": [
+    "abandoned",
+    "blocked",
+    "emergency_stopped",
+    "failed",
+    "receipt"
+  ]
+}
