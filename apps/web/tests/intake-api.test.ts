@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   answerClarification,
+  claimDoneApiOrigin,
+  claimDonePortalOrigin,
   createAndSubmitIntake,
   deleteAuthoritativeCase,
   deleteCase,
@@ -104,6 +106,40 @@ describe("ClaimDone intake API boundary", () => {
     ).rejects.toMatchObject({ detail: { code: "CLIENT_INPUT_INVALID" } });
   });
 
+  it("retains created-case cleanup ownership after a valid response", async () => {
+    const onCaseCreated = vi.fn();
+    const onCaseCleaned = vi.fn();
+    const fetcher: ClaimDoneFetch = async (input) =>
+      String(input).endsWith("/api/cases")
+        ? Response.json(
+            {
+              ...caseBody("awaiting_clarification", "draft", 1),
+              state: "created",
+            },
+            { status: 201 },
+          )
+        : Response.json(awaitingBody());
+
+    const response = await createAndSubmitIntake(
+      {
+        audio: null,
+        dataProcessingApproved: true,
+        exifDecisions: ["strip", "strip", "strip"],
+        imageRightsConfirmed: true,
+        images: demoImages(),
+        sandboxAcknowledged: true,
+        statementText: "Synthetic statement",
+      },
+      fetcher,
+      { onCaseCleaned, onCaseCreated },
+    );
+
+    expect(response.case.caseId).toBe("case-api-001");
+    expect(onCaseCreated).toHaveBeenCalledOnce();
+    expect(onCaseCreated).toHaveBeenCalledWith("case-api-001");
+    expect(onCaseCleaned).not.toHaveBeenCalled();
+  });
+
   it.each(["draft revision", "case binding", "gate order"])(
     "rejects an inconsistent %s response",
     async (variant) => {
@@ -131,6 +167,101 @@ describe("ClaimDone intake API boundary", () => {
       ).rejects.toMatchObject({ detail: { code: "CLIENT_INVALID_RESPONSE" } });
     },
   );
+
+  it.each([
+    {
+      label: "invented reason code",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[5]!.reasonCodes = ["G5_INVENTED_REASON"];
+      },
+    },
+    {
+      label: "reason code from the wrong gate",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[5]!.reasonCodes = ["G4_PROVENANCE_MISSING"];
+      },
+    },
+    {
+      label: "duplicate reason code",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[5]!.reasonCodes = [
+          "G5_REQUIRED_FIELD_MISSING",
+          "G5_REQUIRED_FIELD_MISSING",
+        ];
+      },
+    },
+    {
+      label: "passing gate with a reason",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[0]!.reasonCodes = ["G0_CONSENT_MISSING"];
+      },
+    },
+    {
+      label: "contradictory pass flags",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[0]!.deterministicPassed = false;
+      },
+    },
+    {
+      label: "model block on a non-model gate",
+      mutate: (body: ReturnType<typeof awaitingBody>) => {
+        body.gateHistory[2]!.deterministicPassed = false;
+        body.gateHistory[2]!.modelBlocked = true;
+        body.gateHistory[2]!.passed = false;
+        body.gateHistory[2]!.reasonCodes = ["G2_SCHEMA_INVALID"];
+      },
+    },
+  ])("rejects GateDecision payload with $label", async ({ mutate }) => {
+    const body = awaitingBody();
+    mutate(body);
+    const fetcher: ClaimDoneFetch = async () => Response.json(body);
+
+    await expect(
+      submitIntake(
+        "case-api-001",
+        {
+          audio: null,
+          dataProcessingApproved: true,
+          exifDecisions: ["strip", "strip", "strip"],
+          expectedVersion: 1,
+          imageRightsConfirmed: true,
+          images: demoImages(),
+          sandboxAcknowledged: true,
+          statementText: "Synthetic statement",
+        },
+        fetcher,
+      ),
+    ).rejects.toMatchObject({ detail: { code: "CLIENT_INVALID_RESPONSE" } });
+  });
+
+  it("uses only the two approved INT-001 loopback origins", () => {
+    expect(claimDoneApiOrigin()).toBe("http://127.0.0.1:8000");
+    expect(claimDonePortalOrigin()).toBe("http://127.0.0.1:3000");
+  });
+
+  it.each([
+    ["api", "http://localhost:8000"],
+    ["api", "http://127.0.0.1.evil.example:8000"],
+    ["api", "http://2130706433:8000"],
+    ["api", "http://127.0.0.1:8000/"],
+    ["api", " http://127.0.0.1:8000"],
+    ["api", "https://127.0.0.1:8000"],
+    ["api", "http://user@127.0.0.1:8000"],
+    ["api", "http://127.0.0.1:8000/api"],
+    ["api", "http://127.0.0.1:8000?debug=true"],
+    ["portal", "http://localhost:3000"],
+    ["portal", "http://127.0.0.1:3001"],
+    ["portal", "http://127.0.0.1:3000/#review"],
+    ["portal", "https://127.0.0.1:3000"],
+  ])("rejects non-approved %s origin %s", (kind, origin) => {
+    if (kind === "api") {
+      process.env.NEXT_PUBLIC_CLAIMDONE_API_ORIGIN = origin;
+      expect(() => claimDoneApiOrigin()).toThrow("approved loopback origin");
+    } else {
+      process.env.NEXT_PUBLIC_CLAIMDONE_PORTAL_ORIGIN = origin;
+      expect(() => claimDonePortalOrigin()).toThrow("approved loopback origin");
+    }
+  });
 
   it("posts exactly one version-bound clarification answer and accepts review", async () => {
     const fetcher = vi.fn<ClaimDoneFetch>(async (_input, init) => {

@@ -304,13 +304,13 @@ export function IntakeFlow({
   const [clarificationError, setClarificationError] = useState<string | null>(null);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
   const [isResetting, setIsResetting] = useState(false);
-  const [pendingCleanupCaseId, setPendingCleanupCaseId] = useState<string | null>(null);
   const previewRegistry = useRef<PreviewUrlRegistry | null>(null);
   const activeAudioPreview = useRef<string | null>(null);
   const audioSourceFile = useRef<File | null>(null);
   const sourceFiles = useRef(new Map<string, File>());
   const nextId = useRef(0);
   const nextRequestToken = useRef(0);
+  const requestPendingRef = useRef(false);
   const cleanupErrorRef = useRef<HTMLDivElement>(null);
   const serverErrorRef = useRef<HTMLDivElement>(null);
   const gateResult = useMemo(() => evaluateIntakeGates(state), [state]);
@@ -346,6 +346,10 @@ export function IntakeFlow({
   }, [state.serverError]);
 
   useEffect(() => {
+    requestPendingRef.current = state.serverRequest !== null;
+  }, [state.serverRequest]);
+
+  useEffect(() => {
     if (cleanupError !== null) cleanupErrorRef.current?.focus();
   }, [cleanupError]);
 
@@ -356,6 +360,7 @@ export function IntakeFlow({
 
   const addImages = useCallback(
     (files: ReadonlyArray<File>) => {
+      if (requestPendingRef.current || state.serverRequest !== null) return;
       const existing = new Set(
         [...sourceFiles.current.values()].map((file) => imageFingerprint(file)),
       );
@@ -437,7 +442,7 @@ export function IntakeFlow({
           });
       }
     },
-    [allocateId, registerPreview],
+    [allocateId, registerPreview, state.serverRequest],
   );
 
   const handleImageInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -448,16 +453,19 @@ export function IntakeFlow({
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragging(false);
+    if (requestPendingRef.current || state.serverRequest !== null) return;
     addImages(Array.from(event.dataTransfer.files));
   };
 
   const removeImage = (image: IntakeImage) => {
+    if (requestPendingRef.current) return;
     sourceFiles.current.delete(image.id);
     releasePreview(image.previewUrl);
     dispatch({ id: image.id, type: "REMOVE_IMAGE" });
   };
 
   const changeStatementMode = (mode: StatementMode) => {
+    if (requestPendingRef.current) return;
     if (mode === "text" && activeAudioPreview.current !== null) {
       releasePreview(activeAudioPreview.current);
       activeAudioPreview.current = null;
@@ -467,6 +475,7 @@ export function IntakeFlow({
   };
 
   const handleAudioInput = (event: ChangeEvent<HTMLInputElement>) => {
+    if (requestPendingRef.current) return;
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (file === undefined) return;
@@ -533,6 +542,7 @@ export function IntakeFlow({
   };
 
   const removeAudio = () => {
+    if (requestPendingRef.current) return;
     if (activeAudioPreview.current !== null) {
       releasePreview(activeAudioPreview.current);
       activeAudioPreview.current = null;
@@ -550,12 +560,11 @@ export function IntakeFlow({
     setClarificationAnswer("");
     setClarificationError(null);
     setCleanupError(null);
-    setPendingCleanupCaseId(null);
     dispatch({ type: "RESET" });
   };
 
   const reset = () => {
-    const caseId = state.serverAuthority?.case.caseId ?? pendingCleanupCaseId;
+    const caseId = state.serverAuthority?.case.caseId ?? state.pendingCaseId;
     if (caseId === undefined || caseId === null) {
       clearLocalState();
       return;
@@ -564,6 +573,7 @@ export function IntakeFlow({
     setCleanupError(null);
     void deleteAuthoritativeCase(caseId)
       .then(() => {
+        dispatch({ caseId, type: "SERVER_CASE_CLEANED" });
         clearLocalState();
       })
       .catch((error: unknown) => {
@@ -603,7 +613,7 @@ export function IntakeFlow({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!gateResult.canContinue) return;
+    if (requestPendingRef.current || !gateResult.canContinue) return;
     const images = state.images.flatMap((image) => {
       const file = sourceFiles.current.get(image.id);
       return file === undefined ? [] : [file];
@@ -617,6 +627,7 @@ export function IntakeFlow({
       (state.statementMode === "audio" && audioSourceFile.current === null)
     ) {
       const token = ++nextRequestToken.current;
+      requestPendingRef.current = true;
       dispatch({ kind: "intake", token, type: "BEGIN_SERVER_REQUEST" });
       dispatchServerError(
         token,
@@ -635,12 +646,13 @@ export function IntakeFlow({
     }
 
     const token = ++nextRequestToken.current;
-    const cleanupBeforeRetry = pendingCleanupCaseId;
+    const cleanupBeforeRetry = state.pendingCaseId;
+    requestPendingRef.current = true;
     dispatch({ kind: "intake", token, type: "BEGIN_SERVER_REQUEST" });
     void (async () => {
       if (cleanupBeforeRetry !== null) {
         await deleteAuthoritativeCase(cleanupBeforeRetry);
-        setPendingCleanupCaseId(null);
+        dispatch({ caseId: cleanupBeforeRetry, type: "SERVER_CASE_CLEANED" });
         setCleanupError(null);
       }
       return createAndSubmitIntake(
@@ -655,8 +667,10 @@ export function IntakeFlow({
         },
         fetch,
         {
-          onCaseCreated: setPendingCleanupCaseId,
-          onCaseReleased: () => setPendingCleanupCaseId(null),
+          onCaseCleaned: (caseId) =>
+            dispatch({ caseId, type: "SERVER_CASE_CLEANED" }),
+          onCaseCreated: (caseId) =>
+            dispatch({ caseId, token, type: "SERVER_CASE_CREATED" }),
         },
       );
     })()
@@ -665,7 +679,6 @@ export function IntakeFlow({
       })
       .catch((error: unknown) => {
         if (error instanceof ClaimDonePendingCleanupError) {
-          setPendingCleanupCaseId(error.pendingCaseId);
           setCleanupError(
             error.cleanupError instanceof Error
               ? error.cleanupError.message
@@ -687,6 +700,7 @@ export function IntakeFlow({
 
   const submitClarification = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (requestPendingRef.current) return;
     const authority = state.serverAuthority;
     if (authority?.phase !== "awaiting_clarification") return;
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(clarificationAnswer)) {
@@ -695,6 +709,7 @@ export function IntakeFlow({
     }
     setClarificationError(null);
     const token = ++nextRequestToken.current;
+    requestPendingRef.current = true;
     dispatch({ kind: "clarification", token, type: "BEGIN_SERVER_REQUEST" });
     void answerClarification(
       authority.case.caseId,
@@ -827,6 +842,9 @@ export function IntakeFlow({
           >
             <strong>Server cleanup did not complete.</strong>
             <p>{cleanupError}</p>
+            {state.pendingCaseId !== null ? (
+              <p>Pending cleanup case: {state.pendingCaseId}</p>
+            ) : null}
             <p>The local view and evidence remain available so you can try again.</p>
           </div>
         ) : null}
@@ -886,10 +904,16 @@ export function IntakeFlow({
               </CardHeader>
               <CardContent className="stack stack--medium">
                 <div
-                  className={`drop-zone${isDragging ? " drop-zone--active" : ""}`}
+                  aria-disabled={state.serverRequest !== null}
+                  className={`drop-zone${isDragging ? " drop-zone--active" : ""}${state.serverRequest !== null ? " drop-zone--disabled" : ""}`}
                   onDragEnter={(event) => {
                     event.preventDefault();
-                    setIsDragging(true);
+                    if (
+                      !requestPendingRef.current &&
+                      state.serverRequest === null
+                    ) {
+                      setIsDragging(true);
+                    }
                   }}
                   onDragLeave={() => setIsDragging(false)}
                   onDragOver={(event) => event.preventDefault()}

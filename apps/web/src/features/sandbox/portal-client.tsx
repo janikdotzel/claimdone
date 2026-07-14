@@ -551,7 +551,7 @@ function PortalFrame({
   variant: PortalVariant;
 }>) {
   return (
-    <main className={styles.portalPage}>
+    <main className={styles.portalPage} id="main-content">
       <div className={styles.sandboxBanner} role="note">
         <span className={styles.sandboxDot} aria-hidden="true" />
         Sandbox simulation · no real insurer · nothing is submitted
