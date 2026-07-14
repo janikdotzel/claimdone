@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from io import BytesIO
 
 from PIL import Image
 
-from claimdone_api.contracts import (
-    CONTRACT_VERSION,
-    GateDecision,
-    GateId,
-    GateReasonCode,
-)
+from claimdone_api.contracts import GateId, GateReasonCode
+from claimdone_api.gates.registry import make_gate_decision
 
 from .storage import CaseMediaStore
 from .types import (
@@ -32,12 +28,6 @@ from .types import (
     ValidatedImage,
 )
 from .validation import validate_g0
-
-_G1_REASON_ORDER = (
-    GateReasonCode.G1_EXIF_UNREVIEWED,
-    GateReasonCode.G1_MODEL_COPY_NOT_APPROVED,
-    GateReasonCode.G1_SENSITIVE_LOG_DATA,
-)
 
 
 class MediaPreparationError(RuntimeError):
@@ -133,9 +123,12 @@ def prepare_g1(
     if review.audit_fields:
         reasons.add(GateReasonCode.G1_SENSITIVE_LOG_DATA)
 
-    ordered_reasons = tuple(reason for reason in _G1_REASON_ORDER if reason in reasons)
-    decision = _gate_decision(GateId.G1_PRIVACY, ordered_reasons, decided_at=decided_at)
-    if ordered_reasons:
+    decision = make_gate_decision(
+        GateId.G1_PRIVACY,
+        deterministic_reasons=tuple(reasons),
+        decided_at=decided_at,
+    )
+    if reasons:
         return PrivacyResult(decision=decision, prepared=None)
 
     choice_by_id = {choice.input_id: choice.decision for choice in choices}
@@ -273,27 +266,3 @@ def _strip_image_metadata(content: bytes, image_format: str) -> bytes:
     except OSError as error:
         raise MediaPreparationError("Normalized image verification failed") from error
     return normalized
-
-
-def _gate_decision(
-    gate_id: GateId,
-    reasons: tuple[GateReasonCode, ...],
-    *,
-    decided_at: datetime | None,
-) -> GateDecision:
-    timestamp = decided_at or datetime.now(UTC)
-    if timestamp.utcoffset() is None:
-        raise ValueError("Gate decision timestamp must be timezone-aware")
-    passed = not reasons
-    return GateDecision.model_validate(
-        {
-            "contractVersion": CONTRACT_VERSION,
-            "gateId": gate_id.value,
-            "deterministicPassed": passed,
-            "modelBlocked": False,
-            "passed": passed,
-            "reasonCodes": [reason.value for reason in reasons],
-            "evidenceRefs": [],
-            "decidedAt": timestamp,
-        }
-    )

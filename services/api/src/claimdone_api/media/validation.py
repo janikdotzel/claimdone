@@ -4,18 +4,17 @@ import hashlib
 import re
 import warnings
 import wave
-from datetime import UTC, datetime
+from datetime import datetime
 from fractions import Fraction
 from io import BytesIO
 
 from PIL import ExifTags, Image, UnidentifiedImageError
 
 from claimdone_api.contracts import (
-    CONTRACT_VERSION,
-    GateDecision,
     GateId,
     GateReasonCode,
 )
+from claimdone_api.gates.registry import make_gate_decision
 
 from .types import (
     ExifFieldSummary,
@@ -55,16 +54,6 @@ _SENSITIVE_EXIF_TAGS = {
     "XPTitle",
 }
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
-_G0_REASON_ORDER = (
-    GateReasonCode.G0_IMAGE_COUNT_INVALID,
-    GateReasonCode.G0_IMAGE_TYPE_INVALID,
-    GateReasonCode.G0_IMAGE_TOO_LARGE,
-    GateReasonCode.G0_INPUT_MODE_INVALID,
-    GateReasonCode.G0_AUDIO_TOO_LONG,
-    GateReasonCode.G0_CONSENT_MISSING,
-)
-
-
 def validate_g0(
     request: IntakeRequest,
     *,
@@ -107,9 +96,12 @@ def validate_g0(
     if any(value is not True for value in consent_values):
         reasons.add(GateReasonCode.G0_CONSENT_MISSING)
 
-    ordered_reasons = tuple(reason for reason in _G0_REASON_ORDER if reason in reasons)
-    decision = _gate_decision(GateId.G0_INTAKE, ordered_reasons, decided_at=decided_at)
-    if ordered_reasons:
+    decision = make_gate_decision(
+        GateId.G0_INTAKE,
+        deterministic_reasons=tuple(reasons),
+        decided_at=decided_at,
+    )
+    if reasons:
         return IntakeGateResult(decision=decision, validated=None)
 
     return IntakeGateResult(
@@ -255,27 +247,3 @@ def _safe_exif_display(value: object, *, sensitive: bool) -> str:
     else:
         display = f"<{type(value).__name__}>"
     return _CONTROL_CHARACTERS.sub(" ", display)[:160]
-
-
-def _gate_decision(
-    gate_id: GateId,
-    reasons: tuple[GateReasonCode, ...],
-    *,
-    decided_at: datetime | None,
-) -> GateDecision:
-    timestamp = decided_at or datetime.now(UTC)
-    if timestamp.utcoffset() is None:
-        raise ValueError("Gate decision timestamp must be timezone-aware")
-    passed = not reasons
-    return GateDecision.model_validate(
-        {
-            "contractVersion": CONTRACT_VERSION,
-            "gateId": gate_id.value,
-            "deterministicPassed": passed,
-            "modelBlocked": False,
-            "passed": passed,
-            "reasonCodes": [reason.value for reason in reasons],
-            "evidenceRefs": [],
-            "decidedAt": timestamp,
-        }
-    )
