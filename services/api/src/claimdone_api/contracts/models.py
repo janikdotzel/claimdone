@@ -96,6 +96,18 @@ class EvidenceItem(ContractModel):
         return self
 
 
+def require_confirmed_transcript_evidence(
+    evidence: tuple[EvidenceItem, ...],
+) -> None:
+    """Fail closed before transcript evidence enters extraction or a ClaimPacket."""
+
+    if any(
+        item.kind is EvidenceKind.TRANSCRIPT and item.transcript_confirmed is not True
+        for item in evidence
+    ):
+        raise ValueError("Transcript evidence requires explicit human confirmation")
+
+
 class ProvenanceRef(ContractModel):
     """Stable pointer from a fact or claim field to one evidence item."""
 
@@ -410,6 +422,7 @@ class ClaimPacket(ContractModel):
 
     @model_validator(mode="after")
     def validate_cross_references_and_state(self) -> Self:
+        require_confirmed_transcript_evidence(self.evidence)
         evidence_ids = tuple(item.evidence_id for item in self.evidence)
         if len(set(evidence_ids)) != len(evidence_ids):
             raise ValueError("Evidence IDs must be unique")

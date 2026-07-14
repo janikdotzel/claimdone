@@ -77,6 +77,36 @@ def test_fastapi_parsed_json_dict_validates_without_unsafe_coercion() -> None:
     assert response.json() == {"caseId": "case-happy-001"}
 
 
+@pytest.mark.parametrize("confirmed", [False, None])
+def test_claim_packet_rejects_unconfirmed_transcript_evidence(
+    confirmed: bool | None,
+) -> None:
+    data = happy_data()
+    statement = next(
+        item for item in data["evidence"] if item["evidenceId"] == "statement-1"
+    )
+    statement["kind"] = "transcript"
+    statement["transcriptConfirmed"] = confirmed
+
+    with pytest.raises(ValidationError, match="explicit human confirmation"):
+        ClaimPacket.model_validate(data)
+
+
+def test_claim_packet_accepts_explicitly_confirmed_transcript_evidence() -> None:
+    data = happy_data()
+    statement = next(
+        item for item in data["evidence"] if item["evidenceId"] == "statement-1"
+    )
+    statement["kind"] = "transcript"
+    statement["transcriptConfirmed"] = True
+
+    packet = ClaimPacket.model_validate(data)
+
+    assert next(
+        item for item in packet.evidence if item.evidence_id == "statement-1"
+    ).transcript_confirmed is True
+
+
 @pytest.mark.parametrize(
     "path",
     [

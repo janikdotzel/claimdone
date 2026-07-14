@@ -45,11 +45,12 @@ created → disclosed → awaiting_transcript_confirmation → analyzing
 
 The confirmation request binds the human decision to the exact transcript ID,
 SHA-256, and optimistic version. The existing INT-001 walking-skeleton mock is
-local and deterministic; it remains a temporary v2 migration bridge and is not
-an OpenAI consumer. AI-001 must enforce `transcriptConfirmed=true` before any
-provider call and route audio through the confirmation state. This deferred
-consumer migration must not be interpreted as provider authority to analyze an
-unconfirmed transcript.
+local and deterministic. For audio it stores the owned transcript, enters the
+confirmation state, and stops before extraction or G2; it is not an OpenAI
+consumer and does not implement the future confirmation endpoint. Both
+`ModelExtraction` and `ClaimPacket` reject `transcriptConfirmed=false` or
+`null`. AI-001 must add the human-confirmation adapter before any provider call
+and resume analysis only with the confirmed artifact.
 
 `blocked`, `emergency_stopped`, `abandoned`, and `failed` are explicit stop
 paths. `blocked` never transitions to `human_approved`; only `review` may do so.

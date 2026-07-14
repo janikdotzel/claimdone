@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import wave
 import zlib
@@ -179,7 +178,7 @@ def test_real_multipart_happy_path_and_answer_survive_app_restart(tmp_path: Path
     assert restarted_portal.calls == 1
 
 
-def test_audio_happy_path_uses_owned_transcript_asset_across_restart(
+def test_audio_waits_for_confirmation_with_owned_transcript_across_restart(
     tmp_path: Path,
 ) -> None:
     first_client, _ = client_for(tmp_path)
@@ -192,41 +191,25 @@ def test_audio_happy_path_uses_owned_transcript_asset_across_restart(
         files=parts,
     )
 
-    assert intake.status_code == 200, intake.text
-    intake_body = cast(dict[str, Any], intake.json())
-    evidence = cast(list[dict[str, Any]], intake_body["case"]["claimPacket"]["evidence"])
-    transcript = next(item for item in evidence if item["kind"] == "transcript")
-    assert transcript["localRef"].startswith("transcript-")
-    assert transcript["localRef"].endswith(".txt")
-    assert not transcript["localRef"].startswith("audio-")
-    assert transcript["sha256"] == hashlib.sha256(
-        transcript["text"].encode("utf-8")
-    ).hexdigest()
-    provenance = cast(
-        list[dict[str, Any]],
-        intake_body["case"]["claimPacket"]["provenance"],
-    )
-    transcript_provenance = next(
-        item for item in provenance if item["evidenceId"] == transcript["evidenceId"]
-    )
-    assert transcript_provenance["userConfirmed"] is False
+    assert intake.status_code == 409, intake.text
+    error = cast(dict[str, Any], intake.json()["error"])
+    assert error["code"] == "TRANSCRIPT_CONFIRMATION_REQUIRED"
+    assert isinstance(error["currentVersion"], int)
 
     restarted_client, restarted_portal = client_for(tmp_path)
-    clarification = cast(dict[str, Any], intake_body["clarification"])
-    answered = restarted_client.post(
-        (
-            f"/api/cases/{created['caseId']}/clarifications/"
-            f"{clarification['clarificationId']}/answer"
-        ),
-        json={"expectedVersion": clarification["expectedVersion"], "answer": "14:30"},
-    )
-
-    assert answered.status_code == 200, answered.text
-    assert answered.json()["case"]["state"] == "verifying"
-    assert restarted_portal.calls == 1
+    waiting = restarted_client.get(f"/api/cases/{created['caseId']}")
+    assert waiting.status_code == 200
+    waiting_case = cast(dict[str, Any], waiting.json())
+    assert waiting_case["state"] == "awaiting_transcript_confirmation"
+    assert waiting_case["claimPacket"] is None
+    assert waiting_case["activeClarification"] is None
+    assert restarted_portal.calls == 0
+    transcripts = tuple((tmp_path / "state" / "media").rglob("transcript-*.txt"))
+    assert len(transcripts) == 1
+    assert transcripts[0].read_text(encoding="utf-8")
 
 
-def test_non_fixture_wav_is_model_uncertain_and_terminally_blocked(
+def test_non_fixture_wav_never_reaches_model_safety_before_confirmation(
     tmp_path: Path,
 ) -> None:
     client, portal = client_for(tmp_path)
@@ -245,23 +228,23 @@ def test_non_fixture_wav_is_model_uncertain_and_terminally_blocked(
         files=parts,
     )
 
-    assert response.status_code == 422, response.text
+    assert response.status_code == 409, response.text
     error = cast(dict[str, Any], response.json()["error"])
-    assert error["gateDecision"]["gateId"] == "G3"
-    assert error["reasonCodes"] == ["G3_MODEL_UNCERTAIN"]
-    blocked = client.get(f"/api/cases/{created['caseId']}")
-    assert blocked.status_code == 200
-    blocked_case = cast(dict[str, Any], blocked.json())
-    assert blocked_case["state"] == "blocked"
-    assert blocked_case["claimPacket"] is None
-    assert blocked_case["activeClarification"] is None
+    assert error["code"] == "TRANSCRIPT_CONFIRMATION_REQUIRED"
+    assert error["gateDecision"] is None
+    waiting = client.get(f"/api/cases/{created['caseId']}")
+    assert waiting.status_code == 200
+    waiting_case = cast(dict[str, Any], waiting.json())
+    assert waiting_case["state"] == "awaiting_transcript_confirmation"
+    assert waiting_case["claimPacket"] is None
+    assert waiting_case["activeClarification"] is None
     assert portal.calls == 0
     media_root = tmp_path / "state" / "media"
-    assert not [path for path in media_root.iterdir() if path.name.startswith("case-")]
+    assert [path for path in media_root.iterdir() if path.name.startswith("case-")]
 
     retry = client.post(
         f"/api/cases/{created['caseId']}/intake",
-        files=multipart_parts(expected_version=str(blocked_case["version"])),
+        files=multipart_parts(expected_version=str(waiting_case["version"])),
     )
     assert retry.status_code == 409
     assert retry.json()["error"]["code"] == "INTAKE_NOT_AVAILABLE"

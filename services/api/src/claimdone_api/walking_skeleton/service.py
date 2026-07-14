@@ -217,12 +217,6 @@ class WalkingSkeletonService:
                 target=CaseState.DISCLOSED,
                 actor=ActorType.SYSTEM,
             )
-            record = self._cases.transition_case(
-                case_id,
-                expected_version=record.version,
-                target=CaseState.ANALYZING,
-                actor=ActorType.SYSTEM,
-            )
             self._repository.bind_case_media_handle(
                 case_id=case_id,
                 storage_name=session.handle.storage_name,
@@ -231,6 +225,38 @@ class WalkingSkeletonService:
             statement_ref, statement = self._statement_for_initial(
                 session,
                 privacy.prepared,
+            )
+            summary = persisted_intake(
+                session,
+                statement=statement_ref,
+                exif_decisions=exif_decisions,
+            )
+            record = self._cases.save_intake_summary(
+                case_id,
+                expected_version=record.version,
+                summary=summary.model_dump(mode="json", by_alias=True),
+            )
+            if (
+                statement.kind is EvidenceKind.TRANSCRIPT
+                and not statement.user_confirmed
+            ):
+                record = self._cases.transition_case(
+                    case_id,
+                    expected_version=record.version,
+                    target=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+                    actor=ActorType.SYSTEM,
+                )
+                raise FlowError(
+                    "TRANSCRIPT_CONFIRMATION_REQUIRED",
+                    "Confirm the transcript before analysis can begin.",
+                    409,
+                    current_version=record.version,
+                )
+            record = self._cases.transition_case(
+                case_id,
+                expected_version=record.version,
+                target=CaseState.ANALYZING,
+                actor=ActorType.SYSTEM,
             )
             extraction = deterministic_extraction(
                 privacy.prepared,
@@ -255,16 +281,6 @@ class WalkingSkeletonService:
                     finalization_error or blocked
                 )
             record = self._record_decisions(record, decisions[2:])
-            summary = persisted_intake(
-                session,
-                statement=statement_ref,
-                exif_decisions=exif_decisions,
-            )
-            record = self._cases.save_intake_summary(
-                case_id,
-                expected_version=record.version,
-                summary=summary.model_dump(mode="json", by_alias=True),
-            )
             packet = build_packet(
                 case_id=case_id,
                 state=CaseState.AWAITING_CLARIFICATION,

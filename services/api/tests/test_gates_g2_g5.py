@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from claimdone_api.contracts import (
     ClaimPacket,
+    EvidenceItem,
     FactStatus,
     GateDecision,
     GateId,
@@ -232,6 +233,48 @@ def test_g2_accepts_only_strict_duplicate_free_json_and_exact_inventory() -> Non
             decided_at=DECIDED_AT,
         )
         assert rejected.decision.reason_codes == (GateReasonCode.G2_SCHEMA_INVALID,)
+
+
+@pytest.mark.parametrize("confirmed", [False, None])
+def test_g2_rejects_unconfirmed_transcript_in_payload_and_approved_catalog(
+    confirmed: bool | None,
+) -> None:
+    unconfirmed = extraction_data()
+    transcript = next(
+        item for item in unconfirmed["evidence"] if item["kind"] == "user_statement"
+    )
+    transcript["kind"] = "transcript"
+    transcript["transcriptConfirmed"] = confirmed
+    approved_catalog = tuple(
+        EvidenceItem.model_validate(item) for item in unconfirmed["evidence"]
+    )
+
+    with pytest.raises(ValidationError, match="human confirmation"):
+        ModelExtraction.model_validate(unconfirmed)
+    rejected_payload = evaluate_g2(
+        ModelOutputEnvelope(json.dumps(unconfirmed), False, False, 0),
+        approved_evidence=approved_catalog,
+        decided_at=DECIDED_AT,
+    )
+    assert rejected_payload.decision.reason_codes == (
+        GateReasonCode.G2_SCHEMA_INVALID,
+    )
+
+    confirmed_payload = deepcopy(unconfirmed)
+    confirmed_transcript = next(
+        item
+        for item in confirmed_payload["evidence"]
+        if item["kind"] == "transcript"
+    )
+    confirmed_transcript["transcriptConfirmed"] = True
+    rejected_catalog = evaluate_g2(
+        ModelOutputEnvelope(json.dumps(confirmed_payload), False, False, 0),
+        approved_evidence=approved_catalog,
+        decided_at=DECIDED_AT,
+    )
+    assert rejected_catalog.decision.reason_codes == (
+        GateReasonCode.G2_REFERENCE_MISSING,
+    )
 
 
 def test_g2_external_inventory_detects_self_consistent_but_invented_evidence() -> None:

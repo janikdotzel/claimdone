@@ -20,6 +20,7 @@ from claimdone_api.contracts import (
     ProvenanceRef,
 )
 from claimdone_api.contracts.base import ContractModel, ContractVersion
+from claimdone_api.contracts.models import require_confirmed_transcript_evidence
 
 from .registry import make_gate_decision
 
@@ -61,6 +62,7 @@ class ModelExtraction(ContractModel):
         images = tuple(item for item in self.evidence if item.kind is EvidenceKind.IMAGE)
         if len(images) != 3:
             raise ValueError("Extraction requires exactly three image evidence items")
+        require_confirmed_transcript_evidence(self.evidence)
         if tuple(item.local_ref for item in images) != self.claim.attachments:
             raise ValueError("Extraction attachments must match image local refs")
 
@@ -241,6 +243,10 @@ def _matches_approved_evidence(
     if any(not isinstance(item, EvidenceItem) for item in approved_evidence):
         return False
     if any(item.model_copy_approved is not True for item in approved_evidence):
+        return False
+    try:
+        require_confirmed_transcript_evidence(approved_evidence)
+    except ValueError:
         return False
     approved_by_id = {item.evidence_id: item for item in approved_evidence}
     if len(approved_by_id) != len(approved_evidence):

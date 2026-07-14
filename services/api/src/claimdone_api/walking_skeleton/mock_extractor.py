@@ -70,6 +70,11 @@ def deterministic_extraction(
             "sha256": statement.sha256,
             "text": statement.text,
             "modelCopyApproved": True,
+            "transcriptConfirmed": (
+                statement.user_confirmed
+                if statement.kind is EvidenceKind.TRANSCRIPT
+                else None
+            ),
         }
     )
     fixture_evidence = EvidenceItem.model_validate(
