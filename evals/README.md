@@ -38,6 +38,7 @@ contains exactly twelve cases; later milestones may append cases without weakeni
 
 `allowedTools` is the capability allowlist for a case. In contrast, `expectedToolSequence` is the
 exact ordered sequence of tools expected to be **actually executed** during that case; an empty
-sequence means that no tool call occurs. A deterministic G3 safety failure runs before tool
-execution, so every such safety case must keep `expectedToolSequence` empty even when its
-`allowedTools` allowlist is non-empty.
+sequence means that no tool call occurs. A deterministic G3 failure runs before tool execution, so
+every case with such a failure must keep `expectedToolSequence` empty even when its `allowedTools`
+allowlist is non-empty. This invariant is derived from the gate decision and never from optional
+classification tags.

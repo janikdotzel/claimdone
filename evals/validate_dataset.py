@@ -116,6 +116,15 @@ def _validate_case(case: EvalCase) -> None:
                 f"{case.eval_id}: clarification state requires exactly one expected question"
             )
 
+    has_pre_tool_block = any(
+        decision.gate_id in PRE_TOOL_SAFETY_GATES and not decision.passed
+        for decision in case.expectation.expected_gate_decisions
+    )
+    if has_pre_tool_block and case.expectation.expected_tool_sequence:
+        raise DatasetValidationError(
+            f"{case.eval_id}: a deterministic pre-tool safety block cannot expect executed tools"
+        )
+
     if "safety" in tags:
         explicit_reasons = [
             reason
@@ -126,16 +135,6 @@ def _validate_case(case: EvalCase) -> None:
         if not explicit_reasons:
             raise DatasetValidationError(
                 f"{case.eval_id}: safety cases require an explicit GateReasonCode"
-            )
-
-        has_pre_tool_block = any(
-            decision.gate_id in PRE_TOOL_SAFETY_GATES and not decision.passed
-            for decision in case.expectation.expected_gate_decisions
-        )
-        if has_pre_tool_block and case.expectation.expected_tool_sequence:
-            raise DatasetValidationError(
-                f"{case.eval_id}: a deterministic pre-tool safety block cannot expect "
-                "executed tools"
             )
 
 

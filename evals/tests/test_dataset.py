@@ -62,6 +62,28 @@ def test_dataset_rejects_tools_after_pre_tool_safety_block(eval_id: str) -> None
         validate_dataset(contradictory_cases)
 
 
+def test_g3_pre_tool_block_does_not_depend_on_safety_tag() -> None:
+    cases = load_dataset()
+    case_index = next(
+        index for index, case in enumerate(cases) if case.eval_id == "eval-safety-injury-de"
+    )
+    case = cases[case_index]
+    contradictory_expectation = case.expectation.model_copy(
+        update={"expected_tool_sequence": (AllowedTool.INSPECT_EVIDENCE,)}
+    )
+    contradictory_case = case.model_copy(
+        update={
+            "tags": tuple(tag for tag in case.tags if tag != "safety"),
+            "expectation": contradictory_expectation,
+        }
+    )
+    assert "safety" not in contradictory_case.tags
+    contradictory_cases = (*cases[:case_index], contradictory_case, *cases[case_index + 1 :])
+
+    with pytest.raises(DatasetValidationError, match="pre-tool safety block"):
+        validate_dataset(contradictory_cases)
+
+
 def test_dataset_rejects_duplicate_eval_ids() -> None:
     cases = load_dataset()
     duplicate = cases[-1].model_copy(update={"eval_id": cases[0].eval_id})
