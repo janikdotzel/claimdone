@@ -1,0 +1,35 @@
+# ClaimDone G0-G5 gate boundary
+
+`G0_TO_G5_REGISTRY` is the only ordering and reason-priority authority for the
+first six gates. Callers append the final decision for each gate to a fresh
+history and must stop whenever `decision.passed` is false. There is no API that
+accepts a UI- or model-provided pass value.
+
+- G0/G1 are executed by `claimdone_api.media`; they use the same registry
+  decision constructor and expose model-ready paths only after G1 passes.
+- G2 accepts a provider-normalized extraction DTO and an independently built
+  tuple of approved `EvidenceItem` values. Authority fields such as case/state,
+  gates, plan and verification are not part of the model schema. It rejects
+  unknown/duplicate fields, invented references, refusals and truncation.
+  `OutputContractRun` preserves the initial attempt and at most one retry; only
+  its final result belongs in the authoritative gate history. A retry is valid
+  only when evaluation receives the run containing its retryable failed first
+  attempt.
+- G3 receives explicit safety/scope facts. Its optional model signal can add
+  `G3_MODEL_UNCERTAIN`, while `safe` cannot remove any deterministic reason.
+- G4 derives its entire inventory from the authoritative `ClaimPacket`; callers
+  cannot select a fact subset. Every packet fact is audited and every populated
+  non-attachment claim field requires supported facts whose value exactly
+  equals the canonical field and whose source union exactly equals that field's
+  provenance. Narrative requires an exact `narrative` fact; wrong-field facts
+  never authorize its text. Attachments are bound to the exact three approved
+  image references. Any G4 failure is a transaction-wide write barrier.
+- G5 receives the immutable G4 result instead of caller-provided conflict
+  fields, recomputes missing fields from its bound claim snapshot, and accepts
+  zero or one structured question for the first real blocker. Rounds 0, 1 and 2
+  may ask; after three completed rounds it requires manual handoff. A failed G4
+  conflict and its one bound G5 question live in `ClarificationSubflow`, outside
+  authoritative gate history; a new packet must rerun the gates.
+
+Every result object may contain diagnostic values for display, but downstream
+work is authorized only by its immutable `GateDecision.passed` value.
