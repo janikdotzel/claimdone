@@ -171,6 +171,40 @@ def test_repository_rejects_unredacted_metadata_before_persisting(tmp_path: Path
     assert repository.get_case("case-unredacted") is None
 
 
+def test_noncanonical_pii_like_metadata_key_is_rejected_at_every_write_boundary(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "cases.db"
+    service, repository = _service(database_path)
+    pii_like_key = "claimant_Janik_Dotzel"
+
+    with pytest.raises(ValueError, match="canonical allowlist"):
+        service.create_case({pii_like_key: "private value"})
+    with pytest.raises(ValueError, match="canonical allowlist"):
+        repository.create_case(
+            case_id="case-noncanonical",
+            redacted_metadata={pii_like_key: "text(length=13)"},
+            created_at=NOW,
+        )
+
+    existing = repository.create_case(
+        case_id="case-existing",
+        redacted_metadata={"claimantName": "text(length=4)"},
+        created_at=NOW,
+    )
+    with pytest.raises(ValueError, match="canonical allowlist"):
+        service.replace_redacted_metadata(
+            existing.case_id,
+            expected_version=existing.version,
+            metadata={pii_like_key: "private value"},
+        )
+
+    assert repository.get_case("case-persistence-001") is None
+    assert repository.get_case("case-noncanonical") is None
+    assert repository.get_case(existing.case_id) == existing
+    assert pii_like_key.encode("utf-8") not in database_path.read_bytes()
+
+
 def test_invalid_transition_is_rejected_without_mutating_case(tmp_path: Path) -> None:
     service, repository = _service(tmp_path / "cases.db")
     created = service.create_case()

@@ -132,6 +132,21 @@ def test_invalid_metadata_key_is_rejected_before_service_execution(tmp_path: Pat
     assert client.get("/api/cases/case-api-001").status_code == 404
 
 
+def test_syntactically_valid_pii_like_metadata_key_is_not_persisted(tmp_path: Path) -> None:
+    database_path = tmp_path / "cases.db"
+    client, _ = _build_client(database_path)
+    pii_like_key = "claimant_Janik_Dotzel"
+
+    invalid = client.post(
+        "/api/cases",
+        json={"metadata": {pii_like_key: "private value"}},
+    )
+
+    assert invalid.status_code == 422
+    assert client.get("/api/cases/case-api-001").status_code == 404
+    assert pii_like_key.encode("utf-8") not in database_path.read_bytes()
+
+
 def test_stale_version_maps_to_stable_http_409_envelope() -> None:
     response = case_error_response(
         CaseVersionConflictError(

@@ -9,8 +9,10 @@ from pydantic import (
     Field,
     JsonValue,
     StringConstraints,
+    field_validator,
 )
 
+from claimdone_api.audit import validate_metadata_keys
 from claimdone_api.contracts import (
     CaseState,
     ClaimPacket,
@@ -58,6 +60,15 @@ class CreateCaseRequest(ApiModel):
     """Optional non-persisted raw metadata; values are redacted by the service."""
 
     metadata: dict[MetadataKey, JsonValue] = Field(default_factory=dict)
+
+    @field_validator("metadata")
+    @classmethod
+    def require_canonical_metadata_keys(
+        cls,
+        value: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        validate_metadata_keys(value)
+        return value
 
 
 class CaseView(ApiModel):
