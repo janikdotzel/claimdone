@@ -111,6 +111,15 @@ function FieldErrorList({
   );
 }
 
+export function MockDraftNotice() {
+  return (
+    <Alert title="No live AI extraction in this walking skeleton" tone="warning">
+      Your statement is retained as evidence and safety-checked. Portal A receives a
+      fixed, versioned synthetic fixture draft—not claim facts inferred from your text.
+    </Alert>
+  );
+}
+
 function disclosureView({
   accepted,
   onAcceptedChange,
@@ -131,6 +140,7 @@ function disclosureView({
           ClaimDone prepares a staged draft. It does not contact an insurer, submit a
           claim, approve a payment, or perform a real-world action.
         </Alert>
+        <MockDraftNotice />
         <div className="disclosure-grid">
           <div>
             <h3>What happens here</h3>
@@ -1045,6 +1055,7 @@ export function IntakeFlow({
                 <CardTitle id="statement-title">Use written text or one audio memo</CardTitle>
               </CardHeader>
               <CardContent className="stack stack--medium">
+                <MockDraftNotice />
                 <FieldErrorList
                   errors={statementBackendErrors}
                   label="The server rejected the statement:"
@@ -1191,7 +1202,11 @@ export function IntakeFlow({
                   }
                 />
               </CardContent>
-              <CardFooter>
+              <CardFooter className="analysis-footer">
+                <p className="mock-analysis-note" id="mock-analysis-notice">
+                  This runs deterministic gates and prepares the fixed synthetic mock
+                  draft. It does not extract claim fields from your statement.
+                </p>
                 <div aria-live="polite" className="gate-summary">
                   <span>
                     Local G0 preflight {gateResult.g0.passed ? "passed" : "pending"}
@@ -1201,20 +1216,20 @@ export function IntakeFlow({
                   </span>
                 </div>
                 <Button
-                  aria-describedby="continue-requirements"
+                  aria-describedby="mock-analysis-notice continue-requirements"
                   disabled={!gateResult.canContinue || state.serverRequest !== null}
                   leadingIcon={<ArrowRightIcon />}
                   type="submit"
                 >
                   {state.serverRequest?.kind === "intake"
-                    ? "Running server gates…"
+                    ? "Running gates and mock draft…"
                     : state.serverError === null
-                      ? "Continue to analysis"
-                      : "Try server again"}
+                      ? "Create fixed mock draft"
+                      : "Retry mock flow"}
                 </Button>
                 <span className="visually-hidden" id="continue-requirements">
                   Continue is available only after deterministic G0 and G1 preflight
-                  checks pass.
+                  checks pass. No live AI extraction runs in this build.
                 </span>
               </CardFooter>
             </Card>

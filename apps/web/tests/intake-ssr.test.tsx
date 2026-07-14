@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   ClarificationCard,
   IntakeFlow,
+  MockDraftNotice,
 } from "../src/features/intake/intake-flow";
 
 describe("intake disclosure SSR surface", () => {
@@ -13,6 +14,9 @@ describe("intake disclosure SSR surface", () => {
     expect(html).toContain("Step 1 · Disclosure");
     expect(html).toContain("Before you add any evidence");
     expect(html).toContain("This is a local sandbox");
+    expect(html).toContain("No live AI extraction in this walking skeleton");
+    expect(html).toContain("fixed, versioned synthetic fixture draft");
+    expect(html).toContain("not claim facts inferred from your text");
     expect(html).toContain('id="disclosure-acknowledgement"');
     expect(html).toContain('for="disclosure-acknowledgement"');
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Continue to intake/s);
@@ -25,6 +29,15 @@ describe("intake disclosure SSR surface", () => {
       (match) => match[1],
     );
     expect(labelTargets.every((target) => ids.includes(target))).toBe(true);
+  });
+
+  it("renders the mock-draft provenance notice as an accessible non-urgent note", () => {
+    const html = renderToStaticMarkup(<MockDraftNotice />);
+
+    expect(html).toContain('role="note"');
+    expect(html).toContain("retained as evidence and safety-checked");
+    expect(html).toContain("fixed, versioned synthetic fixture draft");
+    expect(html).toContain("not claim facts inferred from your text");
   });
 
   it("renders exactly one keyboard-native, labelled clarification question", () => {
