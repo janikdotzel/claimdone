@@ -1,14 +1,19 @@
 """SQLite persistence surface for ClaimDone cases."""
 
 from .models import (
+    AnalysisWorkflowCommand,
+    AnalysisWorkflowResult,
     AuthorityCapabilityRecord,
     CaseRecord,
     CaseSnapshot,
     ProviderUsageLedgerRecord,
+    ProviderWorkflowEmission,
     SandboxReceiptRecord,
     SequencedAuditEvent,
     SequencedGateDecision,
     SequencedWorkflowEvent,
+    TerminalProviderFailureCommand,
+    TerminalProviderFailureResult,
     TranscriptRecord,
     TranscriptTransitionResult,
     portal_state_after_transition,
@@ -23,9 +28,12 @@ from .sqlite import (
     SqliteCaseRepository,
     TranscriptStateError,
     UnsupportedSchemaVersionError,
+    WorkflowAtomicityError,
 )
 
 __all__ = [
+    "AnalysisWorkflowCommand",
+    "AnalysisWorkflowResult",
     "AuthorityCapabilityError",
     "AuthorityCapabilityRecord",
     "CaseRecord",
@@ -35,15 +43,19 @@ __all__ = [
     "IncompatiblePersistedContractError",
     "PersistedDataIntegrityError",
     "ProviderUsageLedgerRecord",
+    "ProviderWorkflowEmission",
     "SandboxReceiptRecord",
     "SequencedAuditEvent",
     "SequencedGateDecision",
     "SequencedWorkflowEvent",
     "SqliteCaseRepository",
+    "TerminalProviderFailureCommand",
+    "TerminalProviderFailureResult",
     "TranscriptRecord",
     "TranscriptStateError",
     "TranscriptTransitionResult",
     "UnsupportedSchemaVersionError",
+    "WorkflowAtomicityError",
     "portal_state_after_transition",
     "validate_portal_state",
 ]

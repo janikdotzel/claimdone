@@ -25,6 +25,8 @@ from claimdone_api.contracts import (
 )
 from claimdone_api.contracts.state_machine import InvalidCaseTransition
 from claimdone_api.persistence import (
+    AnalysisWorkflowCommand,
+    AnalysisWorkflowResult,
     CaseRecord,
     CaseRecordNotFoundError,
     CaseRecordVersionConflictError,
@@ -33,7 +35,10 @@ from claimdone_api.persistence import (
     SequencedGateDecision,
     SequencedWorkflowEvent,
     SqliteCaseRepository,
+    TerminalProviderFailureCommand,
+    TerminalProviderFailureResult,
     TranscriptTransitionResult,
+    WorkflowAtomicityError,
     portal_state_after_transition,
     validate_portal_state,
 )
@@ -377,6 +382,36 @@ class CaseService:
     ) -> tuple[SequencedWorkflowEvent, ...]:
         self.get_case(case_id)
         return self._repository.list_workflow_events(case_id, after=after, limit=limit)
+
+    def commit_analysis_workflow(
+        self,
+        command: AnalysisWorkflowCommand,
+    ) -> AnalysisWorkflowResult:
+        """Expose the repository's single-CAS analysis authority boundary."""
+
+        try:
+            return self._repository.commit_analysis_workflow(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except WorkflowAtomicityError as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def commit_terminal_provider_failure(
+        self,
+        command: TerminalProviderFailureCommand,
+    ) -> TerminalProviderFailureResult:
+        """Expose the provider-failure boundary without a split transition path."""
+
+        try:
+            return self._repository.commit_terminal_provider_failure(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except WorkflowAtomicityError as error:
+            raise CaseSnapshotValidationError(str(error)) from error
 
     def reset_demo(self) -> int:
         return self._reset_service.reset()

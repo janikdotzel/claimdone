@@ -10,16 +10,25 @@ from claimdone_api.contracts import (
     AuditEvent,
     CaseState,
     ClaimPacket,
+    ClarificationView,
+    ClarificationWorkflowEvent,
     GateDecision,
+    OperationalFailureWorkflowEvent,
+    PlanStepWorkflowEvent,
     PortalState,
+    ProviderCallWorkflowEvent,
     ProviderFailureCategory,
     ProviderModelId,
+    RetryWorkflowEvent,
     SandboxReceipt,
     WorkflowEventEnvelope,
     WorkflowOperation,
 )
 
 type JsonObject = dict[str, JsonValue]
+type AnalysisProviderWorkflowEvent = (
+    ProviderCallWorkflowEvent | RetryWorkflowEvent
+)
 
 _PORTAL_STATES_BY_CASE_STATE = MappingProxyType(
     {
@@ -88,6 +97,64 @@ class CaseRecord:
     snapshot: CaseSnapshot
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderWorkflowEmission:
+    """One value-free provider projection with its actual occurrence time."""
+
+    event: AnalysisProviderWorkflowEvent
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisWorkflowCommand:
+    """Closed analysis outcome committed as one case-version mutation.
+
+    The repository emits provider telemetry, gates, plan steps, clarification
+    lifecycle, and the state transition in that deterministic cursor order.
+    ``gate_decisions`` contains only decisions newly emitted in this commit;
+    the target ClaimPacket carries the complete current G0-G5 set.
+    """
+
+    case_id: str
+    expected_version: int
+    target: CaseState
+    claim_packet: ClaimPacket | None
+    active_clarification: ClarificationView | None
+    gate_decisions: tuple[GateDecision, ...]
+    provider_events: tuple[ProviderWorkflowEmission, ...]
+    plan_steps: tuple[PlanStepWorkflowEvent, ...]
+    clarification_events: tuple[ClarificationWorkflowEvent, ...]
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisWorkflowResult:
+    """Case plus every redacted projection produced by one analysis commit."""
+
+    case: CaseRecord
+    workflow_events: tuple[WorkflowEventEnvelope, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProviderFailureCommand:
+    """One terminal provider outcome; it has no deterministic-gate surface."""
+
+    case_id: str
+    expected_version: int
+    event: OperationalFailureWorkflowEvent
+    provider_events: tuple[ProviderWorkflowEmission, ...]
+    claim_packet: ClaimPacket | None
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProviderFailureResult:
+    """Failed case and the operational/state projections committed with it."""
+
+    case: CaseRecord
+    workflow_events: tuple[WorkflowEventEnvelope, ...]
 
 
 @dataclass(frozen=True, slots=True)

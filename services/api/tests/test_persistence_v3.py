@@ -25,7 +25,6 @@ from claimdone_api.contracts import (
     GateDecision,
     GateId,
     GateWorkflowEvent,
-    OperationalFailureWorkflowEvent,
     ProviderCallWorkflowEvent,
     RetryWorkflowEvent,
     SandboxReceipt,
@@ -293,25 +292,6 @@ def _retry_event() -> RetryWorkflowEvent:
                 "category": "timeout",
                 "retryable": True,
                 "terminal": False,
-            },
-        }
-    )
-
-
-def _operational_failure_event() -> OperationalFailureWorkflowEvent:
-    return OperationalFailureWorkflowEvent.model_validate(
-        {
-            "kind": "operational_failure",
-            "operation": "transcription",
-            "modelId": "gpt-4o-transcribe",
-            "providerMode": "live",
-            "callSequence": 3,
-            "retryAttempt": 0,
-            "durationMs": 400,
-            "failure": {
-                "category": "content_filtered",
-                "retryable": False,
-                "terminal": True,
             },
         }
     )
@@ -609,19 +589,10 @@ def test_state_gate_generic_replay_and_provider_ledger_are_atomic_and_redacted(
         actor=ActorType.SYSTEM,
         occurred_at=NOW + timedelta(seconds=4),
     )
-    failure_envelope = repository.append_workflow_event(
-        case_id=record.case_id,
-        expected_case_version=record.version,
-        event=_operational_failure_event(),
-        actor=ActorType.SYSTEM,
-        occurred_at=NOW + timedelta(seconds=5),
-    )
-
     replay = repository.list_workflow_events(record.case_id, after=first_generic.cursor)
     assert tuple(item.envelope for item in replay) == (
         provider_envelope,
         retry_envelope,
-        failure_envelope,
     )
     assert service.get_case(record.case_id).version == record.version
     reopened = SqliteCaseRepository(database_path)
@@ -629,24 +600,20 @@ def test_state_gate_generic_replay_and_provider_ledger_are_atomic_and_redacted(
     assert tuple(item.source_audit_sequence for item in usage) == (
         provider_envelope.cursor,
         retry_envelope.cursor,
-        failure_envelope.cursor,
     )
     assert tuple(item.status for item in usage) == (
         "succeeded",
         "retry_scheduled",
-        "failed",
     )
-    assert tuple(item.call_sequence for item in usage) == (1, 2, 3)
+    assert tuple(item.call_sequence for item in usage) == (1, 2)
     assert tuple(
         None if item.failure_category is None else item.failure_category.value
         for item in usage
-    ) == (None, "timeout", "content_filtered")
+    ) == (None, "timeout")
     assert usage[0].total_tokens == 15
     assert usage[0].estimated_cost_micros == 42
     assert usage[1].total_tokens is None
     assert usage[1].estimated_cost_micros is None
-    assert usage[2].total_tokens is None
-    assert usage[2].estimated_cost_micros is None
     repository.create_case(
         case_id="case-provider-other",
         redacted_metadata={},

@@ -6,26 +6,35 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from claimdone_api.audit import validate_redacted_metadata
+from claimdone_api.audit import (
+    build_gate_audit_event,
+    build_state_change_event,
+    validate_redacted_metadata,
+)
 from claimdone_api.contracts import (
     AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND,
     CONTRACT_VERSION,
     ActorType,
+    AllowedTool,
     AuditEvent,
     AuditEventType,
     CaseState,
     ClaimPacket,
+    ClarificationStatus,
+    ClarificationView,
     ClarificationWorkflowEvent,
     GateDecision,
     GateId,
+    GateReasonCode,
     GateWorkflowEvent,
     OperationalFailureWorkflowEvent,
     PlanStepWorkflowEvent,
@@ -38,6 +47,7 @@ from claimdone_api.contracts import (
     SandboxReceipt,
     StateWorkflowEvent,
     ToolCallWorkflowEvent,
+    VerificationState,
     VerificationWorkflowEvent,
     WorkflowEventEnvelope,
     WorkflowEventKind,
@@ -47,15 +57,20 @@ from claimdone_api.contracts import (
 )
 
 from .models import (
+    AnalysisWorkflowCommand,
+    AnalysisWorkflowResult,
     AuthorityCapabilityRecord,
     CaseRecord,
     CaseSnapshot,
     JsonObject,
     ProviderUsageLedgerRecord,
+    ProviderWorkflowEmission,
     SandboxReceiptRecord,
     SequencedAuditEvent,
     SequencedGateDecision,
     SequencedWorkflowEvent,
+    TerminalProviderFailureCommand,
+    TerminalProviderFailureResult,
     TranscriptRecord,
     TranscriptTransitionResult,
     validate_portal_state,
@@ -123,6 +138,10 @@ class AuthorityCapabilityError(PersistenceError):
     """Raised when digest-only capability metadata is invalid or stale."""
 
 
+class WorkflowAtomicityError(PersistenceError):
+    """Raised when a critical workflow sequence is incomplete or cross-bound incorrectly."""
+
+
 def _enum_sql_values(values: type[StrEnum]) -> str:
     return ", ".join(f"'{value.value}'" for value in values)
 
@@ -135,6 +154,45 @@ _WORKFLOW_EVENT_KIND_VALUES = _enum_sql_values(WorkflowEventKind)
 _WORKFLOW_OPERATION_VALUES = _enum_sql_values(WorkflowOperation)
 _PROVIDER_MODEL_ID_VALUES = _enum_sql_values(ProviderModelId)
 _PROVIDER_FAILURE_VALUES = _enum_sql_values(ProviderFailureCategory)
+_ANALYSIS_GATE_SEQUENCE = (
+    GateId.G0_INTAKE,
+    GateId.G1_PRIVACY,
+    GateId.G2_OUTPUT_CONTRACT,
+    GateId.G3_SAFETY_SCOPE,
+    GateId.G4_PROVENANCE,
+    GateId.G5_COMPLETENESS,
+)
+_AWAITING_CLARIFICATION_PLAN = (
+    (
+        AllowedTool.INSPECT_EVIDENCE,
+        "Inspect only the approved evidence inventory",
+    ),
+    (
+        AllowedTool.CHECK_REQUIRED_FIELDS,
+        "Use the deterministic required-field result",
+    ),
+    (
+        AllowedTool.ASK_CLARIFICATION,
+        "Ask the single clarification accepted by G5",
+    ),
+)
+_BLOCKED_PLAN = _AWAITING_CLARIFICATION_PLAN[:2]
+_READY_TO_FILL_PLAN = (
+    (
+        AllowedTool.INSPECT_EVIDENCE,
+        "Inspect only the approved evidence inventory",
+    ),
+    (
+        AllowedTool.CHECK_REQUIRED_FIELDS,
+        "Use the deterministic required-field result",
+    ),
+    (AllowedTool.INSPECT_FORM, "Inspect only the local sandbox form"),
+    (AllowedTool.FILL_UNTIL_REVIEW, "Fill the sandbox only until review"),
+    (
+        AllowedTool.VERIFY_RENDERED_FIELDS,
+        "Verify rendered fields before human review",
+    ),
+)
 _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE = {
     event_type: kind for kind, event_type in AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND.items()
 }
@@ -1293,6 +1351,211 @@ class SqliteCaseRepository:
             )
         return self._require_case(case_id)
 
+    def commit_analysis_workflow(
+        self,
+        command: AnalysisWorkflowCommand,
+    ) -> AnalysisWorkflowResult:
+        """Commit one deterministic analysis/clarification boundary atomically.
+
+        Audit cursors are always allocated in this order: provider attempts,
+        canonical gates, visible plan steps, clarification lifecycle, and any
+        real state transition. The case version advances exactly once; a new
+        clarification round never forges a self-transition event.
+        """
+
+        if not isinstance(command, AnalysisWorkflowCommand):
+            raise TypeError("command must be an AnalysisWorkflowCommand")
+        self._validate_analysis_command_shape(command)
+        with self._write_connection() as connection:
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_version,
+            )
+            existing_gates = self._read_gate_decisions(
+                connection,
+                case_id=command.case_id,
+            )
+            snapshot = self._validate_analysis_command(
+                current,
+                command,
+                existing_gates=existing_gates,
+            )
+            self._update_case_row(
+                connection,
+                current=current,
+                state=command.target,
+                snapshot=snapshot,
+                updated_at=command.updated_at,
+            )
+
+            emitted: list[WorkflowEventEnvelope] = []
+            for emission in command.provider_events:
+                emitted.append(
+                    self._insert_redacted_workflow_event(
+                        connection,
+                        case_id=command.case_id,
+                        event=emission.event,
+                        actor=ActorType.AGENT,
+                        occurred_at=emission.occurred_at,
+                    )
+                )
+            for decision in command.gate_decisions:
+                self._insert_gate_decision_row(
+                    connection,
+                    case_id=command.case_id,
+                    decision=decision,
+                )
+                audit = build_gate_audit_event(
+                    case_id=command.case_id,
+                    decision=decision,
+                    actor=ActorType.SYSTEM,
+                )
+                audit_sequence = self._insert_audit_event(connection, audit)
+                emitted.append(
+                    self._insert_workflow_projection(
+                        connection,
+                        audit_sequence=audit_sequence,
+                        audit=audit,
+                        event=GateWorkflowEvent.model_validate(
+                            {"kind": WorkflowEventKind.GATE, "decision": decision}
+                        ),
+                    )
+                )
+            for plan_event in command.plan_steps:
+                emitted.append(
+                    self._insert_redacted_workflow_event(
+                        connection,
+                        case_id=command.case_id,
+                        event=plan_event,
+                        actor=ActorType.AGENT,
+                        occurred_at=command.updated_at,
+                    )
+                )
+            for clarification_event in command.clarification_events:
+                emitted.append(
+                    self._insert_redacted_workflow_event(
+                        connection,
+                        case_id=command.case_id,
+                        event=clarification_event,
+                        actor=ActorType.SYSTEM,
+                        occurred_at=command.updated_at,
+                    )
+                )
+
+            if current.state is not command.target:
+                state_audit = build_state_change_event(
+                    case_id=command.case_id,
+                    current=current.state,
+                    target=command.target,
+                    actor=ActorType.SYSTEM,
+                    occurred_at=command.updated_at,
+                )
+                state_sequence = self._insert_audit_event(connection, state_audit)
+                emitted.append(
+                    self._insert_workflow_projection(
+                        connection,
+                        audit_sequence=state_sequence,
+                        audit=state_audit,
+                        event=StateWorkflowEvent.model_validate(
+                            {
+                                "kind": WorkflowEventKind.STATE,
+                                "actor": ActorType.SYSTEM,
+                                "fromState": current.state,
+                                "toState": command.target,
+                            }
+                        ),
+                    )
+                )
+            case = self._require_current(
+                connection,
+                command.case_id,
+                current.version + 1,
+            )
+        return AnalysisWorkflowResult(case=case, workflow_events=tuple(emitted))
+
+    def commit_terminal_provider_failure(
+        self,
+        command: TerminalProviderFailureCommand,
+    ) -> TerminalProviderFailureResult:
+        """Persist one terminal provider failure and failed state atomically.
+
+        Any completed attempt-zero/retry prefix precedes the operational event
+        and its ledger row, then the failed-state projection. No GateDecision
+        is generated by this boundary.
+        """
+
+        if not isinstance(command, TerminalProviderFailureCommand):
+            raise TypeError("command must be a TerminalProviderFailureCommand")
+        self._validate_terminal_provider_command_shape(command)
+        target = CaseState.FAILED
+        with self._write_connection() as connection:
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_version,
+            )
+            snapshot = self._validate_terminal_provider_failure(current, command)
+            self._update_case_row(
+                connection,
+                current=current,
+                state=target,
+                snapshot=snapshot,
+                updated_at=command.occurred_at,
+            )
+            emitted: list[WorkflowEventEnvelope] = []
+            for emission in command.provider_events:
+                emitted.append(
+                    self._insert_redacted_workflow_event(
+                        connection,
+                        case_id=command.case_id,
+                        event=emission.event,
+                        actor=ActorType.AGENT,
+                        occurred_at=emission.occurred_at,
+                    )
+                )
+            emitted.append(
+                self._insert_redacted_workflow_event(
+                    connection,
+                    case_id=command.case_id,
+                    event=command.event,
+                    actor=ActorType.SYSTEM,
+                    occurred_at=command.occurred_at,
+                )
+            )
+            state_audit = build_state_change_event(
+                case_id=command.case_id,
+                current=current.state,
+                target=target,
+                actor=ActorType.SYSTEM,
+                occurred_at=command.occurred_at,
+            )
+            state_sequence = self._insert_audit_event(connection, state_audit)
+            emitted.append(
+                self._insert_workflow_projection(
+                    connection,
+                    audit_sequence=state_sequence,
+                    audit=state_audit,
+                    event=StateWorkflowEvent.model_validate(
+                        {
+                            "kind": WorkflowEventKind.STATE,
+                            "actor": ActorType.SYSTEM,
+                            "fromState": current.state,
+                            "toState": target,
+                        }
+                    ),
+                )
+            )
+            case = self._require_current(
+                connection,
+                command.case_id,
+                current.version + 1,
+            )
+        return TerminalProviderFailureResult(
+            case=case,
+            workflow_events=tuple(emitted),
+        )
+
     def append_workflow_event(
         self,
         *,
@@ -1309,29 +1572,31 @@ class SqliteCaseRepository:
             raise ValueError(
                 "State and gate workflow projections require their atomic mutation paths"
             )
-        with self._write_connection() as connection:
-            self._require_current(connection, case_id, expected_case_version)
-            audit_type = AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND[event.kind]
-            audit = AuditEvent.model_validate(
-                {
-                    "contractVersion": CONTRACT_VERSION,
-                    "eventId": f"event_{uuid4().hex}",
-                    "caseId": case_id,
-                    "eventType": audit_type,
-                    "actor": actor,
-                    "occurredAt": occurred_at,
-                    "fromState": None,
-                    "toState": None,
-                    "reasonCodes": (),
-                    "details": (),
-                }
+        if isinstance(event, OperationalFailureWorkflowEvent):
+            raise WorkflowAtomicityError(
+                "Operational failures require the atomic terminal provider-failure command"
             )
-            audit_sequence = self._insert_audit_event(connection, audit)
-            return self._insert_workflow_projection(
+        with self._write_connection() as connection:
+            current = self._require_current(connection, case_id, expected_case_version)
+            if current.state in {
+                CaseState.ANALYZING,
+                CaseState.AWAITING_CLARIFICATION,
+            } and isinstance(
+                event,
+                ProviderCallWorkflowEvent
+                | RetryWorkflowEvent
+                | PlanStepWorkflowEvent
+                | ClarificationWorkflowEvent,
+            ):
+                raise WorkflowAtomicityError(
+                    "Analysis events require the atomic analysis workflow command"
+                )
+            return self._insert_redacted_workflow_event(
                 connection,
-                audit_sequence=audit_sequence,
-                audit=audit,
+                case_id=case_id,
                 event=event,
+                actor=actor,
+                occurred_at=occurred_at,
             )
 
     def list_audit_events(
@@ -1797,6 +2062,686 @@ class SqliteCaseRepository:
             raise CaseRecordVersionConflictError(case_id, expected_version, current.version)
         return current
 
+    @classmethod
+    def _validate_analysis_command(
+        cls,
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+        *,
+        existing_gates: tuple[GateDecision, ...],
+    ) -> CaseSnapshot:
+        if command.case_id != current.case_id:
+            raise WorkflowAtomicityError("Analysis command caseId is not current")
+        allowed_current = {
+            CaseState.ANALYZING,
+            CaseState.AWAITING_CLARIFICATION,
+        }
+        allowed_target = {
+            CaseState.AWAITING_CLARIFICATION,
+            CaseState.READY_TO_FILL,
+            CaseState.BLOCKED,
+        }
+        if current.state not in allowed_current or command.target not in allowed_target:
+            raise WorkflowAtomicityError(
+                "Analysis commands require analyzing/awaiting_clarification and a closed target"
+            )
+        same_clarification_state = (
+            current.state is CaseState.AWAITING_CLARIFICATION
+            and command.target is CaseState.AWAITING_CLARIFICATION
+        )
+        if not same_clarification_state:
+            try:
+                validate_case_transition(current.state, command.target)
+            except ValueError as error:
+                raise WorkflowAtomicityError(str(error)) from error
+        if command.updated_at.utcoffset() is None:
+            raise WorkflowAtomicityError("Analysis updatedAt must include a timezone")
+        if command.updated_at < current.updated_at:
+            raise WorkflowAtomicityError("Analysis updatedAt cannot move backwards")
+        if type(command.gate_decisions) is not tuple or any(
+            not isinstance(decision, GateDecision) for decision in command.gate_decisions
+        ):
+            raise WorkflowAtomicityError("Analysis gates must be canonical GateDecision values")
+        if type(command.provider_events) is not tuple or any(
+            not isinstance(emission, ProviderWorkflowEmission)
+            for emission in command.provider_events
+        ):
+            raise WorkflowAtomicityError(
+                "Analysis provider events must use ProviderWorkflowEmission"
+            )
+        if type(command.plan_steps) is not tuple or any(
+            not isinstance(event, PlanStepWorkflowEvent) for event in command.plan_steps
+        ):
+            raise WorkflowAtomicityError("Analysis plan events must be canonical")
+        if type(command.clarification_events) is not tuple or any(
+            not isinstance(event, ClarificationWorkflowEvent)
+            for event in command.clarification_events
+        ):
+            raise WorkflowAtomicityError("Clarification events must be canonical")
+
+        effective_gates = cls._validate_analysis_gates(
+            current,
+            command,
+            existing_gates=existing_gates,
+        )
+        cls._validate_analysis_provider_events(current, command)
+        cls._validate_analysis_clarification(current, command)
+        packet = command.claim_packet
+        if command.target in {
+            CaseState.AWAITING_CLARIFICATION,
+            CaseState.READY_TO_FILL,
+        } and packet is None:
+            raise WorkflowAtomicityError(
+                f"{command.target.value} requires a target-state ClaimPacket"
+            )
+        if current.snapshot.claim_packet is not None and packet is None:
+            raise WorkflowAtomicityError(
+                "A case with a stored ClaimPacket requires its target-state packet"
+            )
+        if packet is not None:
+            if packet.gate_decisions != effective_gates:
+                raise WorkflowAtomicityError(
+                    "ClaimPacket gates must equal the bound prior prefix plus new decisions"
+                )
+            if packet.verification.status is not VerificationState.PENDING:
+                raise WorkflowAtomicityError(
+                    "Analysis targets require pending verification"
+                )
+            if packet.portal_state is not PortalState.DRAFT:
+                raise WorkflowAtomicityError("Analysis targets require draft portal state")
+            if (
+                command.target is CaseState.READY_TO_FILL
+                and packet.claim.missing_required_fields
+            ):
+                raise WorkflowAtomicityError(
+                    "ready_to_fill cannot retain missing required fields"
+                )
+            expected_plan = tuple(
+                (step.sequence, step.tool) for step in packet.plan.steps
+            )
+            supplied_plan = tuple(
+                (event.sequence, event.tool) for event in command.plan_steps
+            )
+            allowed_tools = {
+                CaseState.AWAITING_CLARIFICATION: _AWAITING_CLARIFICATION_PLAN,
+                CaseState.READY_TO_FILL: _READY_TO_FILL_PLAN,
+                CaseState.BLOCKED: _BLOCKED_PLAN,
+            }[command.target]
+            packet_plan = tuple(
+                (step.tool, step.reason) for step in packet.plan.steps
+            )
+            if packet_plan != allowed_tools or supplied_plan != expected_plan:
+                raise WorkflowAtomicityError(
+                    "Plan-step events must exactly match the target-state safe plan"
+                )
+        elif command.plan_steps:
+            raise WorkflowAtomicityError("Plan-step events require a ClaimPacket")
+
+        if command.active_clarification is not None and not isinstance(
+            command.active_clarification, ClarificationView
+        ):
+            raise WorkflowAtomicityError(
+                "active clarification must be a canonical ClarificationView"
+            )
+        active_payload = (
+            None
+            if command.active_clarification is None
+            else command.active_clarification.model_dump(mode="json", by_alias=True)
+        )
+        snapshot = replace(
+            current.snapshot,
+            portal_state=(
+                current.snapshot.portal_state
+                if packet is None
+                else packet.portal_state
+            ),
+            claim_packet=packet,
+            active_clarification=active_payload,
+        )
+        try:
+            _validate_snapshot(command.case_id, command.target, snapshot)
+        except ValueError as error:
+            raise WorkflowAtomicityError(str(error)) from error
+        return snapshot
+
+    @staticmethod
+    def _validate_analysis_command_shape(command: AnalysisWorkflowCommand) -> None:
+        if type(command.case_id) is not str or _IDENTIFIER.fullmatch(command.case_id) is None:
+            raise WorkflowAtomicityError("Analysis command caseId is invalid")
+        if type(command.expected_version) is not int or command.expected_version < 1:
+            raise WorkflowAtomicityError(
+                "Analysis expectedVersion must be a positive strict integer"
+            )
+        if not isinstance(command.target, CaseState):
+            raise WorkflowAtomicityError("Analysis target must be a canonical CaseState")
+        if type(command.updated_at) is not datetime or command.updated_at.utcoffset() is None:
+            raise WorkflowAtomicityError(
+                "Analysis updatedAt must be an aware datetime object"
+            )
+        if type(command.gate_decisions) is not tuple or any(
+            not isinstance(decision, GateDecision) for decision in command.gate_decisions
+        ):
+            raise WorkflowAtomicityError("Analysis gates must be canonical GateDecision values")
+        for decision in command.gate_decisions:
+            SqliteCaseRepository._require_canonical_contract(
+                decision,
+                "GateDecision",
+            )
+        if type(command.provider_events) is not tuple or any(
+            not isinstance(emission, ProviderWorkflowEmission)
+            or type(emission.occurred_at) is not datetime
+            for emission in command.provider_events
+        ):
+            raise WorkflowAtomicityError(
+                "Analysis provider events must use typed, datetime-bound emissions"
+            )
+        for emission in command.provider_events:
+            SqliteCaseRepository._require_canonical_contract(
+                emission.event,
+                "provider event",
+            )
+        if type(command.plan_steps) is not tuple or any(
+            not isinstance(event, PlanStepWorkflowEvent) for event in command.plan_steps
+        ):
+            raise WorkflowAtomicityError("Analysis plan events must be canonical")
+        for plan_event in command.plan_steps:
+            SqliteCaseRepository._require_canonical_contract(
+                plan_event,
+                "plan-step event",
+            )
+        if type(command.clarification_events) is not tuple or any(
+            not isinstance(event, ClarificationWorkflowEvent)
+            for event in command.clarification_events
+        ):
+            raise WorkflowAtomicityError("Clarification events must be canonical")
+        for clarification_event in command.clarification_events:
+            SqliteCaseRepository._require_canonical_contract(
+                clarification_event,
+                "clarification event",
+            )
+        if command.claim_packet is not None and not isinstance(
+            command.claim_packet, ClaimPacket
+        ):
+            raise WorkflowAtomicityError("claim_packet must be canonical or null")
+        if command.claim_packet is not None:
+            SqliteCaseRepository._require_canonical_contract(
+                command.claim_packet,
+                "ClaimPacket",
+            )
+        if command.active_clarification is not None and not isinstance(
+            command.active_clarification, ClarificationView
+        ):
+            raise WorkflowAtomicityError(
+                "active clarification must be a canonical ClarificationView"
+            )
+        if command.active_clarification is not None:
+            SqliteCaseRepository._require_canonical_contract(
+                command.active_clarification,
+                "ClarificationView",
+            )
+
+    @staticmethod
+    def _validate_terminal_provider_command_shape(
+        command: TerminalProviderFailureCommand,
+    ) -> None:
+        if type(command.case_id) is not str or _IDENTIFIER.fullmatch(command.case_id) is None:
+            raise WorkflowAtomicityError("Provider failure caseId is invalid")
+        if type(command.expected_version) is not int or command.expected_version < 1:
+            raise WorkflowAtomicityError(
+                "Provider failure expectedVersion must be a positive strict integer"
+            )
+        if not isinstance(command.event, OperationalFailureWorkflowEvent):
+            raise WorkflowAtomicityError(
+                "Terminal provider command requires OperationalFailureWorkflowEvent"
+            )
+        SqliteCaseRepository._require_canonical_contract(
+            command.event,
+            "OperationalFailureWorkflowEvent",
+        )
+        if type(command.occurred_at) is not datetime or command.occurred_at.utcoffset() is None:
+            raise WorkflowAtomicityError(
+                "Provider failure occurredAt must be an aware datetime object"
+            )
+        if type(command.provider_events) is not tuple or any(
+            not isinstance(emission, ProviderWorkflowEmission)
+            or type(emission.occurred_at) is not datetime
+            for emission in command.provider_events
+        ):
+            raise WorkflowAtomicityError(
+                "Provider failure prefix must use typed, datetime-bound emissions"
+            )
+        for emission in command.provider_events:
+            SqliteCaseRepository._require_canonical_contract(
+                emission.event,
+                "provider failure prefix event",
+            )
+        if command.claim_packet is not None and not isinstance(
+            command.claim_packet, ClaimPacket
+        ):
+            raise WorkflowAtomicityError("claim_packet must be canonical or null")
+        if command.claim_packet is not None:
+            SqliteCaseRepository._require_canonical_contract(
+                command.claim_packet,
+                "ClaimPacket",
+            )
+
+    @staticmethod
+    def _require_canonical_contract(
+        value: BaseModel,
+        label: str,
+    ) -> None:
+        try:
+            canonical = type(value).model_validate(
+                value.model_dump(mode="json", by_alias=True)
+            )
+        except (ValidationError, ValueError, TypeError) as error:
+            raise WorkflowAtomicityError(f"{label} is not canonical") from error
+        if canonical != value:
+            raise WorkflowAtomicityError(f"{label} changed during canonical validation")
+
+    @staticmethod
+    def _validate_analysis_gates(
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+        *,
+        existing_gates: tuple[GateDecision, ...],
+    ) -> tuple[GateDecision, ...]:
+        emitted = command.gate_decisions
+        if not emitted:
+            raise WorkflowAtomicityError("Analysis commit requires new gate decisions")
+        if current.state is CaseState.ANALYZING:
+            existing_ids = tuple(decision.gate_id for decision in existing_gates)
+            if existing_ids != _ANALYSIS_GATE_SEQUENCE[:2] or any(
+                not decision.passed for decision in existing_gates
+            ):
+                raise WorkflowAtomicityError(
+                    "Initial analysis requires exactly one persisted passed G0/G1 prefix"
+                )
+            expected_new: tuple[GateId, ...] = _ANALYSIS_GATE_SEQUENCE[2:]
+            emitted_ids = tuple(decision.gate_id for decision in emitted)
+            if emitted_ids != expected_new[: len(emitted)]:
+                raise WorkflowAtomicityError(
+                    "Initial analysis may emit only a contiguous G2-G5 suffix"
+                )
+            decisions = (*existing_gates, *emitted)
+        else:
+            current_packet = current.snapshot.claim_packet
+            if current_packet is None:
+                raise WorkflowAtomicityError(
+                    "Clarification continuation requires its prior ClaimPacket"
+                )
+            prior = current_packet.gate_decisions
+            latest = SqliteCaseRepository._latest_analysis_gate_set(existing_gates)
+            if (
+                tuple(decision.gate_id for decision in prior)
+                != _ANALYSIS_GATE_SEQUENCE
+                or latest != prior
+            ):
+                raise WorkflowAtomicityError(
+                    "Clarification continuation must bind the latest persisted G0-G5 set"
+                )
+            expected_new = _ANALYSIS_GATE_SEQUENCE[4:]
+            emitted_ids = tuple(decision.gate_id for decision in emitted)
+            if emitted_ids != expected_new[: len(emitted)]:
+                raise WorkflowAtomicityError(
+                    "Clarification continuation may emit only contiguous G4/G5 decisions"
+                )
+            decisions = (*prior[:4], *emitted)
+
+        gate_ids = tuple(decision.gate_id for decision in decisions)
+        emitted_times = tuple(decision.decided_at for decision in emitted)
+        if tuple(sorted(emitted_times)) != emitted_times:
+            raise WorkflowAtomicityError("New analysis gate timestamps must be monotonic")
+        if emitted_times[0] < current.updated_at or emitted_times[-1] > command.updated_at:
+            raise WorkflowAtomicityError(
+                "New analysis gate timestamps must fall within the atomic command window"
+            )
+
+        if command.target is CaseState.READY_TO_FILL:
+            if gate_ids != _ANALYSIS_GATE_SEQUENCE or any(
+                not decision.passed for decision in decisions
+            ):
+                raise WorkflowAtomicityError(
+                    "ready_to_fill requires the complete passed G0-G5 sequence"
+                )
+            return decisions
+        if command.target is CaseState.AWAITING_CLARIFICATION:
+            if gate_ids != _ANALYSIS_GATE_SEQUENCE:
+                raise WorkflowAtomicityError(
+                    "awaiting_clarification requires the complete G0-G5 sequence"
+                )
+            if any(not decision.passed for decision in decisions[:-1]):
+                raise WorkflowAtomicityError(
+                    "awaiting_clarification requires passed G0-G4"
+                )
+            final = decisions[-1]
+            if (
+                final.passed
+                or final.reason_codes
+                != (GateReasonCode.G5_REQUIRED_FIELD_MISSING,)
+            ):
+                raise WorkflowAtomicityError(
+                    "awaiting_clarification requires only the canonical G5 missing-field failure"
+                )
+            return decisions
+
+        if any(not decision.passed for decision in decisions[:-1]) or decisions[-1].passed:
+            raise WorkflowAtomicityError(
+                "blocked requires passed prefix gates and one final failed gate"
+            )
+        final = decisions[-1]
+        if final.gate_id is GateId.G5_COMPLETENESS and final.reason_codes == (
+            GateReasonCode.G5_REQUIRED_FIELD_MISSING,
+        ):
+            raise WorkflowAtomicityError(
+                "A clarifiable G5 missing field must enter awaiting_clarification"
+            )
+        return decisions
+
+    @staticmethod
+    def _latest_analysis_gate_set(
+        history: tuple[GateDecision, ...],
+    ) -> tuple[GateDecision, ...]:
+        latest: dict[GateId, GateDecision] = {}
+        for decision in history:
+            if decision.gate_id in _ANALYSIS_GATE_SEQUENCE:
+                latest[decision.gate_id] = decision
+        if any(gate not in latest for gate in _ANALYSIS_GATE_SEQUENCE):
+            raise WorkflowAtomicityError(
+                "Persisted clarification history lacks a complete G0-G5 set"
+            )
+        return tuple(latest[gate] for gate in _ANALYSIS_GATE_SEQUENCE)
+
+    @staticmethod
+    def _validate_analysis_provider_events(
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+    ) -> None:
+        emissions = command.provider_events
+        if current.state is CaseState.AWAITING_CLARIFICATION:
+            if emissions:
+                raise WorkflowAtomicityError(
+                    "Clarification continuation is deterministic and cannot call a provider"
+                )
+            return
+        if len(emissions) not in {1, 3}:
+            raise WorkflowAtomicityError(
+                "Analysis requires one provider call or call/retry/call telemetry"
+            )
+        events = tuple(emission.event for emission in emissions)
+        if any(
+            not isinstance(event, ProviderCallWorkflowEvent | RetryWorkflowEvent)
+            for event in events
+        ):
+            raise WorkflowAtomicityError(
+                "Analysis provider emissions allow only provider-call and retry events"
+            )
+        occurred = tuple(emission.occurred_at for emission in emissions)
+        if any(value.utcoffset() is None for value in occurred):
+            raise WorkflowAtomicityError("Provider timestamps must include a timezone")
+        if tuple(sorted(occurred)) != occurred:
+            raise WorkflowAtomicityError("Provider timestamps must be monotonic")
+        first_gate_at = command.gate_decisions[0].decided_at
+        if occurred[0] < current.updated_at or occurred[-1] > first_gate_at:
+            raise WorkflowAtomicityError(
+                "Provider events must precede gates inside the atomic command window"
+            )
+        if any(event.operation is not WorkflowOperation.EXTRACTION for event in events):
+            raise WorkflowAtomicityError("Analysis provider events must be extraction calls")
+
+        if len(events) == 1:
+            event = events[0]
+            if not isinstance(event, ProviderCallWorkflowEvent) or event.retry_attempt != 0:
+                raise WorkflowAtomicityError(
+                    "A single analysis provider event must be the initial successful call"
+                )
+            return
+
+        first, retry, succeeded = events
+        if (
+            not isinstance(first, ProviderCallWorkflowEvent)
+            or not isinstance(retry, RetryWorkflowEvent)
+            or not isinstance(succeeded, ProviderCallWorkflowEvent)
+        ):
+            raise WorkflowAtomicityError(
+                "Retry telemetry must be provider_call(attempt0), retry, provider_call(attempt1)"
+            )
+        if retry.failure.category is not ProviderFailureCategory.INVALID_RESPONSE:
+            raise WorkflowAtomicityError(
+                "The analysis retry is authorized only for a deterministic invalid response"
+            )
+        if (
+            first.retry_attempt != 0
+            or retry.call_sequence != first.call_sequence
+            or retry.model_id is not first.model_id
+            or retry.provider_mode != first.provider_mode
+            or succeeded.call_sequence != first.call_sequence + 1
+            or succeeded.retry_attempt != 1
+            or succeeded.model_id is not first.model_id
+            or succeeded.provider_mode != first.provider_mode
+        ):
+            raise WorkflowAtomicityError(
+                "Retry and successful provider telemetry must be contiguous and identically bound"
+            )
+
+    @staticmethod
+    def _validate_analysis_clarification(
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+    ) -> None:
+        stored_active: ClarificationView | None = None
+        if current.snapshot.active_clarification is not None:
+            try:
+                stored_active = ClarificationView.model_validate(
+                    current.snapshot.active_clarification
+                )
+            except ValidationError as error:
+                raise WorkflowAtomicityError(
+                    "Persisted active clarification is not canonical"
+                ) from error
+        if current.state is CaseState.ANALYZING and stored_active is not None:
+            raise WorkflowAtomicityError("analyzing cannot retain an active clarification")
+        if current.state is CaseState.AWAITING_CLARIFICATION:
+            if stored_active is None or stored_active.expected_version != current.version:
+                raise WorkflowAtomicityError(
+                    "awaiting_clarification requires its version-bound active view"
+                )
+            if current.snapshot.claim_packet is None:
+                raise WorkflowAtomicityError(
+                    "awaiting_clarification requires its stored ClaimPacket"
+                )
+
+        active = command.active_clarification
+        events = command.clarification_events
+        if command.target is CaseState.AWAITING_CLARIFICATION:
+            if active is None:
+                raise WorkflowAtomicityError(
+                    "awaiting_clarification requires an active ClarificationView"
+                )
+            if (
+                active.case_id != current.case_id
+                or active.expected_version != current.version + 1
+                or active.requested_at != command.updated_at
+                or active.status is not ClarificationStatus.REQUESTED
+            ):
+                raise WorkflowAtomicityError(
+                    "ClarificationView must bind to the resulting case version and timestamp"
+                )
+            packet = command.claim_packet
+            if (
+                packet is None
+                or not packet.claim.missing_required_fields
+                or active.field is not packet.claim.missing_required_fields[0]
+            ):
+                raise WorkflowAtomicityError(
+                    "ClarificationView field must be the first missing ClaimPacket field"
+                )
+            if current.state is CaseState.ANALYZING:
+                if active.round != 1 or len(events) != 1 or (
+                    events[0].status is not ClarificationStatus.REQUESTED
+                    or events[0].field is not active.field
+                    or events[0].round != active.round
+                ):
+                    raise WorkflowAtomicityError(
+                        "Initial clarification must request exactly round one"
+                    )
+            else:
+                assert stored_active is not None
+                if stored_active.round >= 3 or active.round != stored_active.round + 1:
+                    raise WorkflowAtomicityError(
+                        "Clarification continuation must advance by one bounded round"
+                    )
+                if len(events) != 2 or (
+                    events[0].status is not ClarificationStatus.CONFIRMED
+                    or events[0].field is not stored_active.field
+                    or events[0].round != stored_active.round
+                    or events[1].status is not ClarificationStatus.REQUESTED
+                    or events[1].field is not active.field
+                    or events[1].round != active.round
+                ):
+                    raise WorkflowAtomicityError(
+                        "Clarification continuation must confirm old and request new round"
+                    )
+            return
+
+        if active is not None:
+            raise WorkflowAtomicityError(
+                "ready/blocked targets cannot expose an active clarification"
+            )
+        if current.state is CaseState.ANALYZING:
+            if events:
+                raise WorkflowAtomicityError(
+                    "An analyzing case has no clarification lifecycle to close"
+                )
+            return
+        assert stored_active is not None
+        expected_status = ClarificationStatus.CONFIRMED
+        final_gate = command.gate_decisions[-1]
+        if (
+            command.target is CaseState.BLOCKED
+            and final_gate.gate_id is GateId.G5_COMPLETENESS
+            and GateReasonCode.G5_CLARIFICATION_LIMIT in final_gate.reason_codes
+        ):
+            expected_status = ClarificationStatus.EXHAUSTED
+        if len(events) != 1 or (
+            events[0].status is not expected_status
+            or events[0].field is not stored_active.field
+            or events[0].round != stored_active.round
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification close event must match the stored active view"
+            )
+
+    @staticmethod
+    def _validate_terminal_provider_failure(
+        current: CaseRecord,
+        command: TerminalProviderFailureCommand,
+    ) -> CaseSnapshot:
+        if command.case_id != current.case_id:
+            raise WorkflowAtomicityError("Provider failure caseId is not current")
+        if not isinstance(command.event, OperationalFailureWorkflowEvent):
+            raise WorkflowAtomicityError(
+                "Terminal provider command requires OperationalFailureWorkflowEvent"
+            )
+        if command.occurred_at.utcoffset() is None:
+            raise WorkflowAtomicityError("Provider failure timestamp must include a timezone")
+        if command.occurred_at < current.updated_at:
+            raise WorkflowAtomicityError("Provider failure timestamp cannot move backwards")
+        required_state = {
+            WorkflowOperation.TRANSCRIPTION: CaseState.DISCLOSED,
+            WorkflowOperation.EXTRACTION: CaseState.ANALYZING,
+            WorkflowOperation.COMPUTER_USE: CaseState.FILLING,
+            WorkflowOperation.VERIFICATION: CaseState.VERIFYING,
+        }[command.event.operation]
+        if current.state is not required_state:
+            raise WorkflowAtomicityError(
+                f"{command.event.operation.value} provider failure requires "
+                f"case state {required_state.value}"
+            )
+        prefix = command.provider_events
+        if type(prefix) is not tuple or any(
+            not isinstance(emission, ProviderWorkflowEmission) for emission in prefix
+        ):
+            raise WorkflowAtomicityError(
+                "Provider failure prefix must use ProviderWorkflowEmission"
+            )
+        if not prefix:
+            if command.event.retry_attempt != 0:
+                raise WorkflowAtomicityError(
+                    "A first-call terminal failure must use retryAttempt zero"
+                )
+        else:
+            if len(prefix) != 2:
+                raise WorkflowAtomicityError(
+                    "Terminal retry prefix must be provider_call(attempt0) then retry"
+                )
+            first_emission, retry_emission = prefix
+            first = first_emission.event
+            retry = retry_emission.event
+            if not isinstance(first, ProviderCallWorkflowEvent) or not isinstance(
+                retry, RetryWorkflowEvent
+            ):
+                raise WorkflowAtomicityError(
+                    "Terminal retry prefix must be provider_call(attempt0) then retry"
+                )
+            if (
+                first_emission.occurred_at.utcoffset() is None
+                or retry_emission.occurred_at.utcoffset() is None
+                or first_emission.occurred_at < current.updated_at
+                or retry_emission.occurred_at < first_emission.occurred_at
+                or retry_emission.occurred_at > command.occurred_at
+            ):
+                raise WorkflowAtomicityError(
+                    "Terminal retry prefix timestamps must be monotonic"
+                )
+            if (
+                first.operation is not WorkflowOperation.EXTRACTION
+                or first.retry_attempt != 0
+                or retry.operation is not WorkflowOperation.EXTRACTION
+                or retry.failure.category is not ProviderFailureCategory.INVALID_RESPONSE
+                or retry.call_sequence != first.call_sequence
+                or retry.model_id is not first.model_id
+                or retry.provider_mode != first.provider_mode
+                or command.event.operation is not WorkflowOperation.EXTRACTION
+                or command.event.call_sequence != first.call_sequence + 1
+                or command.event.retry_attempt != 1
+                or command.event.model_id is not first.model_id
+                or command.event.provider_mode != first.provider_mode
+            ):
+                raise WorkflowAtomicityError(
+                    "Terminal retry prefix and attempt-one failure are not exactly bound"
+                )
+        try:
+            validate_case_transition(current.state, CaseState.FAILED)
+        except ValueError as error:
+            raise WorkflowAtomicityError(str(error)) from error
+
+        current_packet = current.snapshot.claim_packet
+        target_packet = command.claim_packet
+        if (current_packet is None) is not (target_packet is None):
+            raise WorkflowAtomicityError(
+                "Provider failure must preserve ClaimPacket presence"
+            )
+        if current_packet is not None and target_packet is not None:
+            current_json = current_packet.model_dump(mode="json", by_alias=True)
+            target_json = target_packet.model_dump(mode="json", by_alias=True)
+            current_json["state"] = CaseState.FAILED.value
+            if target_json != current_json:
+                raise WorkflowAtomicityError(
+                    "Provider failure may change only ClaimPacket.state to failed"
+                )
+
+        snapshot = replace(
+            current.snapshot,
+            claim_packet=target_packet,
+            active_clarification=None,
+        )
+        try:
+            _validate_snapshot(current.case_id, CaseState.FAILED, snapshot)
+        except ValueError as error:
+            raise WorkflowAtomicityError(str(error)) from error
+        return snapshot
+
     @staticmethod
     def _validate_state_event(
         event: AuditEvent,
@@ -1810,6 +2755,86 @@ class SqliteCaseRepository:
             raise ValueError("State mutation requires a case_state_changed audit event")
         if event.from_state is not current.state or event.to_state is not target:
             raise ValueError("State audit event must match the persisted transition")
+
+    @staticmethod
+    def _insert_gate_decision_row(
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        decision: GateDecision,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO gate_decisions (
+                case_id, gate_id, decided_at, decision_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                case_id,
+                decision.gate_id.value,
+                decision.decided_at.isoformat(),
+                decision.model_dump_json(by_alias=True),
+            ),
+        )
+
+    @staticmethod
+    def _read_gate_decisions(
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+    ) -> tuple[GateDecision, ...]:
+        rows = connection.execute(
+            """
+            SELECT decision_json
+            FROM gate_decisions
+            WHERE case_id = ?
+            ORDER BY sequence ASC
+            """,
+            (case_id,),
+        ).fetchall()
+        try:
+            return tuple(
+                GateDecision.model_validate_json(
+                    _require_string(row["decision_json"], "gate decision")
+                )
+                for row in rows
+            )
+        except (ValidationError, ValueError, TypeError) as error:
+            raise PersistedDataIntegrityError(
+                "Persisted gate history is invalid"
+            ) from error
+
+    def _insert_redacted_workflow_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        event: AppendableWorkflowEvent,
+        actor: ActorType,
+        occurred_at: datetime,
+    ) -> WorkflowEventEnvelope:
+        audit_type = AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND[event.kind]
+        audit = AuditEvent.model_validate(
+            {
+                "contractVersion": CONTRACT_VERSION,
+                "eventId": f"event_{uuid4().hex}",
+                "caseId": case_id,
+                "eventType": audit_type,
+                "actor": actor,
+                "occurredAt": occurred_at,
+                "fromState": None,
+                "toState": None,
+                "reasonCodes": (),
+                "details": (),
+            }
+        )
+        audit_sequence = self._insert_audit_event(connection, audit)
+        return self._insert_workflow_projection(
+            connection,
+            audit_sequence=audit_sequence,
+            audit=audit,
+            event=event,
+        )
 
     @staticmethod
     def _insert_audit_event(connection: sqlite3.Connection, event: AuditEvent) -> int:
