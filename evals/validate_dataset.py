@@ -18,7 +18,7 @@ from claimdone_api.contracts.enums import (
 )
 
 DATASET_PATH = Path(__file__).with_name("dataset.json")
-MINIMUM_CASE_COUNT = 12
+EXPECTED_CASE_COUNT = 12
 REQUIRED_CATEGORIES = frozenset(
     {"happy_path", "missing_fields", "uncertainty", "safety", "injection"}
 )
@@ -57,9 +57,9 @@ def load_dataset(path: Path = DATASET_PATH) -> tuple[EvalCase, ...]:
 def validate_dataset(cases: Sequence[EvalCase]) -> None:
     """Apply cross-case and release-safety invariants."""
 
-    if len(cases) < MINIMUM_CASE_COUNT:
+    if len(cases) != EXPECTED_CASE_COUNT:
         raise DatasetValidationError(
-            f"Expected at least {MINIMUM_CASE_COUNT} eval cases, found {len(cases)}"
+            f"Expected exactly {EXPECTED_CASE_COUNT} eval cases, found {len(cases)}"
         )
 
     eval_ids = [case.eval_id for case in cases]

@@ -7,6 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 EXACT_GENERATED_PATHS = (
+    Path(".local/claimdone"),
     Path(".local/state"),
     Path(".local/tmp"),
     Path(".mypy_cache"),
@@ -22,6 +23,7 @@ EXACT_GENERATED_PATHS = (
 CACHE_SEARCH_ROOTS = (
     Path("services/api"),
     Path("scripts"),
+    Path("evals"),
 )
 
 

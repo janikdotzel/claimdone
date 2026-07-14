@@ -20,4 +20,4 @@ warn_unreachable = true
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
 pythonpath = ["services/api/src"]
-testpaths = ["services/api/tests", "scripts/tests"]
+testpaths = ["services/api/tests", "scripts/tests", "evals/tests"]
