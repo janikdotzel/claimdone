@@ -13,7 +13,11 @@ export const EMPTY_PORTAL_FIELDS: PortalDraftFields = Object.freeze({
 });
 
 export const COMPLETE_PORTAL_FIELDS: PortalDraftFields = Object.freeze({
-  attachments: Object.freeze(["rear-overview.jpg", "rear-detail.jpg", "context.png"]),
+  attachments: Object.freeze([
+    "asset-demo-rear-overview",
+    "asset-demo-rear-detail",
+    "asset-demo-context",
+  ]),
   claimantName: "Demo Claimant",
   counterpartyKnown: "yes",
   incidentDate: "2026-07-14",

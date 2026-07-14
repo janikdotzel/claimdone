@@ -13,6 +13,9 @@ import {
 const CASE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/;
+const MODEL_ASSET_ID_PATTERN = /^model-[a-f0-9]{32}\.(?:jpg|png)$/;
+const DEMO_ASSET_ID_PATTERN = /^asset-demo-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_ASSET_ID_LENGTH = 128;
 export class PortalInputError extends Error {
   readonly code = "PORTAL_INPUT_INVALID";
   readonly status = 422;
@@ -77,13 +80,16 @@ export function parsePortalFields(value: unknown): PortalDraftFields {
   if (
     !Array.isArray(value.attachments) ||
     value.attachments.length > 3 ||
-    value.attachments.some((name) => typeof name !== "string")
+    value.attachments.some((assetId) => !isServerAssetId(assetId)) ||
+    new Set(value.attachments).size !== value.attachments.length
   ) {
-    throw new PortalInputError("attachments must contain at most three file names.");
+    throw new PortalInputError(
+      "attachments must contain at most three unique approved server asset IDs.",
+    );
   }
 
   return {
-    attachments: value.attachments.map(sanitizeAttachmentName),
+    attachments: [...value.attachments],
     claimantName: value.claimantName as string,
     counterpartyKnown: value.counterpartyKnown,
     incidentDate: value.incidentDate as string,
@@ -176,9 +182,12 @@ function isValidTime(value: string): boolean {
   return Number(hours) <= 23 && Number(minutes) <= 59 && seconds < 60;
 }
 
-function sanitizeAttachmentName(value: string): string {
-  const basename = value.split(/[\\/]/).at(-1) ?? "image";
-  return basename.replace(/[\u0000-\u001F\u007F]/g, "").slice(0, 128) || "image";
+function isServerAssetId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= MAX_ASSET_ID_LENGTH &&
+    (MODEL_ASSET_ID_PATTERN.test(value) || DEMO_ASSET_ID_PATTERN.test(value))
+  );
 }
 
 function isCounterpartyKnown(

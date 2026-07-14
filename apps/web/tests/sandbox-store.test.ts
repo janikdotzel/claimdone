@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { GET as getPortal } from "../src/app/api/sandbox/cases/[caseId]/route";
+import {
+  DELETE as deletePortal,
+  GET as getPortal,
+} from "../src/app/api/sandbox/cases/[caseId]/route";
+import { DELETE as resetAllPortals } from "../src/app/api/dev/reset/route";
 import { PUT as putDraft } from "../src/app/api/sandbox/cases/[caseId]/draft/route";
 import { POST as postReview } from "../src/app/api/sandbox/cases/[caseId]/review/route";
 import type { PortalView } from "../src/features/sandbox/contracts";
@@ -101,9 +105,42 @@ describe("SandboxPortalStore", () => {
     expect(second.state).toBe("draft");
     expect(second.version).toBe(1);
   });
+
+  it("deletes one case or resets all cases deterministically", () => {
+    const store = fixedStore();
+    store.getOrCreate("case-delete-one", "A");
+    store.getOrCreate("case-delete-two", "B");
+
+    expect(store.delete("case-delete-one")).toBe(true);
+    expect(store.delete("case-delete-one")).toBe(false);
+    expect(store.audit("case-delete-one")).toEqual([]);
+    expect(store.resetAll()).toBe(1);
+    expect(store.resetAll()).toBe(0);
+    expect(store.audit("case-delete-two")).toEqual([]);
+  });
 });
 
 describe("sandbox portal route handlers", () => {
+  it("deletes one portal case and supports a deterministic reset-all route", async () => {
+    const caseId = "route-delete";
+    const context = { params: Promise.resolve({ caseId }) };
+    await getPortal(
+      new Request(`http://claimdone.local/api/sandbox/cases/${caseId}?variant=A`),
+      context,
+    );
+
+    const deleted = await deletePortal(
+      new Request(`http://claimdone.local/api/sandbox/cases/${caseId}`, {
+        method: "DELETE",
+      }),
+      context,
+    );
+    const resetAll = await resetAllPortals();
+
+    expect(deleted.status).toBe(204);
+    expect(await resetAll.json()).toMatchObject({ deletedCount: expect.any(Number) });
+  });
+
   it("round-trips draft to review through the server handlers", async () => {
     const caseId = "route-roundtrip";
     const context = { params: Promise.resolve({ caseId }) };

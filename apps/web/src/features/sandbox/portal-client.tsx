@@ -204,14 +204,14 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
   }
 
   function chooseAttachments(event: ChangeEvent<HTMLInputElement>): void {
-    const names = Array.from(event.target.files ?? []).map((file) => file.name);
-    setFields((current) => ({ ...current, attachments: names }));
-    if (names.length !== 3) {
+    const assetIds = demoAssetIdsForFiles(Array.from(event.target.files ?? []));
+    setFields((current) => ({ ...current, attachments: assetIds }));
+    if (assetIds.length !== 3) {
       setIssues([
         {
           code: "PORTAL_ATTACHMENT_COUNT",
           field: "attachments",
-          message: "Choose exactly three approved images.",
+          message: "Choose exactly three staged images to generate demo asset IDs.",
         },
       ]);
     } else {
@@ -372,7 +372,10 @@ function PortalField(props: PortalFieldProps) {
     return (
       <div className={`${styles.field} ${styles.wideField}`}>
         <label htmlFor={inputId}>{FIELD_LABELS[field]}</label>
-        <span className={styles.hint}>Exactly three approved JPG or PNG files.</span>
+        <span className={styles.hint}>
+          Server fills use approved asset IDs. This developer control creates synthetic
+          demo IDs only; file bytes are not uploaded.
+        </span>
         <input
           accept="image/jpeg,image/png"
           aria-describedby={describedBy}
@@ -614,4 +617,14 @@ function mask(value: string): string {
 function formatTimestamp(value: string): string {
   const timestamp = new Date(value);
   return Number.isNaN(timestamp.valueOf()) ? "just now" : timestamp.toLocaleTimeString();
+}
+
+export function demoAssetIdsForFiles(
+  files: readonly Pick<File, "name">[],
+): readonly string[] {
+  return files.map((file, index) => {
+    const stem = file.name.replace(/\.[^.]+$/, "").toLowerCase();
+    const slug = stem.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 72);
+    return `asset-demo-local-${index + 1}-${slug || "image"}`;
+  });
 }

@@ -17,3 +17,13 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
     return portalErrorResponse(error);
   }
 }
+
+export async function DELETE(_request: Request, context: RouteContext): Promise<Response> {
+  try {
+    const { caseId } = await context.params;
+    sandboxPortalStore.delete(caseId);
+    return new Response(null, { status: 204 });
+  } catch (error) {
+    return portalErrorResponse(error);
+  }
+}

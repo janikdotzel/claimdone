@@ -39,7 +39,7 @@ type PortalTextClaimFields = Pick<
 
 /**
  * Editable UI state. Unlike a valid ClaimData payload, a draft may contain
- * empty fields and fewer than three demo attachment names.
+ * empty fields and fewer than three approved server or synthetic demo asset IDs.
  */
 export type PortalDraftFields = Readonly<
   {
@@ -47,7 +47,7 @@ export type PortalDraftFields = Readonly<
       PortalTextClaimFields[Field]
     >;
   } & {
-    /** Display-only sandbox names; never evidence identity or media authority. */
+    /** Closed server/demo asset IDs; production evidence authority remains in the backend. */
     readonly attachments: ReadonlyArray<ClaimData["attachments"][number]>;
     readonly counterpartyKnown: "" | ClaimData["counterpartyKnown"];
   }
@@ -80,7 +80,7 @@ export interface PortalFieldIssue {
 export interface PortalAuditEntry {
   readonly sequence: number;
   readonly action: "fixture_reset" | "draft_saved" | "review_started";
-  readonly actor: "developer" | "human";
+  readonly actor: "developer" | "portal_client";
   readonly occurredAt: string;
   readonly summary: Readonly<{
     attachmentCount: number;
