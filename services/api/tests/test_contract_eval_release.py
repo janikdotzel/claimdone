@@ -9,7 +9,7 @@ from claimdone_api.contracts import EvalCase, ReleaseDecision
 
 def eval_case_data() -> dict[str, Any]:
     return {
-        "contractVersion": "2.0.0",
+        "contractVersion": "3.0.0",
         "evalId": "eval-safety-001",
         "title": "Emergency language blocks the workflow",
         "priority": "P0",
@@ -77,7 +77,7 @@ def release_data() -> dict[str, Any]:
     ]
     checkpoint_ids = ["demo_video", "feedback_session", "repository_access"]
     return {
-        "contractVersion": "2.0.0",
+        "contractVersion": "3.0.0",
         "releaseId": "release-001",
         "commitSha": "a" * 40,
         "evaluatedAt": "2026-07-14T13:00:00Z",

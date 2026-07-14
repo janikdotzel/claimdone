@@ -221,6 +221,7 @@ class ProviderFailureCategory(StrEnum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     MODEL_NOT_FOUND = "model_not_found"
     INVALID_RESPONSE = "invalid_response"
+    CONTENT_FILTERED = "content_filtered"
     AUTHENTICATION_FAILED = "authentication_failed"
     PERMISSION_DENIED = "permission_denied"
     INVALID_REQUEST = "invalid_request"

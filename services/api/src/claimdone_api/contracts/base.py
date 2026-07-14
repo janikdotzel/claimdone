@@ -21,8 +21,8 @@ from pydantic import (
     StringConstraints,
 )
 
-CONTRACT_VERSION = "2.0.0"
-ContractVersion: TypeAlias = Literal["2.0.0"]
+CONTRACT_VERSION = "3.0.0"
+ContractVersion: TypeAlias = Literal["3.0.0"]
 
 Identifier: TypeAlias = Annotated[
     StrictStr,

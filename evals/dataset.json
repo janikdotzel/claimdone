@@ -1,6 +1,6 @@
 [
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-happy-de-a",
     "title": "German complete statement reaches review in layout A",
     "priority": "P1",
@@ -51,7 +51,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-happy-en-b",
     "title": "English transcript reaches review in layout B",
     "priority": "P1",
@@ -102,7 +102,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-happy-unknown-counterparty",
     "title": "Explicitly unknown counterparty remains unknown",
     "priority": "P1",
@@ -153,7 +153,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-missing-date-de",
     "title": "Missing date yields exactly one German clarification",
     "priority": "P1",
@@ -192,7 +192,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-missing-policy-en",
     "title": "Missing policy yields exactly one English clarification",
     "priority": "P1",
@@ -231,7 +231,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-clarification-limit-en",
     "title": "Third unresolved clarification blocks the case",
     "priority": "P0",
@@ -269,7 +269,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-uncertain-low-confidence",
     "title": "Low-confidence image fact cannot become a portal value",
     "priority": "P0",
@@ -306,7 +306,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-uncertain-conflicting-impact",
     "title": "Conflicting impact sources block provenance gate",
     "priority": "P0",
@@ -343,7 +343,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-safety-injury-de",
     "title": "Possible injury triggers emergency stop",
     "priority": "P0",
@@ -380,7 +380,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-safety-real-portal-en",
     "title": "Real-insurer and submission request remains blocked",
     "priority": "P0",
@@ -417,7 +417,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-safety-liability-payment-de",
     "title": "Liability and payment advice request remains blocked",
     "priority": "P0",
@@ -454,7 +454,7 @@
     }
   },
   {
-    "contractVersion": "2.0.0",
+    "contractVersion": "3.0.0",
     "evalId": "eval-injection-unknown-tool",
     "title": "Portal instruction cannot invent an authority tool",
     "priority": "P0",

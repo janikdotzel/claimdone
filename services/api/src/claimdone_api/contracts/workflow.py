@@ -1,9 +1,18 @@
 """Sanitized, persistable workflow-event contracts."""
 
+from copy import deepcopy
 from itertools import pairwise
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, cast
 
-from pydantic import Field, model_validator
+from pydantic import (
+    Field,
+    GetJsonSchemaHandler,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 from .base import (
     ContractModel,
@@ -38,6 +47,30 @@ from .state_machine import InvalidCaseTransition, validate_case_transition
 
 ClarificationRound = OneToThree
 VerificationAttemptNumber = OneOrTwo
+ProviderMode = Literal["mock", "live"]
+
+
+def _validate_provider_binding(
+    *,
+    operation: WorkflowOperation,
+    model_id: ProviderModelId,
+    provider_mode: ProviderMode,
+    retry_attempt: int,
+) -> None:
+    """Bind redacted telemetry to one allowed provider operation identity."""
+
+    if operation is not WorkflowOperation.EXTRACTION and retry_attempt != 0:
+        raise ValueError("Only extraction may record the single V1 provider retry")
+    if provider_mode == "mock":
+        if model_id is not ProviderModelId.DETERMINISTIC_MOCK:
+            raise ValueError("Mock provider calls require the deterministic mock model ID")
+        return
+    if operation is WorkflowOperation.TRANSCRIPTION:
+        if model_id is not ProviderModelId.TRANSCRIBE:
+            raise ValueError("Live transcription requires gpt-4o-transcribe")
+        return
+    if model_id is not ProviderModelId.SOL:
+        raise ValueError("Live non-transcription workflow operations require gpt-5.6-sol")
 
 
 class ProviderFailure(ContractModel):
@@ -60,6 +93,7 @@ class ProviderFailure(ContractModel):
             ProviderFailureCategory.MODEL_NOT_FOUND,
             ProviderFailureCategory.INVALID_REQUEST,
             ProviderFailureCategory.CANCELLED,
+            ProviderFailureCategory.CONTENT_FILTERED,
         }
         controlled_retry = {
             ProviderFailureCategory.TIMEOUT,
@@ -124,6 +158,87 @@ class ToolCallWorkflowEvent(ContractModel):
     sequence: Annotated[StrictInteger, Field(ge=1, le=40)]
     tool: AllowedTool
     status: ToolCallStatus
+    duration_ms: Annotated[StrictInteger, Field(ge=0)] | None = None
+
+    @model_validator(mode="after")
+    def bind_duration_to_terminal_status(self) -> Self:
+        if self.status is ToolCallStatus.STARTED:
+            if "duration_ms" in self.model_fields_set:
+                raise ValueError("A started tool call must omit durationMs")
+        elif self.duration_ms is None:
+            raise ValueError("A terminal tool call requires durationMs")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_status_shape(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, object]:
+        serialized = cast(dict[str, object], handler(self))
+        if self.status is ToolCallStatus.STARTED:
+            serialized.pop("duration_ms", None)
+            serialized.pop("durationMs", None)
+        return serialized
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        base = deepcopy(handler.resolve_ref_schema(handler(core_schema)))
+        duration_key = "durationMs" if "durationMs" in base["properties"] else "duration_ms"
+
+        started = deepcopy(base)
+        started.pop("title", None)
+        started.pop("description", None)
+        started_properties = cast(dict[str, JsonSchemaValue], started["properties"])
+        started_properties["status"] = {
+            "const": ToolCallStatus.STARTED.value,
+            "type": "string",
+        }
+        started_properties.pop(duration_key)
+        started["required"] = [
+            field for field in cast(list[str], started["required"]) if field != duration_key
+        ]
+
+        terminal = deepcopy(base)
+        terminal.pop("title", None)
+        terminal.pop("description", None)
+        terminal_properties = cast(dict[str, JsonSchemaValue], terminal["properties"])
+        terminal_properties["status"] = {
+            "enum": [
+                ToolCallStatus.SUCCEEDED.value,
+                ToolCallStatus.BLOCKED.value,
+            ],
+            "type": "string",
+        }
+        duration_schema = terminal_properties[duration_key]
+        duration_options = duration_schema.get("anyOf")
+        if not isinstance(duration_options, list):
+            raise ValueError("Tool duration schema must contain its nullable branches")
+        terminal_duration = next(
+            (
+                option
+                for option in duration_options
+                if isinstance(option, dict) and option.get("type") != "null"
+            ),
+            None,
+        )
+        if terminal_duration is None:
+            raise ValueError("Tool duration schema requires a non-null branch")
+        terminal_properties[duration_key] = cast(
+            JsonSchemaValue, deepcopy(terminal_duration)
+        )
+        terminal_required = cast(list[str], terminal["required"])
+        if duration_key not in terminal_required:
+            terminal["required"] = [*terminal_required, duration_key]
+
+        return {
+            "description": base.get("description", cls.__doc__),
+            "oneOf": [started, terminal],
+            "title": base.get("title", cls.__name__),
+        }
 
 
 class PortalFillWorkflowEvent(ContractModel):
@@ -176,13 +291,23 @@ class RetryWorkflowEvent(ContractModel):
 
     kind: Literal[WorkflowEventKind.RETRY]
     operation: Literal[WorkflowOperation.EXTRACTION,]
+    model_id: ProviderModelId
+    provider_mode: ProviderMode
+    call_sequence: Annotated[StrictInteger, Field(ge=1, le=40)]
     retry_attempt: ExactlyOne
+    duration_ms: Annotated[StrictInteger, Field(ge=0)]
     failure: ProviderFailure
 
     @model_validator(mode="after")
     def require_retryable_failure(self) -> Self:
         if not self.failure.retryable or self.failure.terminal:
             raise ValueError("A retry event requires a retryable, non-terminal failure")
+        _validate_provider_binding(
+            operation=self.operation,
+            model_id=self.model_id,
+            provider_mode=self.provider_mode,
+            retry_attempt=self.retry_attempt,
+        )
         return self
 
 
@@ -191,12 +316,23 @@ class OperationalFailureWorkflowEvent(ContractModel):
 
     kind: Literal[WorkflowEventKind.OPERATIONAL_FAILURE]
     operation: WorkflowOperation
+    model_id: ProviderModelId
+    provider_mode: ProviderMode
+    call_sequence: Annotated[StrictInteger, Field(ge=1, le=40)]
+    retry_attempt: ZeroOrOne
+    duration_ms: Annotated[StrictInteger, Field(ge=0)]
     failure: ProviderFailure
 
     @model_validator(mode="after")
     def require_terminal_failure(self) -> Self:
         if not self.failure.terminal:
             raise ValueError("Operational failure events require a terminal failure")
+        _validate_provider_binding(
+            operation=self.operation,
+            model_id=self.model_id,
+            provider_mode=self.provider_mode,
+            retry_attempt=self.retry_attempt,
+        )
         return self
 
 
@@ -220,7 +356,7 @@ class ProviderCallWorkflowEvent(ContractModel):
     kind: Literal[WorkflowEventKind.PROVIDER_CALL]
     operation: WorkflowOperation
     model_id: ProviderModelId
-    provider_mode: Literal["mock", "live"]
+    provider_mode: ProviderMode
     call_sequence: Annotated[StrictInteger, Field(ge=1, le=40)]
     retry_attempt: ZeroOrOne
     duration_ms: Annotated[StrictInteger, Field(ge=0)]
@@ -230,21 +366,12 @@ class ProviderCallWorkflowEvent(ContractModel):
 
     @model_validator(mode="after")
     def bind_model_to_operation(self) -> Self:
-        if self.operation is not WorkflowOperation.EXTRACTION and self.retry_attempt != 0:
-            raise ValueError("Only extraction may record the single V1 provider retry")
-        if self.provider_mode == "mock":
-            if self.model_id is not ProviderModelId.DETERMINISTIC_MOCK:
-                raise ValueError("Mock provider calls require the deterministic mock model ID")
-            return self
-        if self.operation is WorkflowOperation.TRANSCRIPTION:
-            if self.model_id is not ProviderModelId.TRANSCRIBE:
-                raise ValueError("Live transcription requires gpt-4o-transcribe")
-        elif self.model_id not in {
-            ProviderModelId.SOL,
-            ProviderModelId.TERRA,
-            ProviderModelId.LUNA,
-        }:
-            raise ValueError("Live V1 AI operations require a closed GPT-5.6 model ID")
+        _validate_provider_binding(
+            operation=self.operation,
+            model_id=self.model_id,
+            provider_mode=self.provider_mode,
+            retry_attempt=self.retry_attempt,
+        )
         return self
 
 

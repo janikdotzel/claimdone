@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.0.0",
+  "contractVersion": "3.0.0",
   "caseId": "case-happy-001",
   "state": "review",
   "portalState": "review",
@@ -155,7 +155,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G0",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -165,7 +165,7 @@
       "decidedAt": "2026-07-14T12:00:00Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G1",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -175,7 +175,7 @@
       "decidedAt": "2026-07-14T12:00:01Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G2",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -185,7 +185,7 @@
       "decidedAt": "2026-07-14T12:00:02Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G3",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -195,7 +195,7 @@
       "decidedAt": "2026-07-14T12:00:03Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G4",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -205,7 +205,7 @@
       "decidedAt": "2026-07-14T12:00:04Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G5",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -215,7 +215,7 @@
       "decidedAt": "2026-07-14T12:00:05Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G6",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -225,7 +225,7 @@
       "decidedAt": "2026-07-14T12:00:06Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G7",
       "deterministicPassed": true,
       "modelBlocked": false,
@@ -235,7 +235,7 @@
       "decidedAt": "2026-07-14T12:00:07Z"
     },
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G8",
       "deterministicPassed": true,
       "modelBlocked": false,

@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.0.0",
+  "contractVersion": "3.0.0",
   "caseId": "case-block-001",
   "state": "emergency_stopped",
   "portalState": "draft",
@@ -48,7 +48,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G3",
       "deterministicPassed": false,
       "modelBlocked": false,

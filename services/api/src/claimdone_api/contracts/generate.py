@@ -14,6 +14,12 @@ from pydantic.json_schema import JsonSchemaMode, models_json_schema
 from .base import CONTRACT_VERSION
 from .eval_results import EvalCaseResult, EvalCheckResult, EvalRunSummary
 from .evals import EvalCase
+from .http_workflow import (
+    ClarificationAnswerRequest,
+    ClarificationView,
+    WorkflowCaseView,
+    WorkflowSnapshot,
+)
 from .models import (
     AuditEvent,
     ClaimData,
@@ -55,6 +61,10 @@ PUBLIC_MODELS: tuple[type[BaseModel], ...] = (
     AuditEvent,
     TranscriptConfirmationView,
     TranscriptConfirmationRequest,
+    WorkflowCaseView,
+    ClarificationView,
+    ClarificationAnswerRequest,
+    WorkflowSnapshot,
     ToolInvocation,
     PortalDraftFields,
     PortalReviewFields,

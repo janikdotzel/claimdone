@@ -37,7 +37,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -309,7 +309,7 @@
           "$ref": "#/$defs/ClaimData"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -410,6 +410,65 @@
       "title": "ClaimScope",
       "type": "object"
     },
+    "ClarificationAnswerRequest": {
+      "additionalProperties": false,
+      "description": "Exact user answer bound to the clarification and optimistic case version.",
+      "properties": {
+        "answer": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Answer",
+          "type": "string"
+        },
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "clarificationId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Clarificationid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "3.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "expectedVersion": {
+          "minimum": 1,
+          "title": "Expectedversion",
+          "type": "integer"
+        },
+        "field": {
+          "$ref": "#/$defs/RequiredClaimField"
+        },
+        "round": {
+          "enum": [
+            1,
+            2,
+            3
+          ],
+          "title": "Round",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "caseId",
+        "clarificationId",
+        "field",
+        "round",
+        "expectedVersion",
+        "answer"
+      ],
+      "title": "ClarificationAnswerRequest",
+      "type": "object"
+    },
     "ClarificationStatus": {
       "description": "Content-free clarification lifecycle states.",
       "enum": [
@@ -419,6 +478,77 @@
       ],
       "title": "ClarificationStatus",
       "type": "string"
+    },
+    "ClarificationView": {
+      "additionalProperties": false,
+      "description": "One active typed clarification without the user's answer value.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "clarificationId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Clarificationid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "3.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "expectedVersion": {
+          "minimum": 1,
+          "title": "Expectedversion",
+          "type": "integer"
+        },
+        "field": {
+          "$ref": "#/$defs/RequiredClaimField"
+        },
+        "question": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "requestedAt": {
+          "format": "date-time",
+          "title": "Requestedat",
+          "type": "string"
+        },
+        "round": {
+          "enum": [
+            1,
+            2,
+            3
+          ],
+          "title": "Round",
+          "type": "integer"
+        },
+        "status": {
+          "const": "requested",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "clarificationId",
+        "caseId",
+        "field",
+        "round",
+        "question",
+        "status",
+        "expectedVersion",
+        "requestedAt"
+      ],
+      "title": "ClarificationView",
+      "type": "object"
     },
     "ClarificationWorkflowEvent": {
       "additionalProperties": false,
@@ -505,7 +635,7 @@
       "description": "Versioned eval input and ground truth, usable without a live model.",
       "properties": {
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -576,7 +706,7 @@
           "type": "array"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -638,7 +768,7 @@
       "description": "One closed metric check with grader failure separate from observed gates.",
       "properties": {
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -913,7 +1043,7 @@
       "description": "One required closed metric aggregate with explicit denominator semantics.",
       "properties": {
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1017,7 +1147,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1423,7 +1553,7 @@
       "description": "Immutable gate event; model signals can only add a block.",
       "properties": {
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1711,6 +1841,17 @@
       "additionalProperties": false,
       "description": "Sanitized provider failure kept separate from deterministic gate history.",
       "properties": {
+        "callSequence": {
+          "maximum": 40,
+          "minimum": 1,
+          "title": "Callsequence",
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "title": "Durationms",
+          "type": "integer"
+        },
         "failure": {
           "$ref": "#/$defs/ProviderFailure"
         },
@@ -1719,13 +1860,37 @@
           "title": "Kind",
           "type": "string"
         },
+        "modelId": {
+          "$ref": "#/$defs/ProviderModelId"
+        },
         "operation": {
           "$ref": "#/$defs/WorkflowOperation"
+        },
+        "providerMode": {
+          "enum": [
+            "mock",
+            "live"
+          ],
+          "title": "Providermode",
+          "type": "string"
+        },
+        "retryAttempt": {
+          "enum": [
+            0,
+            1
+          ],
+          "title": "Retryattempt",
+          "type": "integer"
         }
       },
       "required": [
         "kind",
         "operation",
+        "modelId",
+        "providerMode",
+        "callSequence",
+        "retryAttempt",
+        "durationMs",
         "failure"
       ],
       "title": "OperationalFailureWorkflowEvent",
@@ -1997,7 +2162,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2297,6 +2462,7 @@
         "provider_unavailable",
         "model_not_found",
         "invalid_response",
+        "content_filtered",
         "authentication_failed",
         "permission_denied",
         "invalid_request",
@@ -2407,7 +2573,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2500,7 +2666,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2557,6 +2723,17 @@
       "additionalProperties": false,
       "description": "The single V1 controlled retry, separate from clarification rounds.",
       "properties": {
+        "callSequence": {
+          "maximum": 40,
+          "minimum": 1,
+          "title": "Callsequence",
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "title": "Durationms",
+          "type": "integer"
+        },
         "failure": {
           "$ref": "#/$defs/ProviderFailure"
         },
@@ -2565,9 +2742,20 @@
           "title": "Kind",
           "type": "string"
         },
+        "modelId": {
+          "$ref": "#/$defs/ProviderModelId"
+        },
         "operation": {
           "const": "extraction",
           "title": "Operation",
+          "type": "string"
+        },
+        "providerMode": {
+          "enum": [
+            "mock",
+            "live"
+          ],
+          "title": "Providermode",
           "type": "string"
         },
         "retryAttempt": {
@@ -2579,7 +2767,11 @@
       "required": [
         "kind",
         "operation",
+        "modelId",
+        "providerMode",
+        "callSequence",
         "retryAttempt",
+        "durationMs",
         "failure"
       ],
       "title": "RetryWorkflowEvent",
@@ -2609,7 +2801,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2760,43 +2952,94 @@
       "type": "string"
     },
     "ToolCallWorkflowEvent": {
-      "additionalProperties": false,
       "description": "Sanitized tool-call lifecycle event without arguments or outputs.",
-      "properties": {
-        "invocationId": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-          "title": "Invocationid",
-          "type": "string"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "invocationId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Invocationid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call",
+              "title": "Kind",
+              "type": "string"
+            },
+            "sequence": {
+              "maximum": 40,
+              "minimum": 1,
+              "title": "Sequence",
+              "type": "integer"
+            },
+            "status": {
+              "const": "started",
+              "type": "string"
+            },
+            "tool": {
+              "$ref": "#/$defs/AllowedTool"
+            }
+          },
+          "required": [
+            "kind",
+            "invocationId",
+            "sequence",
+            "tool",
+            "status"
+          ],
+          "type": "object"
         },
-        "kind": {
-          "const": "tool_call",
-          "title": "Kind",
-          "type": "string"
-        },
-        "sequence": {
-          "maximum": 40,
-          "minimum": 1,
-          "title": "Sequence",
-          "type": "integer"
-        },
-        "status": {
-          "$ref": "#/$defs/ToolCallStatus"
-        },
-        "tool": {
-          "$ref": "#/$defs/AllowedTool"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "durationMs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "invocationId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Invocationid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call",
+              "title": "Kind",
+              "type": "string"
+            },
+            "sequence": {
+              "maximum": 40,
+              "minimum": 1,
+              "title": "Sequence",
+              "type": "integer"
+            },
+            "status": {
+              "enum": [
+                "succeeded",
+                "blocked"
+              ],
+              "type": "string"
+            },
+            "tool": {
+              "$ref": "#/$defs/AllowedTool"
+            }
+          },
+          "required": [
+            "kind",
+            "invocationId",
+            "sequence",
+            "tool",
+            "status",
+            "durationMs"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "kind",
-        "invocationId",
-        "sequence",
-        "tool",
-        "status"
       ],
-      "title": "ToolCallWorkflowEvent",
-      "type": "object"
+      "title": "ToolCallWorkflowEvent"
     },
     "ToolInvocation": {
       "additionalProperties": false,
@@ -2806,7 +3049,7 @@
           "$ref": "#/$defs/ToolInvocationArguments"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2874,13 +3117,20 @@
       "additionalProperties": false,
       "description": "Human confirmation bound to the displayed transcript bytes and version.",
       "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
         "confirmed": {
           "const": true,
           "title": "Confirmed",
           "type": "boolean"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2904,6 +3154,7 @@
       },
       "required": [
         "contractVersion",
+        "caseId",
         "transcriptId",
         "transcriptSha256",
         "expectedVersion",
@@ -2916,13 +3167,20 @@
       "additionalProperties": false,
       "description": "Exact transcript content shown to a human before it may become evidence.",
       "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
         "confirmed": {
           "const": false,
           "title": "Confirmed",
           "type": "boolean"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2952,6 +3210,7 @@
       },
       "required": [
         "contractVersion",
+        "caseId",
         "transcriptId",
         "transcriptSha256",
         "text",
@@ -2993,7 +3252,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3081,7 +3340,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         }
@@ -3366,6 +3625,52 @@
       "title": "VerificationWorkflowEvent",
       "type": "object"
     },
+    "WorkflowCaseView": {
+      "additionalProperties": false,
+      "description": "Versioned case identity and state without legacy free-form snapshots.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "3.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CaseState"
+        },
+        "updatedAt": {
+          "format": "date-time",
+          "title": "Updatedat",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "caseId",
+        "state",
+        "version",
+        "createdAt",
+        "updatedAt"
+      ],
+      "title": "WorkflowCaseView",
+      "type": "object"
+    },
     "WorkflowEventEnvelope": {
       "additionalProperties": false,
       "description": "Read-only redacted projection bound to canonical audit truth.",
@@ -3378,7 +3683,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "2.0.0",
+          "const": "3.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3489,9 +3794,1649 @@
       ],
       "title": "WorkflowOperation",
       "type": "string"
+    },
+    "WorkflowSnapshot": {
+      "description": "Canonical HTTP snapshot with state-bound, closed nested payloads.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "created",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "disclosed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "analyzing",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "anyOf": [
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/ClaimPacket"
+                    },
+                    {
+                      "properties": {
+                        "portalState": {
+                          "const": "draft"
+                        },
+                        "state": {
+                          "const": "analyzing",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "portalState"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "awaiting_transcript_confirmation",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "$ref": "#/$defs/TranscriptConfirmationView"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "awaiting_clarification",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "portalState": {
+                      "const": "draft"
+                    },
+                    "state": {
+                      "const": "awaiting_clarification",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "portalState"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "$ref": "#/$defs/ClarificationView"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "ready_to_fill",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "portalState": {
+                      "const": "draft"
+                    },
+                    "state": {
+                      "const": "ready_to_fill",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "portalState"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/PortalSessionView"
+                    },
+                    {
+                      "properties": {
+                        "state": {
+                          "const": "draft",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "filling",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "portalState": {
+                      "const": "draft"
+                    },
+                    "state": {
+                      "const": "filling",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "portalState"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/PortalSessionView"
+                    },
+                    {
+                      "properties": {
+                        "state": {
+                          "const": "draft",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "verifying",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "portalState": {
+                      "const": "review"
+                    },
+                    "state": {
+                      "const": "verifying",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "portalState"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "review",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VerificationAttemptSeries"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "review",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "portalState": {
+                      "const": "review"
+                    },
+                    "state": {
+                      "const": "review",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "portalState"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "review",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "$ref": "#/$defs/VerificationAttemptSeries"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "blocked",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "blocked",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "blocked",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VerificationAttemptSeries"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "human_approved",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "portalState": {
+                      "const": "human_approved"
+                    },
+                    "state": {
+                      "const": "human_approved",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "portalState"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "receipt",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "type": "null"
+            },
+            "receipt": {
+              "$ref": "#/$defs/SandboxReceipt"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "emergency_stopped",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "emergency_stopped",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "emergency_stopped",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VerificationAttemptSeries"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "abandoned",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "abandoned",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "abandoned",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VerificationAttemptSeries"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "failed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "type": "null"
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/WorkflowCaseView"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "failed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "claimPacket": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/ClaimPacket"
+                },
+                {
+                  "properties": {
+                    "state": {
+                      "const": "failed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "clarification": {
+              "type": "null"
+            },
+            "contractVersion": {
+              "const": "3.0.0",
+              "title": "Contractversion",
+              "type": "string"
+            },
+            "portalSession": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortalSessionView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "type": "null"
+            },
+            "requestId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "title": "Requestid",
+              "type": "string"
+            },
+            "transcriptConfirmation": {
+              "type": "null"
+            },
+            "verificationAttempts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VerificationAttemptSeries"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "contractVersion",
+            "requestId",
+            "case",
+            "claimPacket",
+            "transcriptConfirmation",
+            "clarification",
+            "portalSession",
+            "verificationAttempts",
+            "receipt"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "WorkflowSnapshot"
     }
   },
-  "$id": "https://claimdone.local/contracts/2.0.0/claimdone.schema.json",
+  "$id": "https://claimdone.local/contracts/3.0.0/claimdone.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "JSON Schema 2020-12 catalog compatible with the OpenAPI 3.1 schema dialect.",
   "title": "ClaimDone canonical contracts",
@@ -3568,7 +5513,7 @@
       "review"
     ]
   },
-  "x-contract-version": "2.0.0",
+  "x-contract-version": "3.0.0",
   "x-root-models": {
     "AuditEvent": {
       "$ref": "#/$defs/AuditEvent"
@@ -3581,6 +5526,12 @@
     },
     "ClaimScope": {
       "$ref": "#/$defs/ClaimScope"
+    },
+    "ClarificationAnswerRequest": {
+      "$ref": "#/$defs/ClarificationAnswerRequest"
+    },
+    "ClarificationView": {
+      "$ref": "#/$defs/ClarificationView"
     },
     "EvalCase": {
       "$ref": "#/$defs/EvalCase"
@@ -3648,8 +5599,14 @@
     "VerificationReport": {
       "$ref": "#/$defs/VerificationReport"
     },
+    "WorkflowCaseView": {
+      "$ref": "#/$defs/WorkflowCaseView"
+    },
     "WorkflowEventEnvelope": {
       "$ref": "#/$defs/WorkflowEventEnvelope"
+    },
+    "WorkflowSnapshot": {
+      "$ref": "#/$defs/WorkflowSnapshot"
     }
   },
   "x-terminal-case-states": [

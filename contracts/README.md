@@ -1,6 +1,6 @@
 # ClaimDone canonical contracts
 
-Contract version: **2.0.0**
+Contract version: **3.0.0**
 
 The Pydantic models in
 `services/api/src/claimdone_api/contracts/` are the only canonical Python
@@ -43,9 +43,10 @@ needed. Audio has an additional fail-closed branch before any AI analysis:
 created → disclosed → awaiting_transcript_confirmation → analyzing
 ```
 
-The confirmation request binds the human decision to the exact transcript ID,
-SHA-256, and optimistic version. The existing INT-001 walking-skeleton mock is
-local and deterministic. For audio it stores the owned transcript, enters the
+The confirmation view and request bind the human decision to the exact case,
+transcript ID, SHA-256, and optimistic version. The existing INT-001
+walking-skeleton mock is local and deterministic. For audio it stores the
+owned transcript, enters the
 confirmation state, and stops before extraction or G2; it is not an OpenAI
 consumer and does not implement the future confirmation endpoint. Both
 `ModelExtraction` and `ClaimPacket` reject `transcriptConfirmed=false` or
@@ -69,15 +70,49 @@ from trusted server state and cannot appear in a model plan or invocation
 arguments. G0-G10 are registered in one immutable runtime registry; G11 remains
 the separate release gate.
 
+`WorkflowCaseView`, `ClarificationView`, `ClarificationAnswerRequest`, and
+`WorkflowSnapshot` are the closed HTTP workflow roots. The snapshot contains
+no raw intake summary or arbitrary metadata map. Active transcript and
+clarification payloads are state-exclusive and optimistic-version-bound.
+The state matrix requires a `ClaimPacket` from `awaiting_clarification`
+through `human_approved`, except that `analyzing` may contain either no packet
+or its same-state packet. Pre-extraction and receipt states cannot expose one.
+Portal sessions exist only in ready/filling, verifying/review, or terminal
+stop snapshots; their draft/review state is fixed by the case state.
+Verification series exist only in verifying/review or a terminal stop and can
+never be orphaned from a packet. `verifying` intentionally allows
+`verificationAttempts: null` until a series has completed.
+
+Review requires a case-bound review packet, review portal session, exact
+portal values byte-for-byte equal to the packet's canonical JSON claim fields,
+and a complete final successful G8 attempt series. Receipt state exposes only
+the redacted `SandboxReceipt`; it cannot expose packet, portal, verification,
+transcript, or clarification data. Clarification answers are kept byte-for-byte
+(including surrounding whitespace) only in the closed action DTO and never in
+workflow events; deterministic normalization belongs in the service layer.
+
+These state/nullability rules and the tool-call status/duration variants are
+emitted as JSON Schema `oneOf` branches and therefore as TypeScript unions.
+Relational equality of nested case IDs, optimistic/portal versions, packet
+state, and final G8 remains server/runtime validated in addition to the
+cross-runtime shape constraints.
+
 `WorkflowEventEnvelope` is a redacted read projection bound to the canonical
 audit event ID, type, and sequence. Every workflow kind has exactly one matching
 audit type; downstream OBS must write the audit truth and projection atomically.
 Its closed event union has no prompt, response,
 transcript, image, tool argument, remote error text, or arbitrary details map.
 Operational provider failures are not gates. Quota, billing, rate, auth,
-permission, invalid-request, model-not-found, and cancellation failures are
-terminal and non-retryable; only the explicitly bounded extraction retry may
-use a retry event.
+permission, invalid-request, model-not-found, content-filter, and cancellation
+failures are terminal and non-retryable; only the explicitly bounded
+extraction retry may use a retry event. Successful calls, retries, and terminal
+operational failures share the same closed operation/model/provider-mode/retry
+binding, call sequence, and duration for the same attempted call. Tool
+durations are absent while a tool is started and required only on terminal
+succeeded or blocked events. Live transcription is bound to
+`gpt-4o-transcribe`; every live non-transcription workflow operation is bound
+exactly to `gpt-5.6-sol`. Terra and Luna remain reserved enum identities for
+future independent evaluation surfaces, not workflow telemetry.
 
 Portal drafts preserve bounded raw controls, while review values and rendered
 verification snapshots remain separate contracts. Receipt projection is only
@@ -110,9 +145,15 @@ Every schema change must update `CONTRACT_VERSION`, regenerate both artifacts,
 and run the complete contract test suite. Consumers must update from the
 generated schema and TypeScript artifact in the same integration commit.
 
-Version 2.0.0 is a required major update because it adds case states and enum
-values, tightens gate authority, closes persisted details/tool arguments, and
-adds new validation invariants. Version 1.x instances are not accepted as v2.
+Version 2.0.0 was the major boundary that added case states and enum values,
+tightened gate authority, closed persisted details/tool arguments, and added
+new validation invariants. Version 3.0.0 is the next major authority boundary:
+it adds the canonical HTTP workflow roots and intentionally invalidates older
+transcript and telemetry roots through required case identity, state-matrix,
+provider-binding, and duration rules. Every root carries the exact `3.0.0`
+literal. Persisted 1.x or 2.x payloads are neither accepted nor relabelled as
+v3; persistence integration must make any reset or real migration policy
+explicit before older payloads are read.
 
 ## Examples
 

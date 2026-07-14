@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.0.0",
+  "contractVersion": "3.0.0",
   "caseId": "case-mismatch-001",
   "state": "blocked",
   "portalState": "review",
@@ -60,7 +60,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "2.0.0",
+      "contractVersion": "3.0.0",
       "gateId": "G8",
       "deterministicPassed": false,
       "modelBlocked": false,

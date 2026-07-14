@@ -690,7 +690,7 @@ function parseGateHistory(value: unknown): readonly GateDecision[] {
     const evidenceRefs = gate.evidenceRefs;
     if (
       gate.gateId !== expectedGateId ||
-      gate.contractVersion !== "2.0.0" ||
+      gate.contractVersion !== "3.0.0" ||
       !isWireAwareDatetime(gate.decidedAt) ||
       !Array.isArray(evidenceRefs) ||
       !evidenceRefs.every(

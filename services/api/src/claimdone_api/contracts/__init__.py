@@ -53,6 +53,12 @@ from .evals import (
     ModelGraderExpectation,
     PortalValueExpectation,
 )
+from .http_workflow import (
+    ClarificationAnswerRequest,
+    ClarificationView,
+    WorkflowCaseView,
+    WorkflowSnapshot,
+)
 from .models import (
     AuditDetail,
     AuditEvent,
@@ -130,7 +136,9 @@ __all__ = [
     "ClaimData",
     "ClaimPacket",
     "ClaimScope",
+    "ClarificationAnswerRequest",
     "ClarificationStatus",
+    "ClarificationView",
     "ClarificationWorkflowEvent",
     "CounterpartyKnown",
     "DeterministicEvalExpectation",
@@ -205,9 +213,11 @@ __all__ = [
     "VerificationReport",
     "VerificationState",
     "VerificationWorkflowEvent",
+    "WorkflowCaseView",
     "WorkflowEventEnvelope",
     "WorkflowEventKind",
     "WorkflowOperation",
+    "WorkflowSnapshot",
     "is_case_transition_allowed",
     "validate_case_transition",
     "validate_workflow_event_order",

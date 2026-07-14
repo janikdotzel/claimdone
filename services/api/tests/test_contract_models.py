@@ -29,7 +29,7 @@ def happy_data() -> dict[str, Any]:
 
 def gate_data() -> dict[str, Any]:
     return {
-        "contractVersion": "2.0.0",
+        "contractVersion": "3.0.0",
         "gateId": "G3",
         "deterministicPassed": True,
         "modelBlocked": False,
@@ -42,7 +42,7 @@ def gate_data() -> dict[str, Any]:
 
 def audit_data() -> dict[str, Any]:
     return {
-        "contractVersion": "2.0.0",
+        "contractVersion": "3.0.0",
         "eventId": "audit-1",
         "caseId": "case-1",
         "eventType": "case_state_changed",

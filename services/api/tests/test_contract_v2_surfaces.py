@@ -1,6 +1,7 @@
 """V2 authority, portal, tool, provider, and event contract tests."""
 
 from copy import deepcopy
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -26,6 +27,7 @@ from claimdone_api.contracts import (
     WorkflowEventKind,
     validate_workflow_event_order,
 )
+from claimdone_api.contracts.generate import build_schema
 from claimdone_api.gates.registry import (
     G0_TO_G5_REGISTRY,
     G0_TO_G10_REGISTRY,
@@ -50,7 +52,7 @@ def empty_draft() -> dict[str, object]:
     }
 
 
-def clarification_envelope(cursor: int = 1) -> dict[str, object]:
+def clarification_envelope(cursor: int = 1) -> dict[str, Any]:
     return {
         "contractVersion": CONTRACT_VERSION,
         "eventId": f"projection-{cursor}",
@@ -73,6 +75,7 @@ def test_transcript_confirmation_is_bound_to_hash_version_and_true_boolean() -> 
     view = TranscriptConfirmationView.model_validate(
         {
             "contractVersion": CONTRACT_VERSION,
+            "caseId": "case-1",
             "transcriptId": "transcript-1",
             "transcriptSha256": DIGEST,
             "text": "Synthetic transcript",
@@ -83,6 +86,7 @@ def test_transcript_confirmation_is_bound_to_hash_version_and_true_boolean() -> 
     request = TranscriptConfirmationRequest.model_validate(
         {
             "contractVersion": CONTRACT_VERSION,
+            "caseId": view.case_id,
             "transcriptId": view.transcript_id,
             "transcriptSha256": view.transcript_sha256,
             "expectedVersion": view.version,
@@ -212,7 +216,14 @@ def test_workflow_events_are_closed_redacted_projections_with_monotonic_cursors(
     with pytest.raises(ValueError, match="increasing"):
         validate_workflow_event_order((third, first))
 
-    for sensitive_key in ("prompt", "response", "toolArgs", "details", "claimantName"):
+    for sensitive_key in (
+        "prompt",
+        "response",
+        "answer",
+        "toolArgs",
+        "details",
+        "claimantName",
+    ):
         unsafe = clarification_envelope()
         unsafe_event = unsafe["event"]
         assert isinstance(unsafe_event, dict)
@@ -263,6 +274,7 @@ def test_workflow_events_are_closed_redacted_projections_with_monotonic_cursors(
         "quota_exhausted",
         "billing_limit",
         "rate_limited",
+        "content_filtered",
         "authentication_failed",
         "permission_denied",
         "model_not_found",
@@ -300,10 +312,36 @@ def test_provider_call_event_closes_model_identity_retry_and_cost_currency() -> 
     }
     assert WorkflowEventEnvelope.model_validate(event).event.kind == "provider_call"
 
+    transcription = deepcopy(event)
+    transcription_event = transcription["event"]
+    assert isinstance(transcription_event, dict)
+    transcription_event["operation"] = "transcription"
+    transcription_event["modelId"] = "gpt-4o-transcribe"
+    transcription_event["retryAttempt"] = 0
+    assert WorkflowEventEnvelope.model_validate(transcription).event.kind == "provider_call"
+
+    wrong_transcription_model = deepcopy(transcription)
+    wrong_event = wrong_transcription_model["event"]
+    assert isinstance(wrong_event, dict)
+    wrong_event["modelId"] = "gpt-5.6-sol"
+    with pytest.raises(ValidationError, match="transcription"):
+        WorkflowEventEnvelope.model_validate(wrong_transcription_model)
+
+    computer_use = deepcopy(event)
+    computer_use_event = computer_use["event"]
+    assert isinstance(computer_use_event, dict)
+    computer_use_event["operation"] = "computer_use"
+    assert WorkflowEventEnvelope.model_validate(computer_use).event.kind == "provider_call"
+
     for path, value in (
         (("modelId",), "gpt-5.6"),
+        (("modelId",), "gpt-5.6-terra"),
+        (("modelId",), "gpt-5.6-luna"),
         (("callSequence",), True),
+        (("callSequence",), 1.0),
         (("retryAttempt",), 1.0),
+        (("durationMs",), True),
+        (("durationMs",), -1),
         (("cost", "currency"), "EUR"),
     ):
         unsafe = deepcopy(event)
@@ -325,7 +363,11 @@ def test_retry_event_is_one_extraction_retry_and_never_a_clarification_round() -
     envelope["event"] = {
         "kind": "retry",
         "operation": "extraction",
+        "modelId": "gpt-5.6-sol",
+        "providerMode": "live",
+        "callSequence": 1,
         "retryAttempt": 1,
+        "durationMs": 250,
         "failure": {
             "category": "timeout",
             "retryable": True,
@@ -334,7 +376,22 @@ def test_retry_event_is_one_extraction_retry_and_never_a_clarification_round() -
     }
     assert WorkflowEventEnvelope.model_validate(envelope).event.kind == "retry"
 
-    for key, value in (("operation", "transcription"), ("retryAttempt", True)):
+    for key, value in (
+        ("operation", "transcription"),
+        ("modelId", "gpt-4o-transcribe"),
+        ("modelId", "gpt-5.6-terra"),
+        ("modelId", "gpt-5.6-luna"),
+        ("providerMode", "mock"),
+        ("callSequence", True),
+        ("callSequence", 0),
+        ("callSequence", 41),
+        ("retryAttempt", True),
+        ("retryAttempt", 0),
+        ("retryAttempt", 2),
+        ("retryAttempt", 1.0),
+        ("durationMs", True),
+        ("durationMs", -1),
+    ):
         unsafe = deepcopy(envelope)
         unsafe_event = unsafe["event"]
         assert isinstance(unsafe_event, dict)
@@ -347,6 +404,164 @@ def test_retry_event_is_one_extraction_retry_and_never_a_clarification_round() -
     unsafe_event["round"] = 1
     with pytest.raises(ValidationError, match="extra"):
         WorkflowEventEnvelope.model_validate(unsafe)
+
+
+def test_tool_call_duration_is_absent_until_terminal_status() -> None:
+    started = clarification_envelope()
+    started["sourceAuditEventType"] = "tool_call"
+    started["event"] = {
+        "kind": "tool_call",
+        "invocationId": "invocation-1",
+        "sequence": 1,
+        "tool": "inspect_form",
+        "status": "started",
+    }
+    started_model = WorkflowEventEnvelope.model_validate(started)
+    assert started_model.event.kind == "tool_call"
+    serialized = started_model.model_dump(mode="json", by_alias=True)
+    serialized_event = serialized["event"]
+    assert isinstance(serialized_event, dict)
+    assert "durationMs" not in serialized_event
+
+    tool_schema = build_schema()["$defs"]["ToolCallWorkflowEvent"]
+    started_schema = next(
+        variant
+        for variant in tool_schema["oneOf"]
+        if variant["properties"]["status"].get("const") == "started"
+    )
+    assert set(started_schema["required"]) <= set(serialized_event)
+    assert set(serialized_event) <= set(started_schema["properties"])
+    assert WorkflowEventEnvelope.model_validate(serialized) == started_model
+
+    for value in (None, 1):
+        started_with_duration = deepcopy(started)
+        started_with_duration["event"]["durationMs"] = value
+        with pytest.raises(ValidationError, match="must omit"):
+            WorkflowEventEnvelope.model_validate(started_with_duration)
+
+    for status in ("succeeded", "blocked"):
+        terminal = deepcopy(started)
+        terminal["event"]["status"] = status
+        terminal["event"]["durationMs"] = 10
+        assert WorkflowEventEnvelope.model_validate(terminal).event.kind == "tool_call"
+
+        missing = deepcopy(terminal)
+        missing["event"]["durationMs"] = None
+        with pytest.raises(ValidationError, match="requires durationMs"):
+            WorkflowEventEnvelope.model_validate(missing)
+
+        boolean = deepcopy(terminal)
+        boolean["event"]["durationMs"] = True
+        with pytest.raises(ValidationError):
+            WorkflowEventEnvelope.model_validate(boolean)
+
+        negative = deepcopy(terminal)
+        negative["event"]["durationMs"] = -1
+        with pytest.raises(ValidationError):
+            WorkflowEventEnvelope.model_validate(negative)
+
+
+def test_operational_failure_telemetry_is_closed_bound_and_terminal() -> None:
+    envelope = clarification_envelope()
+    envelope["sourceAuditEventType"] = "operational_failure"
+    envelope["event"] = {
+        "kind": "operational_failure",
+        "operation": "transcription",
+        "modelId": "gpt-4o-transcribe",
+        "providerMode": "live",
+        "callSequence": 3,
+        "retryAttempt": 0,
+        "durationMs": 400,
+        "failure": {
+            "category": "content_filtered",
+            "retryable": False,
+            "terminal": True,
+        },
+    }
+    assert WorkflowEventEnvelope.model_validate(envelope).event.kind == "operational_failure"
+
+    exhausted_extraction = deepcopy(envelope)
+    exhausted_event = exhausted_extraction["event"]
+    assert isinstance(exhausted_event, dict)
+    exhausted_event["operation"] = "extraction"
+    exhausted_event["modelId"] = "gpt-5.6-sol"
+    exhausted_event["callSequence"] = 2
+    exhausted_event["retryAttempt"] = 1
+    assert (
+        WorkflowEventEnvelope.model_validate(exhausted_extraction).event.kind
+        == "operational_failure"
+    )
+    for model_id in ("gpt-5.6-terra", "gpt-5.6-luna"):
+        unsafe_extraction = deepcopy(exhausted_extraction)
+        unsafe_event = unsafe_extraction["event"]
+        assert isinstance(unsafe_event, dict)
+        unsafe_event["modelId"] = model_id
+        with pytest.raises(ValidationError, match="gpt-5.6-sol"):
+            WorkflowEventEnvelope.model_validate(unsafe_extraction)
+
+    for key, value in (
+        ("modelId", "gpt-5.6-sol"),
+        ("providerMode", "mock"),
+        ("callSequence", True),
+        ("callSequence", 0),
+        ("callSequence", 41),
+        ("retryAttempt", 1),
+        ("retryAttempt", True),
+        ("retryAttempt", 2),
+        ("retryAttempt", 1.0),
+        ("durationMs", True),
+        ("durationMs", -1),
+    ):
+        unsafe = deepcopy(envelope)
+        unsafe["event"][key] = value
+        with pytest.raises(ValidationError):
+            WorkflowEventEnvelope.model_validate(unsafe)
+
+    non_terminal = deepcopy(envelope)
+    non_terminal["event"]["failure"] = {
+        "category": "timeout",
+        "retryable": True,
+        "terminal": False,
+    }
+    with pytest.raises(ValidationError, match="terminal failure"):
+        WorkflowEventEnvelope.model_validate(non_terminal)
+
+    for forbidden in ("error", "prompt", "response"):
+        unsafe = deepcopy(envelope)
+        unsafe["event"][forbidden] = "secret provider text"
+        with pytest.raises(ValidationError, match="extra"):
+            WorkflowEventEnvelope.model_validate(unsafe)
+
+
+def test_content_filter_failure_can_never_be_retried() -> None:
+    for retryable, terminal in ((True, False), (True, True), (False, False)):
+        with pytest.raises(ValidationError, match="terminal"):
+            ProviderFailure.model_validate(
+                {
+                    "category": "content_filtered",
+                    "retryable": retryable,
+                    "terminal": terminal,
+                }
+            )
+
+    retry = clarification_envelope()
+    retry["sourceAuditEventType"] = "retry"
+    retry["event"] = {
+        "kind": "retry",
+        "operation": "extraction",
+        "modelId": "gpt-5.6-sol",
+        "providerMode": "live",
+        "callSequence": 1,
+        "retryAttempt": 1,
+        "durationMs": 100,
+        "failure": {
+            "category": "content_filtered",
+            "retryable": False,
+            "terminal": True,
+        },
+    }
+    with pytest.raises(ValidationError, match="retryable"):
+        WorkflowEventEnvelope.model_validate(retry)
 
 
 def test_full_gate_registry_keeps_prefix_and_g8_model_reason_authoritative() -> None:
