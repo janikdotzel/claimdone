@@ -6,7 +6,7 @@ members = ["services/api"]
 
 [tool.ruff]
 line-length = 100
-src = ["services/api/src"]
+src = ["services/api/src", "."]
 target-version = "py312"
 
 [tool.ruff.lint]
@@ -20,4 +20,4 @@ warn_unreachable = true
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
 pythonpath = ["services/api/src"]
-testpaths = ["services/api/tests"]
+testpaths = ["services/api/tests", "scripts/tests"]
