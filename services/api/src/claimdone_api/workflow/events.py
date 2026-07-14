@@ -34,8 +34,8 @@ class EventStreamConfig:
     one_shot: bool = False
 
     def __post_init__(self) -> None:
-        if type(self.page_size) is not int or not 1 <= self.page_size <= 1_000:
-            raise ValueError("page_size must be an integer between 1 and 1000")
+        if type(self.page_size) is not int or not 1 <= self.page_size <= 500:
+            raise ValueError("page_size must be an integer between 1 and 500")
         if (
             type(self.poll_interval_seconds) not in {int, float}
             or not math.isfinite(self.poll_interval_seconds)
@@ -193,7 +193,7 @@ def _validate_replay_page(
     case_id: str,
     after: int,
 ) -> tuple[SequencedWorkflowEvent, ...]:
-    if len(events) > 1_000:
+    if len(events) > 500:
         raise WorkflowDataIntegrityError("Persisted workflow replay data is invalid.")
     materialized = tuple(events)
     envelopes: list[WorkflowEventEnvelope] = []

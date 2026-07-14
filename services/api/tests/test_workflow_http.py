@@ -32,6 +32,7 @@ from claimdone_api.persistence import (
     PersistedDataIntegrityError,
     SandboxReceiptRecord,
     SequencedWorkflowEvent,
+    SqliteCaseRepository,
     TranscriptRecord,
 )
 from claimdone_api.workflow import (
@@ -830,6 +831,25 @@ def test_event_stream_config_rejects_non_finite_intervals(
             EventStreamConfig(poll_interval_seconds=value)
         else:
             EventStreamConfig(heartbeat_interval_seconds=value)
+
+
+def test_event_stream_page_size_matches_real_sqlite_repository_limit(
+    tmp_path: Path,
+) -> None:
+    repository = SqliteCaseRepository(tmp_path / "workflow-events.db")
+    repository.create_case(
+        case_id=CASE_ID,
+        redacted_metadata={},
+        created_at=CREATED_AT,
+    )
+    accepted = WorkflowEventStreamer(
+        repository,
+        config=EventStreamConfig(page_size=500, one_shot=True),
+    ).prepare(CASE_ID, 0)
+
+    assert accepted.initial_events == ()
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        EventStreamConfig(page_size=501)
 
 
 def test_sse_disconnect_exits_without_emitting_buffered_events() -> None:
