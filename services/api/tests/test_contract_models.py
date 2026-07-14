@@ -181,6 +181,25 @@ def test_verification_expected_value_must_match_claim_data() -> None:
         ClaimPacket.model_validate(data)
 
 
+def test_verification_time_uses_exact_claim_json_serialization() -> None:
+    data = happy_data()
+    data["claim"]["incidentTime"] = "14:30:00Z"
+    incident_time_result = next(
+        result
+        for result in data["verification"]["fieldResults"]
+        if result["field"] == "incident_time"
+    )
+    incident_time_result.update({"expected": "14:30:00+00:00", "actual": "14:30:00+00:00"})
+
+    with pytest.raises(ValidationError, match="expected value must exactly match"):
+        ClaimPacket.model_validate(data)
+
+    incident_time_result.update({"expected": "14:30:00Z", "actual": "14:30:00Z"})
+    packet = ClaimPacket.model_validate(data)
+
+    assert packet.claim.model_dump(mode="json", by_alias=False)["incident_time"] == "14:30:00Z"
+
+
 def test_verification_sources_must_match_claim_field_provenance() -> None:
     data = happy_data()
     incident_date_result = next(

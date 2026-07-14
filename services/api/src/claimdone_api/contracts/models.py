@@ -445,19 +445,11 @@ class ClaimPacket(ContractModel):
         if self.state in review_and_later_states and self.claim.missing_required_fields:
             raise ValueError("Review and later states require no missing required claim fields")
 
+        claim_json = self.claim.model_dump(mode="json", by_alias=False)
         canonical_claim_values: dict[RequiredClaimField, JsonScalar] = {
-            RequiredClaimField.INCIDENT_DATE: (
-                self.claim.incident_date.isoformat() if self.claim.incident_date else None
-            ),
-            RequiredClaimField.INCIDENT_TIME: (
-                self.claim.incident_time.isoformat() if self.claim.incident_time else None
-            ),
-            RequiredClaimField.LOCATION: self.claim.location,
-            RequiredClaimField.CLAIMANT_NAME: self.claim.claimant_name,
-            RequiredClaimField.POLICY_REFERENCE: self.claim.policy_reference,
-            RequiredClaimField.VEHICLE_REGISTRATION: self.claim.vehicle_registration,
-            RequiredClaimField.COUNTERPARTY_KNOWN: self.claim.counterparty_known.value,
-            RequiredClaimField.NARRATIVE: self.claim.narrative,
+            field: claim_json[field.value]
+            for field in RequiredClaimField
+            if field is not RequiredClaimField.ATTACHMENTS
         }
         canonical_claim_sources = {
             entry.field: entry.source_refs for entry in self.claim.field_provenance
