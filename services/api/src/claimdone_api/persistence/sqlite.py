@@ -1,6 +1,7 @@
 """Dependency-free, optimistic-concurrency SQLite case repository."""
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -31,7 +32,7 @@ from .models import (
     validate_portal_state,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
@@ -121,6 +122,19 @@ _MIGRATION_1 = (
     ON gate_decisions(case_id, sequence)
     """,
 )
+
+_MIGRATION_2 = (
+    """
+    CREATE TABLE case_media_handles (
+        case_id TEXT PRIMARY KEY NOT NULL
+            REFERENCES cases(case_id) ON DELETE CASCADE,
+        storage_name TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    )
+    """,
+)
+
+_MEDIA_STORAGE_NAME = re.compile(r"^case-[a-f0-9]{32}$")
 
 
 def _dump_json_object(value: JsonObject | dict[str, str]) -> str:
@@ -241,9 +255,85 @@ class SqliteCaseRepository:
             if version == 0:
                 for statement in _MIGRATION_1:
                     connection.execute(statement)
+                version = 1
+                connection.execute("PRAGMA user_version = 1")
+            if version == 1:
+                for statement in _MIGRATION_2:
+                    connection.execute(statement)
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(f"Unsupported database schema: {version}")
+
+    def bind_case_media_handle(
+        self,
+        *,
+        case_id: str,
+        storage_name: str,
+        created_at: datetime,
+    ) -> None:
+        """Persist one opaque owned media handle for a case exactly once."""
+
+        if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
+            raise ValueError("Media storage name is not an owned canonical handle")
+        timestamp = _dump_aware_datetime(created_at, "media handle created_at")
+        with self._write_connection() as connection:
+            if connection.execute(
+                "SELECT 1 FROM cases WHERE case_id = ?", (case_id,)
+            ).fetchone() is None:
+                raise CaseRecordNotFoundError(case_id)
+            connection.execute(
+                """
+                INSERT INTO case_media_handles (case_id, storage_name, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (case_id, storage_name, timestamp),
+            )
+
+    def get_case_media_handle(self, case_id: str) -> str | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT storage_name FROM case_media_handles WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        storage_name = _require_string(row["storage_name"], "media storage name")
+        if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
+            raise PersistedDataIntegrityError("Persisted media handle is invalid")
+        return storage_name
+
+    def unbind_case_media_handle(self, case_id: str, storage_name: str) -> bool:
+        """Remove only the exact opaque mapping selected by the caller."""
+
+        if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
+            raise ValueError("Media storage name is not an owned canonical handle")
+        with self._write_connection() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM case_media_handles
+                WHERE case_id = ? AND storage_name = ?
+                """,
+                (case_id, storage_name),
+            )
+            return cursor.rowcount == 1
+
+    def list_case_media_handles(self) -> tuple[tuple[str, str], ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT case_id, storage_name
+                FROM case_media_handles
+                ORDER BY case_id ASC
+                """
+            ).fetchall()
+        result: list[tuple[str, str]] = []
+        for row in rows:
+            case_id = _require_string(row["case_id"], "media case id")
+            storage_name = _require_string(row["storage_name"], "media storage name")
+            if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
+                raise PersistedDataIntegrityError("Persisted media handle is invalid")
+            result.append((case_id, storage_name))
+        return tuple(result)
 
     def create_case(
         self,

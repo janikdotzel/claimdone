@@ -105,18 +105,41 @@ def test_schema_migration_enables_wal_and_is_repeatable(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_schema WHERE type = 'table'"
         ).fetchall()
     assert journal_mode == ("wal",)
-    assert schema_version == (1,)
+    assert schema_version == (2,)
     assert {str(row[0]) for row in table_rows} >= {
         "cases",
         "audit_events",
         "gate_decisions",
+        "case_media_handles",
     }
+
+
+def test_schema_version_one_upgrades_without_losing_cases(tmp_path: Path) -> None:
+    database_path = tmp_path / "version-one.db"
+    repository = SqliteCaseRepository(database_path)
+    repository.create_case(
+        case_id="case-before-media-mapping",
+        redacted_metadata={},
+        created_at=NOW,
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE case_media_handles")
+        connection.execute("PRAGMA user_version = 1")
+
+    upgraded = SqliteCaseRepository(database_path)
+
+    assert upgraded.get_case("case-before-media-mapping") is not None
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE name = 'case_media_handles'"
+        ).fetchone() == ("case_media_handles",)
 
 
 def test_newer_schema_version_is_never_downgraded(tmp_path: Path) -> None:
     database_path = tmp_path / "future.db"
     with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
 
     with pytest.raises(UnsupportedSchemaVersionError, match="newer than supported"):
         SqliteCaseRepository(database_path)
@@ -126,7 +149,7 @@ def test_newer_schema_version_is_never_downgraded(tmp_path: Path) -> None:
         case_table = connection.execute(
             "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'cases'"
         ).fetchone()
-    assert schema_version == (2,)
+    assert schema_version == (3,)
     assert case_table is None
 
 
