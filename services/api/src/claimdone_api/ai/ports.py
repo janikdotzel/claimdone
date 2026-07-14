@@ -6,6 +6,8 @@ from typing import Literal, Protocol, TypedDict, cast
 
 from .config import ProviderConfig, ProviderMode
 
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+
 
 class InputTextPart(TypedDict):
     type: Literal["input_text"]
@@ -79,25 +81,26 @@ def create_openai_client(
     *,
     api_key: str,
     config: ProviderConfig,
-    organization: str | None = None,
-    project: str | None = None,
+    organization: str,
+    project: str,
 ) -> OpenAIClientPort:
-    """Build a bounded, no-SDK-retry client from an explicitly injected key."""
+    """Build a bounded client from explicit credentials and a pinned API origin."""
 
     if config.mode is not ProviderMode.LIVE:
         raise ValueError("The OpenAI client factory requires live provider mode")
     if type(api_key) is not str or not api_key.strip():
         raise ValueError("An explicitly injected OpenAI API key is required")
-    if organization is not None and (type(organization) is not str or not organization):
-        raise ValueError("organization must be a non-empty string when supplied")
-    if project is not None and (type(project) is not str or not project):
-        raise ValueError("project must be a non-empty string when supplied")
+    if type(organization) is not str or not organization.strip():
+        raise ValueError("An explicitly injected organization is required")
+    if type(project) is not str or not project.strip():
+        raise ValueError("An explicitly injected project is required")
 
     # Import lazily so deterministic tests need only their injected fake client.
     from openai import OpenAI
 
     client = OpenAI(
         api_key=api_key,
+        base_url=OPENAI_API_BASE_URL,
         organization=organization,
         project=project,
         max_retries=config.sdk_max_retries,

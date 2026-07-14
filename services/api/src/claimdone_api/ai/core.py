@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date, time
 
 from claimdone_api.contracts import (
     AllowedTool,
     EvidenceFact,
     EvidenceField,
+    EvidenceItem,
+    EvidenceKind,
     FactStatus,
     PlanStep,
+    ProvenanceRef,
     ToolPlan,
 )
 from claimdone_api.gates import CompletenessResult
@@ -21,7 +24,6 @@ _SUPPORTED_STATUSES = frozenset({FactStatus.OBSERVED, FactStatus.USER_STATED})
 _NARRATIVE_FIELD_ORDER = (
     EvidenceField.INCIDENT_DATE,
     EvidenceField.INCIDENT_TIME,
-    EvidenceField.LOCATION,
     EvidenceField.VEHICLE_COUNT,
     EvidenceField.COLLISION_TYPE,
     EvidenceField.VISIBLE_DAMAGE,
@@ -40,14 +42,12 @@ _USER_ONLY_FIELDS = frozenset(
     {
         EvidenceField.INCIDENT_DATE,
         EvidenceField.INCIDENT_TIME,
-        EvidenceField.LOCATION,
         EvidenceField.COUNTERPARTY_KNOWN,
     }
 )
 _LABEL_BY_FIELD = {
     EvidenceField.INCIDENT_DATE: "the incident date as",
     EvidenceField.INCIDENT_TIME: "the incident time as",
-    EvidenceField.LOCATION: "the location as",
     EvidenceField.VEHICLE_COUNT: "the vehicle count as",
     EvidenceField.COLLISION_TYPE: "the collision type as",
     EvidenceField.VISIBLE_DAMAGE: "visible damage described as",
@@ -61,9 +61,64 @@ _FORBIDDEN_NARRATIVE_TERMS = re.compile(
     r"bezahl|kosten|deckung|einreich|genehmig)",
     flags=re.IGNORECASE,
 )
-_SAFE_TEXT = re.compile(r"^[\w\s,()/+\-:]+$", flags=re.UNICODE)
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TIME = re.compile(r"^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?$")
+_TIME = re.compile(r"^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$")
+_COLLISION_TYPE_TEXT = {
+    "rear_end": "a rear-end collision",
+    "front_impact": "a front-impact collision",
+    "side_impact": "a side-impact collision",
+}
+_VISIBLE_DAMAGE_TEXT = {
+    "front_bumper_dent": "a dent in the front bumper",
+    "front_bumper_scrape": "a scrape on the front bumper",
+    "rear_bumper_dent": "a dent in the rear bumper",
+    "rear_bumper_scrape": "a scrape on the rear bumper",
+    "none_visible": "no visible damage",
+}
+_IMPACT_AREA_TEXT = {
+    "front_bumper": "the front bumper",
+    "front_left_door": "the front-left door",
+    "front_right_door": "the front-right door",
+    "rear_bumper": "the rear bumper",
+    "rear_left_door": "the rear-left door",
+    "rear_right_door": "the rear-right door",
+}
+_COUNTERPARTY_TEXT = {
+    "yes": "yes",
+    "no": "no",
+    "unknown": "unknown",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class NarrativeInput:
+    """Canonical facts bound to the exact provenance and evidence inventory."""
+
+    facts: tuple[EvidenceFact, ...] = field(repr=False)
+    provenance: tuple[ProvenanceRef, ...] = field(repr=False)
+    evidence: tuple[EvidenceItem, ...] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.facts) is not tuple or any(
+            not isinstance(fact, EvidenceFact) for fact in self.facts
+        ):
+            raise ValueError("Narrative facts must be canonical EvidenceFact values")
+        if type(self.provenance) is not tuple or any(
+            not isinstance(reference, ProvenanceRef) for reference in self.provenance
+        ):
+            raise ValueError("Narrative provenance must use canonical ProvenanceRef values")
+        if type(self.evidence) is not tuple or any(
+            not isinstance(item, EvidenceItem) for item in self.evidence
+        ):
+            raise ValueError("Narrative evidence must use canonical EvidenceItem values")
+        evidence_ids = tuple(item.evidence_id for item in self.evidence)
+        provenance_ids = tuple(reference.provenance_id for reference in self.provenance)
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("Narrative evidence IDs must be unique")
+        if len(set(provenance_ids)) != len(provenance_ids):
+            raise ValueError("Narrative provenance IDs must be unique")
+        if any(reference.evidence_id not in evidence_ids for reference in self.provenance):
+            raise ValueError("Narrative provenance must reference canonical evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,14 +141,18 @@ class NarrativeResult:
             raise ValueError("Narrative source refs must be unique")
 
 
-def compose_neutral_narrative(facts: tuple[EvidenceFact, ...]) -> NarrativeResult:
-    """Render fixed neutral sentences only from safe observed/user-stated facts."""
+def compose_neutral_narrative(request: NarrativeInput) -> NarrativeResult:
+    """Render fixed sentences from allowlisted values with canonical support."""
 
-    if type(facts) is not tuple or any(not isinstance(fact, EvidenceFact) for fact in facts):
-        raise ValueError("Narrative facts must be a tuple of canonical EvidenceFact values")
+    if not isinstance(request, NarrativeInput):
+        raise ValueError("Narrative composition requires a canonical bound input")
+    provenance = {reference.provenance_id: reference for reference in request.provenance}
+    evidence = {item.evidence_id: item for item in request.evidence}
     by_field: dict[EvidenceField, list[EvidenceFact]] = defaultdict(list)
-    for fact in facts:
+    for fact in request.facts:
         if fact.status not in _SUPPORTED_STATUSES or not fact.source_refs:
+            continue
+        if not _sources_support_status(fact, provenance=provenance, evidence=evidence):
             continue
         if fact.status is FactStatus.OBSERVED and (
             fact.field not in _IMAGE_OBSERVABLE_FIELDS
@@ -111,8 +170,8 @@ def compose_neutral_narrative(facts: tuple[EvidenceFact, ...]) -> NarrativeResul
     sentences: list[str] = []
     fact_ids: list[str] = []
     source_refs: list[str] = []
-    for field in _NARRATIVE_FIELD_ORDER:
-        candidates = by_field.get(field, [])
+    for evidence_field in _NARRATIVE_FIELD_ORDER:
+        candidates = by_field.get(evidence_field, [])
         safe_values = [(fact, _safe_fact_value(fact)) for fact in candidates]
         safe_values = [(fact, value) for fact, value in safe_values if value is not None]
         if not safe_values or len({value for _fact, value in safe_values}) != 1:
@@ -124,7 +183,7 @@ def compose_neutral_narrative(facts: tuple[EvidenceFact, ...]) -> NarrativeResul
             if fact.status is FactStatus.OBSERVED
             else "The user reported"
         )
-        sentences.append(f"{lead} {_LABEL_BY_FIELD[field]} {value}.")
+        sentences.append(f"{lead} {_LABEL_BY_FIELD[evidence_field]} {value}.")
         fact_ids.append(fact.fact_id)
         source_refs.extend(fact.source_refs)
 
@@ -189,18 +248,71 @@ def _safe_fact_value(fact: EvidenceFact) -> str | None:
     value = fact.value
     if fact.field is EvidenceField.VEHICLE_COUNT:
         return str(value) if type(value) is int and 1 <= value <= 20 else None
-    if type(value) is bool:
-        normalized = "yes" if value else "no"
-    elif type(value) is str:
-        normalized = " ".join(unicodedata.normalize("NFKC", value).split())
-    else:
+    if fact.field is EvidenceField.COUNTERPARTY_KNOWN:
+        if type(value) is bool:
+            return "yes" if value else "no"
+        return _COUNTERPARTY_TEXT.get(value) if type(value) is str else None
+    if type(value) is not str:
         return None
-    if not normalized or len(normalized) > 96:
-        return None
-    if fact.field is EvidenceField.INCIDENT_DATE and _DATE.fullmatch(normalized) is None:
-        return None
-    if fact.field is EvidenceField.INCIDENT_TIME and _TIME.fullmatch(normalized) is None:
-        return None
-    if _SAFE_TEXT.fullmatch(normalized) is None or _FORBIDDEN_NARRATIVE_TERMS.search(normalized):
-        return None
-    return normalized
+    if fact.field is EvidenceField.COLLISION_TYPE:
+        return _COLLISION_TYPE_TEXT.get(value)
+    if fact.field is EvidenceField.VISIBLE_DAMAGE:
+        return _VISIBLE_DAMAGE_TEXT.get(value)
+    if fact.field is EvidenceField.IMPACT_AREA:
+        return _IMPACT_AREA_TEXT.get(value)
+    if fact.field is EvidenceField.INCIDENT_DATE:
+        return value if _valid_date(value) else None
+    if fact.field is EvidenceField.INCIDENT_TIME:
+        return value if _valid_time(value) else None
+    return None
+
+
+def _valid_date(value: str) -> bool:
+    if _DATE.fullmatch(value) is None:
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_time(value: str) -> bool:
+    if _TIME.fullmatch(value) is None:
+        return False
+    try:
+        time.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _sources_support_status(
+    fact: EvidenceFact,
+    *,
+    provenance: dict[str, ProvenanceRef],
+    evidence: dict[str, EvidenceItem],
+) -> bool:
+    if len(set(fact.source_refs)) != len(fact.source_refs):
+        return False
+    for source_ref in fact.source_refs:
+        reference = provenance.get(source_ref)
+        if reference is None:
+            return False
+        item = evidence.get(reference.evidence_id)
+        if item is None or item.model_copy_approved is not True:
+            return False
+        if fact.status is FactStatus.OBSERVED:
+            if item.kind is not EvidenceKind.IMAGE:
+                return False
+            continue
+        if item.kind is EvidenceKind.USER_STATEMENT:
+            continue
+        if (
+            item.kind is EvidenceKind.TRANSCRIPT
+            and item.transcript_confirmed is True
+            and reference.user_confirmed is True
+        ):
+            continue
+        return False
+    return True

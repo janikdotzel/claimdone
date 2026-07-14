@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import wave
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
@@ -25,6 +25,7 @@ from claimdone_api.ai import (
     ExtractionRunner,
     ExtractionSuccess,
     OwnedImage,
+    ProviderCallStatus,
     ProviderConfig,
 )
 from claimdone_api.ai.ports import ResponseInputMessage, ResponseTextConfig
@@ -612,6 +613,43 @@ def test_second_contract_failure_is_terminal_and_never_gets_third_call() -> None
     )
 
 
+def test_success_constructor_rejects_g2_telemetry_cardinality_and_binding_mismatch() -> None:
+    request = extraction_input()
+    expected = model_extraction(request)
+    client = FakeExtractionClient(
+        [FakeResponse(status="completed", output_text="{}"), completed_response(expected)]
+    )
+    result = runner(client, [1.0, 1.01, 2.0, 2.01]).run(request)
+    assert isinstance(result, ExtractionSuccess)
+
+    with pytest.raises(ValueError, match="G2 attempts must match"):
+        ExtractionSuccess(
+            extraction=result.extraction,
+            g2_run=result.g2_run,
+            telemetry=result.telemetry[:1],
+        )
+
+    wrong_retry = replace(result.telemetry[1], retry_attempt=0)
+    with pytest.raises(ValueError, match="contiguous and zero-based"):
+        ExtractionSuccess(
+            extraction=result.extraction,
+            g2_run=result.g2_run,
+            telemetry=(result.telemetry[0], wrong_retry),
+        )
+
+    failed_first = replace(
+        result.telemetry[0],
+        status=ProviderCallStatus.FAILED,
+        usage=None,
+    )
+    with pytest.raises(ValueError, match="status does not match"):
+        ExtractionSuccess(
+            extraction=result.extraction,
+            g2_run=result.g2_run,
+            telemetry=(failed_first, result.telemetry[1]),
+        )
+
+
 def test_typed_refusal_is_g2_refusal_and_is_never_retried() -> None:
     request = extraction_input()
     client = FakeExtractionClient(
@@ -638,6 +676,38 @@ def test_typed_refusal_is_g2_refusal_and_is_never_retried() -> None:
     assert GateReasonCode.G2_REFUSAL in result.g2_run.attempts[0].decision.reason_codes
     assert len(client.responses_api.calls) == 1
     assert "private refusal detail" not in repr(result)
+
+
+def test_blocked_constructor_rejects_extra_unbound_provider_telemetry() -> None:
+    request = extraction_input()
+    client = FakeExtractionClient(
+        [
+            FakeResponse(
+                status="completed",
+                output_text=None,
+                output=[
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "content": [{"type": "refusal", "refusal": "staged"}],
+                    }
+                ],
+            )
+        ]
+    )
+    result = runner(client, [1.0, 1.01]).run(request)
+    assert isinstance(result, ExtractionBlocked)
+    unbound = replace(
+        result.telemetry[0],
+        call_sequence=2,
+        retry_attempt=1,
+    )
+
+    with pytest.raises(ValueError, match="G2 attempts must match"):
+        ExtractionBlocked(
+            g2_run=result.g2_run,
+            telemetry=(*result.telemetry, unbound),
+        )
 
 
 def test_content_filter_incomplete_is_operational_failure_without_retry() -> None:

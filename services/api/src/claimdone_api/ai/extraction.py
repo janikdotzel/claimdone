@@ -108,10 +108,12 @@ class ExtractionSuccess:
     telemetry: tuple[ProviderCallTelemetry, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.g2_run, OutputContractRun):
+            raise ValueError("Extraction success requires the canonical G2 run")
         final = self.g2_run.final_result
         if final is None or not final.decision.passed or final.extraction != self.extraction:
             raise ValueError("Extraction success requires a final passed G2 result")
-        _validate_run_telemetry(self.telemetry, failure=False)
+        _validate_run_telemetry(self.telemetry, g2_run=self.g2_run, failure=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +122,12 @@ class ExtractionBlocked:
     telemetry: tuple[ProviderCallTelemetry, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.g2_run, OutputContractRun):
+            raise ValueError("Extraction block requires the canonical G2 run")
         final = self.g2_run.final_result
         if final is None or final.decision.passed:
             raise ValueError("Extraction block requires a final failed G2 result")
-        _validate_run_telemetry(self.telemetry, failure=False)
+        _validate_run_telemetry(self.telemetry, g2_run=self.g2_run, failure=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,11 +137,11 @@ class ExtractionProviderFailure:
     telemetry: tuple[ProviderCallTelemetry, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.g2_run, OutputContractRun):
+            raise ValueError("Extraction failure requires the canonical G2 run")
         if not self.failure.terminal or self.failure.retryable:
             raise ValueError("V1 extraction provider failures are terminal")
-        _validate_run_telemetry(self.telemetry, failure=True)
-        if len(self.g2_run.attempts) != len(self.telemetry) - 1:
-            raise ValueError("Only successful provider calls may enter G2")
+        _validate_run_telemetry(self.telemetry, g2_run=self.g2_run, failure=True)
 
 
 type ExtractionResult = ExtractionSuccess | ExtractionBlocked | ExtractionProviderFailure
@@ -481,10 +485,20 @@ def _sequence_member(value: object, name: str) -> Sequence[object]:
 def _validate_run_telemetry(
     telemetry: tuple[ProviderCallTelemetry, ...],
     *,
+    g2_run: OutputContractRun,
     failure: bool,
 ) -> None:
+    if not isinstance(g2_run, OutputContractRun):
+        raise ValueError("Extraction results require the canonical G2 run")
+    if type(telemetry) is not tuple or any(
+        not isinstance(item, ProviderCallTelemetry) for item in telemetry
+    ):
+        raise ValueError("Extraction telemetry must use canonical call metadata")
     if not 1 <= len(telemetry) <= 2:
         raise ValueError("Extraction telemetry requires one or two calls")
+    expected_g2_attempts = len(telemetry) - 1 if failure else len(telemetry)
+    if len(g2_run.attempts) != expected_g2_attempts:
+        raise ValueError("G2 attempts must match completed provider responses exactly")
     first_sequence = telemetry[0].call_sequence
     for index, item in enumerate(telemetry):
         if item.operation is not WorkflowOperation.EXTRACTION:
@@ -498,3 +512,12 @@ def _validate_run_telemetry(
         )
         if item.status is not expected:
             raise ValueError("Extraction telemetry status does not match its result")
+    for result, item in zip(
+        g2_run.attempts,
+        telemetry[:expected_g2_attempts],
+        strict=True,
+    ):
+        if result.attempt != item.retry_attempt:
+            raise ValueError("Each G2 attempt must bind to its provider retry attempt")
+        if item.status is not ProviderCallStatus.SUCCEEDED:
+            raise ValueError("Only completed provider responses may enter G2")

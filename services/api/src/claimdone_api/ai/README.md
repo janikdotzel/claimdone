@@ -6,6 +6,9 @@ to HTTP or persistence in this worktree.
 - `ProviderConfig` accepts only the closed provider modes and exact V1 model IDs.
   Live mode is fixed to `gpt-5.6-sol` and `gpt-4o-transcribe`; SDK retries are
   fixed at zero and the app owns one extraction retry.
+- `create_openai_client` requires explicitly injected API-key, organization, and
+  project values and pins the API origin to `https://api.openai.com/v1`. OpenAI
+  SDK environment defaults cannot redirect the client or select another tenant.
 - `OpenAITranscriber` accepts only bounded, server-named PCM WAV bytes and makes
   one transcription call. It returns normalized text or a sanitized terminal
   `ProviderFailure`; it never retries.
@@ -13,7 +16,14 @@ to HTTP or persistence in this worktree.
   one approved statement or explicitly confirmed transcript. It uses multimodal
   Responses Structured Outputs and passes every response through canonical G2.
   Only G2 truncation, schema, or reference failures authorize the second call.
-- `compose_neutral_narrative` uses only safe `observed` and `user_stated` facts.
+- Extraction results require a one-to-one binding between each completed provider
+  response, its sequence/retry metadata, and the matching immutable G2 attempt.
+- `compose_neutral_narrative` accepts a bound `NarrativeInput`, never bare facts.
+  It maps only closed field values into fixed text. Every `observed` source must
+  resolve through canonical provenance to approved image evidence; every
+  `user_stated` source must resolve to approved user-statement evidence or a
+  human-confirmed transcript. Free-form locations, damage descriptions, model
+  narratives, instructions, and liability language are omitted.
   `build_visible_tool_plan` is deterministic and may include one clarification
   only when the canonical G5 result accepted it.
 

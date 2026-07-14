@@ -208,8 +208,55 @@ def test_openai_factory_injects_key_and_enforces_bounded_no_retry_client(
     assert client is fake
     assert captured["max_retries"] == 0
     assert captured["timeout"] == 45.0
+    assert captured["base_url"] == "https://api.openai.com/v1"
     assert captured["organization"] == "org-test"
     assert captured["project"] == "proj-test"
+
+
+def test_openai_factory_ignores_sdk_environment_routing_and_tenant_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://attacker.invalid/v1")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-attacker")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-attacker")
+
+    client = cast(
+        openai.OpenAI,
+        create_openai_client(
+            api_key="sk-test-only-not-real",
+            config=ProviderConfig(),
+            organization="org-explicit",
+            project="proj-explicit",
+        ),
+    )
+
+    assert str(client.base_url) == "https://api.openai.com/v1/"
+    assert client.organization == "org-explicit"
+    assert client.project == "proj-explicit"
+    assert client.max_retries == 0
+
+
+@pytest.mark.parametrize(
+    ("organization", "project", "message"),
+    [
+        ("", "proj-explicit", "organization"),
+        ("   ", "proj-explicit", "organization"),
+        ("org-explicit", "", "project"),
+        ("org-explicit", "   ", "project"),
+    ],
+)
+def test_openai_factory_requires_explicit_non_empty_tenant_ids(
+    organization: str,
+    project: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        create_openai_client(
+            api_key="sk-test-only-not-real",
+            config=ProviderConfig(),
+            organization=organization,
+            project=project,
+        )
 
 
 @pytest.mark.parametrize(

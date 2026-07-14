@@ -10,7 +10,12 @@ from .config import (
     ProviderConfig,
     ProviderMode,
 )
-from .core import NarrativeResult, build_visible_tool_plan, compose_neutral_narrative
+from .core import (
+    NarrativeInput,
+    NarrativeResult,
+    build_visible_tool_plan,
+    compose_neutral_narrative,
+)
 from .extraction import (
     EXTRACTION_INSTRUCTIONS,
     RETRY_INSTRUCTIONS,
@@ -61,6 +66,7 @@ __all__ = [
     "ExtractionResult",
     "ExtractionRunner",
     "ExtractionSuccess",
+    "NarrativeInput",
     "NarrativeResult",
     "OpenAIClientPort",
     "OpenAITranscriber",
