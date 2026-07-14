@@ -3,9 +3,12 @@
 # Pydantic/FastAPI currently attaches field metadata incorrectly to PEP 695 aliases.
 # ruff: noqa: UP040
 
+import re
+from datetime import date, datetime, time
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -45,6 +48,59 @@ Confidence: TypeAlias = Annotated[StrictFloat, Field(ge=0.0, le=1.0)]
 JsonScalar: TypeAlias = StrictStr | StrictInt | StrictFloat | StrictBool | None
 StrictBoolean: TypeAlias = StrictBool
 StrictInteger: TypeAlias = StrictInt
+
+_DATE_WIRE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_WIRE_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$")
+_AWARE_DATETIME_WIRE_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _require_wire_date(value: object) -> object:
+    if type(value) is date:
+        return value
+    if type(value) is not str or _DATE_WIRE_PATTERN.fullmatch(value) is None:
+        raise ValueError("date input must be an ISO date string or an exact date object")
+    try:
+        date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("date input must be a valid ISO date string") from error
+    return value
+
+
+def _require_wire_time(value: object) -> object:
+    if type(value) is time:
+        return value
+    if type(value) is not str or _TIME_WIRE_PATTERN.fullmatch(value) is None:
+        raise ValueError("time input must be an ISO time string or an exact time object")
+    try:
+        time.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("time input must be a valid ISO time string") from error
+    return value
+
+
+def _require_wire_aware_datetime(value: object) -> object:
+    if type(value) is datetime:
+        return value
+    if type(value) is not str or _AWARE_DATETIME_WIRE_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "datetime input must be an ISO timezone-aware string or an exact datetime object"
+        )
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("datetime input must be a valid ISO datetime string") from error
+    if parsed.utcoffset() is None:
+        raise ValueError("datetime input must include a timezone offset")
+    return value
+
+
+WireDate: TypeAlias = Annotated[date, BeforeValidator(_require_wire_date)]
+WireTime: TypeAlias = Annotated[time, BeforeValidator(_require_wire_time)]
+WireAwareDatetime: TypeAlias = Annotated[
+    AwareDatetime, BeforeValidator(_require_wire_aware_datetime)
+]
 
 
 def _require_false(value: object) -> object:

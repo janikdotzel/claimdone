@@ -1,9 +1,8 @@
 """Canonical ClaimDone domain, gate, verification, and audit contracts."""
 
-from datetime import date, time
 from typing import Annotated, Literal, Self
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import Field, model_validator
 
 from .base import (
     AlwaysFalse,
@@ -19,6 +18,9 @@ from .base import (
     ShortText,
     StrictBoolean,
     StrictInteger,
+    WireAwareDatetime,
+    WireDate,
+    WireTime,
 )
 from .enums import (
     ActorType,
@@ -136,8 +138,8 @@ class FieldProvenance(ContractModel):
 class ClaimData(ContractModel):
     """The complete draft payload and deterministic required-field result."""
 
-    incident_date: date | None
-    incident_time: time | None
+    incident_date: WireDate | None
+    incident_time: WireTime | None
     location: ShortText | None
     claimant_name: ShortText | None
     policy_reference: ShortText | None
@@ -209,7 +211,7 @@ class GateDecision(ContractModel):
     passed: StrictBoolean
     reason_codes: tuple[GateReasonCode, ...]
     evidence_refs: tuple[Identifier, ...]
-    decided_at: AwareDatetime
+    decided_at: WireAwareDatetime
 
     @model_validator(mode="after")
     def prevent_override(self) -> Self:
@@ -266,7 +268,7 @@ class VerificationReport(ContractModel):
     expected_attachment_count: ExactlyThree
     actual_attachment_count: Annotated[StrictInteger, Field(ge=0)] | None
     review_allowed: StrictBoolean
-    verified_at: AwareDatetime | None
+    verified_at: WireAwareDatetime | None
 
     @model_validator(mode="after")
     def prevent_verification_override(self) -> Self:
@@ -351,7 +353,7 @@ class AuditEvent(ContractModel):
     case_id: Identifier
     event_type: AuditEventType
     actor: ActorType
-    occurred_at: AwareDatetime
+    occurred_at: WireAwareDatetime
     from_state: CaseState | None
     to_state: CaseState | None
     reason_codes: tuple[GateReasonCode, ...]
@@ -422,6 +424,59 @@ class ClaimPacket(ContractModel):
             for source in field.source_refs
         ):
             raise ValueError("Every claim-field source must reference existing provenance")
+        if any(
+            source not in known_provenance
+            for decision in self.gate_decisions
+            for source in decision.evidence_refs
+        ):
+            raise ValueError("Every gate evidence source must reference existing provenance")
+        if any(
+            source not in known_provenance
+            for result in self.verification.field_results
+            for source in result.source_refs
+        ):
+            raise ValueError("Every verification source must reference existing provenance")
+
+        review_and_later_states = {
+            CaseState.REVIEW,
+            CaseState.HUMAN_APPROVED,
+            CaseState.RECEIPT,
+        }
+        if self.state in review_and_later_states and self.claim.missing_required_fields:
+            raise ValueError("Review and later states require no missing required claim fields")
+
+        canonical_claim_values: dict[RequiredClaimField, JsonScalar] = {
+            RequiredClaimField.INCIDENT_DATE: (
+                self.claim.incident_date.isoformat() if self.claim.incident_date else None
+            ),
+            RequiredClaimField.INCIDENT_TIME: (
+                self.claim.incident_time.isoformat() if self.claim.incident_time else None
+            ),
+            RequiredClaimField.LOCATION: self.claim.location,
+            RequiredClaimField.CLAIMANT_NAME: self.claim.claimant_name,
+            RequiredClaimField.POLICY_REFERENCE: self.claim.policy_reference,
+            RequiredClaimField.VEHICLE_REGISTRATION: self.claim.vehicle_registration,
+            RequiredClaimField.COUNTERPARTY_KNOWN: self.claim.counterparty_known.value,
+            RequiredClaimField.NARRATIVE: self.claim.narrative,
+        }
+        canonical_claim_sources = {
+            entry.field: entry.source_refs for entry in self.claim.field_provenance
+        }
+        for result in self.verification.field_results:
+            if result.field is RequiredClaimField.ATTACHMENTS:
+                raise ValueError("Attachments must be verified through attachment counts")
+            canonical_value = canonical_claim_values[result.field]
+            if (
+                type(result.expected) is not type(canonical_value)
+                or result.expected != canonical_value
+            ):
+                raise ValueError(
+                    "Verification expected value must exactly match canonical ClaimData"
+                )
+            if result.source_refs != canonical_claim_sources.get(result.field):
+                raise ValueError(
+                    "Verification sourceRefs must exactly match ClaimData fieldProvenance"
+                )
 
         fact_ids = tuple(fact.fact_id for fact in self.facts)
         if len(set(fact_ids)) != len(fact_ids):
@@ -435,22 +490,13 @@ class ClaimPacket(ContractModel):
             raise ValueError(
                 f"Case state {self.state.value} requires exact passed gate sequence: {expected}"
             )
-        if any(not decision.passed for decision in self.gate_decisions) and self.state in {
-            CaseState.REVIEW,
-            CaseState.HUMAN_APPROVED,
-            CaseState.RECEIPT,
-        }:
+        if (
+            any(not decision.passed for decision in self.gate_decisions)
+            and self.state in review_and_later_states
+        ):
             raise ValueError("Review and later states cannot contain a failed gate decision")
 
-        if (
-            self.state
-            in {
-                CaseState.REVIEW,
-                CaseState.HUMAN_APPROVED,
-                CaseState.RECEIPT,
-            }
-            and not self.verification.review_allowed
-        ):
+        if self.state in review_and_later_states and not self.verification.review_allowed:
             raise ValueError("Review and later states require successful verification")
         allowed_portal_states = {
             CaseState.CREATED: {PortalState.DRAFT},

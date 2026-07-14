@@ -1,7 +1,7 @@
 import json
 import warnings
 from copy import deepcopy
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, cast
 
@@ -78,6 +78,39 @@ def test_fastapi_parsed_json_dict_validates_without_unsafe_coercion() -> None:
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        ("claim", "incidentDate"),
+        ("claim", "incidentTime"),
+        ("gateDecisions", 0, "decidedAt"),
+    ],
+)
+def test_fastapi_rejects_numeric_temporal_wire_values(path: tuple[str | int, ...]) -> None:
+    data: Any = happy_data()
+    target: Any = data
+    for segment in path[:-1]:
+        target = target[segment]
+    target[path[-1]] = 0
+
+    response = FastAPITestClient(CONTRACT_APP).post("/packet", json=data)
+
+    assert response.status_code == 422
+
+
+def test_temporal_fields_accept_exact_python_objects_for_internal_calls() -> None:
+    data = happy_data()
+    data["claim"]["incidentDate"] = date(2026, 7, 14)
+    data["claim"]["incidentTime"] = time(14, 30)
+    data["gateDecisions"][0]["decidedAt"] = datetime(2026, 7, 14, 12, tzinfo=UTC)
+
+    packet = ClaimPacket.model_validate(data)
+
+    assert packet.claim.incident_date == date(2026, 7, 14)
+    assert packet.claim.incident_time == time(14, 30)
+    assert packet.gate_decisions[0].decided_at == datetime(2026, 7, 14, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
     ("path", "coerced_value"),
     [
         (("plan", "steps", 0, "sequence"), "1"),
@@ -118,6 +151,58 @@ def test_wire_contract_rejects_snake_case_field_names() -> None:
     data["contract_version"] = data.pop("contractVersion")
 
     with pytest.raises(ValidationError):
+        ClaimPacket.model_validate(data)
+
+
+def test_gate_evidence_refs_must_reference_existing_provenance() -> None:
+    data = happy_data()
+    data["gateDecisions"][0]["evidenceRefs"] = ["prov-does-not-exist"]
+
+    with pytest.raises(ValidationError, match="gate evidence source"):
+        ClaimPacket.model_validate(data)
+
+
+def test_verification_source_refs_must_reference_existing_provenance() -> None:
+    data = happy_data()
+    data["verification"]["fieldResults"][0]["sourceRefs"] = ["prov-does-not-exist"]
+
+    with pytest.raises(ValidationError, match="verification source"):
+        ClaimPacket.model_validate(data)
+
+
+def test_verification_expected_value_must_match_claim_data() -> None:
+    data = happy_data()
+    location_result = next(
+        result for result in data["verification"]["fieldResults"] if result["field"] == "location"
+    )
+    location_result.update({"expected": "Munich", "actual": "Munich"})
+
+    with pytest.raises(ValidationError, match="expected value must exactly match"):
+        ClaimPacket.model_validate(data)
+
+
+def test_verification_sources_must_match_claim_field_provenance() -> None:
+    data = happy_data()
+    incident_date_result = next(
+        result
+        for result in data["verification"]["fieldResults"]
+        if result["field"] == "incident_date"
+    )
+    incident_date_result["sourceRefs"] = ["prov-statement"]
+
+    with pytest.raises(ValidationError, match="must exactly match ClaimData"):
+        ClaimPacket.model_validate(data)
+
+
+def test_review_requires_no_missing_claim_fields() -> None:
+    data = happy_data()
+    data["claim"]["location"] = None
+    data["claim"]["missingRequiredFields"] = ["location"]
+    data["claim"]["fieldProvenance"] = [
+        entry for entry in data["claim"]["fieldProvenance"] if entry["field"] != "location"
+    ]
+
+    with pytest.raises(ValidationError, match="require no missing required claim fields"):
         ClaimPacket.model_validate(data)
 
 

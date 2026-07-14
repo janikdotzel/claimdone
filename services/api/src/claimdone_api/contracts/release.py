@@ -3,7 +3,7 @@
 from types import MappingProxyType
 from typing import Annotated, Self
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import Field, model_validator
 
 from .base import (
     AlwaysTrue,
@@ -13,6 +13,7 @@ from .base import (
     Identifier,
     ShortText,
     StrictBoolean,
+    WireAwareDatetime,
 )
 from .enums import (
     CheckpointStatus,
@@ -77,7 +78,7 @@ class HumanCheckpoint(ContractModel):
     checkpoint_id: HumanCheckpointId
     status: CheckpointStatus
     confirmed_by: ShortText | None
-    confirmed_at: AwareDatetime | None
+    confirmed_at: WireAwareDatetime | None
 
     @model_validator(mode="after")
     def validate_confirmation(self) -> Self:
@@ -100,7 +101,7 @@ class ReleaseDecision(ContractModel):
     contract_version: ContractVersion
     release_id: Identifier
     commit_sha: Annotated[str, Field(pattern=r"^[a-f0-9]{40}$")]
-    evaluated_at: AwareDatetime
+    evaluated_at: WireAwareDatetime
     deterministic_checks: Annotated[tuple[ReleaseCheck, ...], Field(min_length=1)]
     model_grades: Annotated[tuple[ModelGradeResult, ...], Field(min_length=1)]
     human_checkpoints: Annotated[tuple[HumanCheckpoint, ...], Field(min_length=1)]
