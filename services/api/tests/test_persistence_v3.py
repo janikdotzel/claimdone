@@ -523,8 +523,8 @@ def test_migration_late_ddl_fault_rolls_back_parent_rebuild_and_index(
         # This collides only after cases has been copied, dropped, and renamed,
         # and after the new audit source index has been attempted.
         connection.execute(
-            "CREATE TABLE workflow_events ("
-            "source_audit_sequence INTEGER PRIMARY KEY, event_json TEXT NOT NULL)"
+            "CREATE TABLE case_transcripts ("
+            "case_id TEXT PRIMARY KEY, transcript_id TEXT NOT NULL)"
         )
         schema_before = connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
@@ -779,6 +779,68 @@ def test_provider_ledger_corruption_is_wrapped_as_integrity_error(
         repository.list_provider_usage(case.case_id)
 
 
+@pytest.mark.parametrize("tampering", ("cost", "missing", "unexpected"))
+def test_reopen_rejects_provider_ledger_source_mismatches(
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    database_path = tmp_path / f"ledger-source-{tampering}.db"
+    service, repository = _service(database_path)
+    case = service.create_case()
+    case = service.transition_case(
+        case.case_id,
+        expected_version=case.version,
+        target=CaseState.DISCLOSED,
+    )
+    provider = repository.append_workflow_event(
+        case_id=case.case_id,
+        expected_case_version=case.version,
+        event=_provider_event(),
+        actor=ActorType.SYSTEM,
+        occurred_at=NOW + timedelta(seconds=1),
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        if tampering == "cost":
+            connection.execute(
+                "UPDATE provider_usage_ledger SET estimated_cost_micros = 777 "
+                "WHERE source_audit_sequence = ?",
+                (provider.cursor,),
+            )
+        elif tampering == "missing":
+            connection.execute(
+                "DELETE FROM provider_usage_ledger WHERE source_audit_sequence = ?",
+                (provider.cursor,),
+            )
+        else:
+            state_row = connection.execute(
+                "SELECT source_audit_sequence FROM workflow_events "
+                "WHERE event_kind = 'state'"
+            ).fetchone()
+            assert state_row is not None
+            state_sequence = int(state_row[0])
+            connection.execute(
+                """
+                INSERT INTO provider_usage_ledger (
+                    source_audit_sequence, case_id, operation, model_id, provider_mode,
+                    call_sequence, retry_attempt, duration_ms, status, input_tokens,
+                    output_tokens, total_tokens, estimated_cost_micros, currency,
+                    pricing_snapshot_id, failure_category, occurred_at
+                )
+                SELECT ?, case_id, operation, model_id, provider_mode,
+                    call_sequence, retry_attempt, duration_ms, status, input_tokens,
+                    output_tokens, total_tokens, estimated_cost_micros, currency,
+                    pricing_snapshot_id, failure_category, occurred_at
+                FROM provider_usage_ledger
+                WHERE source_audit_sequence = ?
+                """,
+                (state_sequence, provider.cursor),
+            )
+
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
+
+
 def test_workflow_corruption_is_wrapped_as_integrity_error(tmp_path: Path) -> None:
     database_path = tmp_path / "corrupt.db"
     service, repository = _service(database_path)
@@ -796,6 +858,46 @@ def test_workflow_corruption_is_wrapped_as_integrity_error(tmp_path: Path) -> No
 
     with pytest.raises(PersistedDataIntegrityError, match="workflow"):
         repository.list_workflow_events(record.case_id)
+
+
+@pytest.mark.parametrize("tampering", ("state_target", "gate_id", "missing"))
+def test_reopen_rejects_audit_projection_source_tampering(
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    database_path = tmp_path / f"projection-source-{tampering}.db"
+    service, _repository = _service(database_path)
+    case = service.create_case()
+    case = service.transition_case(
+        case.case_id,
+        expected_version=case.version,
+        target=CaseState.DISCLOSED,
+    )
+    if tampering == "gate_id":
+        case = service.record_gate_decision(
+            case.case_id,
+            expected_version=case.version,
+            decision=_gate(),
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        if tampering == "state_target":
+            connection.execute(
+                "UPDATE workflow_events "
+                "SET event_json = json_set(event_json, '$.event.toState', 'abandoned') "
+                "WHERE event_kind = 'state'"
+            )
+        elif tampering == "gate_id":
+            connection.execute(
+                "UPDATE workflow_events "
+                "SET event_json = json_set(event_json, '$.event.decision.gateId', 'G1') "
+                "WHERE event_kind = 'gate'"
+            )
+        else:
+            connection.execute("DELETE FROM workflow_events WHERE event_kind = 'state'")
+
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
 
 
 def test_transcript_confirmation_binds_case_id_version_hash_and_stores_no_text(
@@ -960,6 +1062,89 @@ def test_transcript_confirmation_binds_case_id_version_hash_and_stores_no_text(
     assert sorted(outcomes) == ["confirmed", "stale"]
 
 
+def test_transcript_identity_is_derived_at_save_confirm_and_reopen(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "transcript-source-binding.db"
+    service, repository = _service(database_path)
+    case = service.create_case()
+    case = service.transition_case(
+        case.case_id,
+        expected_version=case.version,
+        target=CaseState.DISCLOSED,
+    )
+    case = service.save_intake_summary(
+        case.case_id,
+        expected_version=case.version,
+        summary=_pending_summary(),
+    )
+    event = build_state_change_event(
+        case_id=case.case_id,
+        current=case.state,
+        target=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+        actor=ActorType.SYSTEM,
+        occurred_at=NOW + timedelta(seconds=1),
+        event_id_factory=lambda: "audit-forged-transcript",
+    )
+    forged_id = f"transcript-{'f' * 32}"
+    transcript_ref = f"transcript-{'3' * 32}.txt"
+    forged_ref = f"transcript-{'4' * 32}.txt"
+    identity = hashlib.sha256(
+        f"claimdone-transcript-v1\0{case.case_id}\0{transcript_ref}\0{DIGEST}".encode()
+    ).hexdigest()
+    derived_transcript_id = f"transcript-{identity[:32]}"
+    for transcript_id, transcript_hash, local_ref in (
+        (forged_id, DIGEST, transcript_ref),
+        (derived_transcript_id, "b" * 64, transcript_ref),
+        (derived_transcript_id, DIGEST, forged_ref),
+    ):
+        with pytest.raises(TranscriptStateError, match="intake summary"):
+            repository.save_pending_transcript_and_transition(
+                case_id=case.case_id,
+                expected_case_version=case.version,
+                transcript_id=transcript_id,
+                transcript_sha256=transcript_hash,
+                local_ref=local_ref,
+                snapshot=case.snapshot,
+                event=event,
+                updated_at=event.occurred_at,
+            )
+    assert service.get_case(case.case_id) == case
+    assert repository.get_transcript(case.case_id) is None
+
+    waiting = service.transition_case(
+        case.case_id,
+        expected_version=case.version,
+        target=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+    )
+    transcript = repository.get_transcript(case.case_id)
+    assert transcript is not None
+    confirmation = TranscriptConfirmationRequest.model_validate(
+        {
+            "contractVersion": CONTRACT_VERSION,
+            "caseId": case.case_id,
+            "transcriptId": transcript.transcript_id,
+            "transcriptSha256": transcript.transcript_sha256,
+            "expectedVersion": waiting.version,
+            "confirmed": True,
+        }
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE case_transcripts SET transcript_sha256 = ? WHERE case_id = ?",
+            ("b" * 64, case.case_id),
+        )
+
+    with pytest.raises(TranscriptStateError, match="stale or mismatched"):
+        service.confirm_transcript(
+            case.case_id,
+            expected_case_version=waiting.version,
+            confirmation=confirmation,
+        )
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
+
+
 def test_capabilities_store_digest_only_revoke_prior_open_and_cascade(
     tmp_path: Path,
 ) -> None:
@@ -1070,6 +1255,54 @@ def test_capabilities_store_digest_only_revoke_prior_open_and_cascade(
     )
     service.delete_case(case.case_id)
     assert repository.get_authority_capability(second_digest) is None
+
+
+def test_capability_consumption_after_expiry_is_rejected_but_late_revocation_is_allowed(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "capability-expiry.db"
+    service, repository = _service(database_path)
+    case = service.create_case()
+    revocation_digest = hashlib.sha256(b"late-administrative-revocation").digest()
+    consumption_digest = hashlib.sha256(b"late-consumption").digest()
+
+    repository.issue_authority_capability(
+        case_id=case.case_id,
+        expected_case_version=case.version,
+        digest=revocation_digest,
+        role="agent",
+        purpose="portal_run",
+        issued_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    assert repository.revoke_authority_capability(
+        revocation_digest,
+        revoked_at=NOW + timedelta(seconds=31),
+    )
+    revoked = repository.get_authority_capability(revocation_digest)
+    assert revoked is not None
+    assert revoked.revoked_at == NOW + timedelta(seconds=31)
+
+    repository.issue_authority_capability(
+        case_id=case.case_id,
+        expected_case_version=case.version,
+        digest=consumption_digest,
+        role="human",
+        purpose="human_approve",
+        issued_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE authority_capabilities SET consumed_at = ? "
+            "WHERE capability_digest = ?",
+            ((NOW + timedelta(seconds=31)).isoformat(), consumption_digest),
+        )
+
+    with pytest.raises(PersistedDataIntegrityError, match="after expiry"):
+        repository.get_authority_capability(consumption_digest)
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
 
 
 def test_receipt_surface_is_read_only_and_fails_closed_on_invalid_json(

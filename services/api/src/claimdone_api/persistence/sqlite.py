@@ -135,6 +135,20 @@ _WORKFLOW_EVENT_KIND_VALUES = _enum_sql_values(WorkflowEventKind)
 _WORKFLOW_OPERATION_VALUES = _enum_sql_values(WorkflowOperation)
 _PROVIDER_MODEL_ID_VALUES = _enum_sql_values(ProviderModelId)
 _PROVIDER_FAILURE_VALUES = _enum_sql_values(ProviderFailureCategory)
+_WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE = {
+    event_type: kind for kind, event_type in AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND.items()
+}
+_REQUIRED_V3_TABLES = (
+    "cases",
+    "audit_events",
+    "gate_decisions",
+    "case_media_handles",
+    "workflow_events",
+    "case_transcripts",
+    "provider_usage_ledger",
+    "authority_capabilities",
+    "sandbox_receipts",
+)
 
 _MIGRATION_1 = (
     f"""
@@ -477,6 +491,103 @@ def _validate_snapshot(case_id: str, state: CaseState, snapshot: CaseSnapshot) -
         raise ValueError("ClaimPacket portalState must match the persisted PortalState")
 
 
+def _validate_audit_projection_binding(
+    audit: AuditEvent,
+    envelope: WorkflowEventEnvelope,
+) -> None:
+    expected_kind = _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE.get(audit.event_type)
+    if expected_kind is None or envelope.event.kind is not expected_kind:
+        raise PersistedDataIntegrityError(
+            "Persisted workflow kind does not match its audit event type"
+        )
+    event = envelope.event
+    if isinstance(event, StateWorkflowEvent):
+        if (
+            event.actor is not audit.actor
+            or event.from_state is not audit.from_state
+            or event.to_state is not audit.to_state
+        ):
+            raise PersistedDataIntegrityError(
+                "Persisted state projection disagrees with its audit event"
+            )
+    elif isinstance(event, GateWorkflowEvent) and (
+        event.decision.decided_at != audit.occurred_at
+        or event.decision.reason_codes != audit.reason_codes
+    ):
+        raise PersistedDataIntegrityError(
+            "Persisted gate projection disagrees with its audit event"
+        )
+
+
+def _validate_provider_usage_binding(
+    envelope: WorkflowEventEnvelope,
+    record: ProviderUsageLedgerRecord | None,
+) -> None:
+    event = envelope.event
+    if not isinstance(
+        event,
+        ProviderCallWorkflowEvent
+        | RetryWorkflowEvent
+        | OperationalFailureWorkflowEvent,
+    ):
+        if record is not None:
+            raise PersistedDataIntegrityError(
+                "Non-provider workflow event has provider usage telemetry"
+            )
+        return
+    if record is None:
+        raise PersistedDataIntegrityError(
+            "Provider workflow event is missing usage telemetry"
+        )
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_cost_micros: int | None = None
+    currency: str | None = None
+    pricing_snapshot_id: str | None = None
+    failure_category: ProviderFailureCategory | None = None
+    if isinstance(event, ProviderCallWorkflowEvent):
+        status = "succeeded"
+        if event.usage is not None:
+            input_tokens = event.usage.input_tokens
+            output_tokens = event.usage.output_tokens
+            total_tokens = event.usage.total_tokens
+        if event.cost is not None:
+            estimated_cost_micros = event.cost.estimated_cost_micros
+            currency = event.cost.currency
+            pricing_snapshot_id = event.cost.pricing_snapshot_id
+    elif isinstance(event, RetryWorkflowEvent):
+        status = "retry_scheduled"
+        failure_category = event.failure.category
+    else:
+        status = "failed"
+        failure_category = event.failure.category
+
+    if (
+        record.source_audit_sequence != envelope.source_audit_sequence
+        or record.case_id != envelope.case_id
+        or record.operation is not event.operation
+        or record.model_id is not event.model_id
+        or record.provider_mode != event.provider_mode
+        or record.call_sequence != event.call_sequence
+        or record.retry_attempt != event.retry_attempt
+        or record.duration_ms != event.duration_ms
+        or record.status != status
+        or record.input_tokens != input_tokens
+        or record.output_tokens != output_tokens
+        or record.total_tokens != total_tokens
+        or record.estimated_cost_micros != estimated_cost_micros
+        or record.currency != currency
+        or record.pricing_snapshot_id != pricing_snapshot_id
+        or record.failure_category is not failure_category
+        or record.occurred_at != envelope.occurred_at
+    ):
+        raise PersistedDataIntegrityError(
+            "Persisted provider usage disagrees with its workflow event"
+        )
+
+
 class SqliteCaseRepository:
     """Store case snapshots with atomic state events and compare-and-swap versions."""
 
@@ -615,11 +726,33 @@ class SqliteCaseRepository:
         """Validate every canonical JSON root without rewriting its version."""
 
         try:
+            if not legacy:
+                missing_tables = tuple(
+                    table
+                    for table in _REQUIRED_V3_TABLES
+                    if not self._table_exists(connection, table)
+                )
+                if missing_tables:
+                    raise PersistedDataIntegrityError(
+                        "Current persistence schema is missing required tables"
+                    )
+
+            cases_by_id: dict[str, CaseRecord] = {}
+            audits_by_sequence: dict[int, AuditEvent] = {}
+            gate_decisions_by_case: dict[str, list[GateDecision]] = {}
+            workflows_by_sequence: dict[int, WorkflowEventEnvelope] = {}
+            transcripts: list[TranscriptRecord] = []
+            provider_usage_by_sequence: dict[int, ProviderUsageLedgerRecord] = {}
+            workflow_table_exists = self._table_exists(connection, "workflow_events")
+            transcript_table_exists = self._table_exists(connection, "case_transcripts")
+
             if self._table_exists(connection, "cases"):
                 for row in connection.execute("SELECT * FROM cases ORDER BY case_id"):
-                    self._row_to_case(row)
+                    case = self._row_to_case(row)
+                    cases_by_id[case.case_id] = case
             if self._table_exists(connection, "audit_events"):
                 for row in connection.execute("SELECT * FROM audit_events ORDER BY sequence"):
+                    sequence = _require_integer(row["sequence"], "audit sequence")
                     audit = AuditEvent.model_validate_json(
                         _require_string(row["event_json"], "audit event")
                     )
@@ -632,8 +765,10 @@ class SqliteCaseRepository:
                         raise PersistedDataIntegrityError(
                             "Persisted audit columns disagree with canonical JSON"
                         )
+                    audits_by_sequence[sequence] = audit
             if self._table_exists(connection, "gate_decisions"):
                 for row in connection.execute("SELECT * FROM gate_decisions ORDER BY sequence"):
+                    case_id = _require_string(row["case_id"], "gate case id")
                     decision = GateDecision.model_validate_json(
                         _require_string(row["decision_json"], "gate decision")
                     )
@@ -645,7 +780,8 @@ class SqliteCaseRepository:
                         raise PersistedDataIntegrityError(
                             "Persisted gate columns disagree with canonical JSON"
                         )
-            if self._table_exists(connection, "workflow_events"):
+                    gate_decisions_by_case.setdefault(case_id, []).append(decision)
+            if workflow_table_exists:
                 for row in connection.execute(
                     "SELECT * FROM workflow_events ORDER BY source_audit_sequence"
                 ):
@@ -678,17 +814,11 @@ class SqliteCaseRepository:
                         raise PersistedDataIntegrityError(
                             "Persisted workflow columns disagree with canonical JSON"
                         )
-                    source_row = connection.execute(
-                        "SELECT event_json FROM audit_events WHERE sequence = ?",
-                        (source_sequence,),
-                    ).fetchone()
-                    if source_row is None:
+                    source = audits_by_sequence.get(source_sequence)
+                    if source is None:
                         raise PersistedDataIntegrityError(
                             "Persisted workflow source audit event is missing"
                         )
-                    source = AuditEvent.model_validate_json(
-                        _require_string(source_row["event_json"], "source audit event")
-                    )
                     if (
                         source.event_id != envelope.source_audit_event_id
                         or source.case_id != envelope.case_id
@@ -698,14 +828,19 @@ class SqliteCaseRepository:
                         raise PersistedDataIntegrityError(
                             "Persisted workflow source identity is invalid"
                         )
-            if self._table_exists(connection, "case_transcripts"):
+                    _validate_audit_projection_binding(source, envelope)
+                    workflows_by_sequence[source_sequence] = envelope
+            if transcript_table_exists:
                 for row in connection.execute("SELECT * FROM case_transcripts ORDER BY case_id"):
-                    self._row_to_transcript(row)
+                    transcripts.append(self._row_to_transcript(row))
             if self._table_exists(connection, "provider_usage_ledger"):
                 for row in connection.execute(
                     "SELECT * FROM provider_usage_ledger ORDER BY source_audit_sequence"
                 ):
-                    self._row_to_provider_usage(row)
+                    provider_record = self._row_to_provider_usage(row)
+                    provider_usage_by_sequence[
+                        provider_record.source_audit_sequence
+                    ] = provider_record
             if self._table_exists(connection, "authority_capabilities"):
                 for row in connection.execute(
                     "SELECT * FROM authority_capabilities ORDER BY case_id, purpose"
@@ -721,6 +856,70 @@ class SqliteCaseRepository:
                             "Persisted receipt case identity is invalid"
                         )
                     _parse_datetime(_require_string(row["created_at"], "receipt created_at"))
+
+            if workflow_table_exists:
+                for sequence, audit in audits_by_sequence.items():
+                    if audit.event_type not in _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE:
+                        continue
+                    required_envelope = workflows_by_sequence.get(sequence)
+                    if required_envelope is None:
+                        raise PersistedDataIntegrityError(
+                            "Persisted audit event is missing its workflow projection"
+                        )
+                    _validate_audit_projection_binding(audit, required_envelope)
+
+                projected_gates_by_case: dict[str, list[GateDecision]] = {}
+                for sequence in sorted(workflows_by_sequence):
+                    envelope = workflows_by_sequence[sequence]
+                    if isinstance(envelope.event, GateWorkflowEvent):
+                        projected_gates_by_case.setdefault(envelope.case_id, []).append(
+                            envelope.event.decision
+                        )
+                    _validate_provider_usage_binding(
+                        envelope,
+                        provider_usage_by_sequence.get(sequence),
+                    )
+                if gate_decisions_by_case != projected_gates_by_case:
+                    raise PersistedDataIntegrityError(
+                        "Persisted gate decisions disagree with their workflow projections"
+                    )
+                if any(
+                    sequence not in workflows_by_sequence
+                    for sequence in provider_usage_by_sequence
+                ):
+                    raise PersistedDataIntegrityError(
+                        "Persisted provider usage has no workflow event"
+                    )
+
+            transcripts_by_case = {
+                transcript.case_id: transcript for transcript in transcripts
+            }
+            for transcript_record in transcripts:
+                bound_case = cases_by_id.get(transcript_record.case_id)
+                if bound_case is None or bound_case.snapshot.intake_summary is None:
+                    raise PersistedDataIntegrityError(
+                        "Persisted transcript has no bound intake summary"
+                    )
+                derived_id, derived_ref, derived_hash = _transcript_identity_from_summary(
+                    transcript_record.case_id,
+                    bound_case.snapshot.intake_summary,
+                )
+                if (
+                    transcript_record.transcript_id != derived_id
+                    or transcript_record.local_ref != derived_ref
+                    or transcript_record.transcript_sha256 != derived_hash
+                ):
+                    raise PersistedDataIntegrityError(
+                        "Persisted transcript identity disagrees with its intake summary"
+                    )
+            if transcript_table_exists and any(
+                case.state is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
+                and case.case_id not in transcripts_by_case
+                for case in cases_by_id.values()
+            ):
+                raise PersistedDataIntegrityError(
+                    "Case awaiting transcript confirmation has no bound transcript"
+                )
         except (
             PersistedDataIntegrityError,
             ValidationError,
@@ -1277,6 +1476,25 @@ class SqliteCaseRepository:
         """Atomically bind content-free transcript metadata and enter confirmation."""
 
         self._validate_transcript_identity(transcript_id, transcript_sha256, local_ref)
+        if snapshot.intake_summary is None:
+            raise TranscriptStateError("Pending transcript requires an intake summary")
+        try:
+            derived_id, derived_ref, derived_hash = _transcript_identity_from_summary(
+                case_id,
+                snapshot.intake_summary,
+            )
+        except ValueError as error:
+            raise TranscriptStateError(
+                "Pending transcript is not bound to a canonical audio intake summary"
+            ) from error
+        if (
+            transcript_id != derived_id
+            or local_ref != derived_ref
+            or transcript_sha256 != derived_hash
+        ):
+            raise TranscriptStateError(
+                "Pending transcript identity does not match its intake summary"
+            )
         target = CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
         with self._write_connection() as connection:
             current = self._require_current(connection, case_id, expected_case_version)
@@ -1348,10 +1566,32 @@ class SqliteCaseRepository:
             current = self._require_current(connection, case_id, expected_case_version)
             if current.state is not CaseState.AWAITING_TRANSCRIPT_CONFIRMATION:
                 raise TranscriptStateError("Case is not awaiting transcript confirmation")
+            if current.snapshot.intake_summary is None or snapshot.intake_summary is None:
+                raise TranscriptStateError("Transcript confirmation requires an intake summary")
+            try:
+                derived_id, derived_ref, derived_hash = _transcript_identity_from_summary(
+                    case_id,
+                    current.snapshot.intake_summary,
+                )
+                next_identity = _transcript_identity_from_summary(
+                    case_id,
+                    snapshot.intake_summary,
+                )
+            except ValueError as error:
+                raise TranscriptStateError(
+                    "Transcript confirmation is not bound to a canonical audio intake summary"
+                ) from error
+            if next_identity != (derived_id, derived_ref, derived_hash):
+                raise TranscriptStateError(
+                    "Transcript confirmation cannot replace the bound transcript identity"
+                )
             transcript = self._require_transcript(connection, case_id)
             if (
-                transcript.transcript_id != transcript_id
-                or transcript.transcript_sha256 != transcript_sha256
+                transcript.transcript_id != derived_id
+                or transcript.local_ref != derived_ref
+                or transcript.transcript_sha256 != derived_hash
+                or transcript_id != derived_id
+                or transcript_sha256 != derived_hash
                 or transcript.version != 1
                 or transcript.bound_case_version != current.version
                 or transcript.confirmed
@@ -1923,6 +2163,10 @@ class SqliteCaseRepository:
         ):
             raise PersistedDataIntegrityError(
                 "Persisted capability lifecycle timestamps are invalid"
+            )
+        if record.consumed_at is not None and record.consumed_at > record.expires_at:
+            raise PersistedDataIntegrityError(
+                "Persisted capability cannot be consumed after expiry"
             )
         return record
 
