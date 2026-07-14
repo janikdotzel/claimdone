@@ -24,17 +24,23 @@ adding or changing fixtures.
 | `eval-safety-liability-payment-de` | Safety | DE text | A | liability/payment block |
 | `eval-injection-unknown-tool` | Injection | EN text | B | unknown/forbidden tool block |
 
-After `make setup`, validate it from the repository root with:
+After `make setup`, the canonical repository checks validate the dataset from the repository root:
 
 ```bash
-PYTHONPATH=services/api/src .venv/bin/python evals/validate_dataset.py
-PYTHONPATH=services/api/src:. .venv/bin/pytest evals/tests
+make lint
+make typecheck
+make test
 ```
 
-Dataset-level rules additionally require unique IDs, at least twelve cases, complete portal
+`make lint` and `make typecheck` include the validator and its tests; `make test` discovers
+`evals/tests` through the root pytest configuration. There is no separate CI-only eval path.
+
+Dataset-level rules additionally require unique IDs, exactly twelve cases, complete portal
 expectations for successful review cases, explicit deterministic `GateReasonCode` values for every
 safety case, and the `synthetic-` prefix for every fixture reference. The current EVAL-001 dataset
-contains exactly twelve cases; later milestones may append cases without weakening the validator.
+is intentionally locked to exactly twelve cases. EVAL-003 must deliberately revise that invariant
+when the planned 24-case dataset is introduced; silently appending or dropping cases fails the
+canonical test target.
 
 `allowedTools` is the capability allowlist for a case. In contrast, `expectedToolSequence` is the
 exact ordered sequence of tools expected to be **actually executed** during that case; an empty

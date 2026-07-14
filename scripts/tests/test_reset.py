@@ -30,9 +30,13 @@ def test_reset_removes_only_generated_state(tmp_path: Path) -> None:
         _write(project, ".pytest_cache/cache"),
         _write(project, ".mypy_cache/cache"),
         _write(project, ".ruff_cache/cache"),
+        _write(project, ".local/claimdone/cases.db"),
+        _write(project, ".local/claimdone/media/case-demo/source.bin"),
         _write(project, ".local/state/case.sqlite3"),
         _write(project, ".local/tmp/upload.bin"),
         _write(project, "services/api/src/example/__pycache__/module.pyc"),
+        _write(project, "evals/__pycache__/validate_dataset.pyc"),
+        _write(project, "evals/tests/__pycache__/test_dataset.pyc"),
     )
     preserved = {
         _write(project, ".env", "local-secret"): "local-secret",

@@ -2,7 +2,7 @@ import pytest
 
 from claimdone_api.contracts.enums import AllowedTool
 from evals.validate_dataset import (
-    MINIMUM_CASE_COUNT,
+    EXPECTED_CASE_COUNT,
     REQUIRED_CATEGORIES,
     DatasetValidationError,
     load_dataset,
@@ -13,7 +13,7 @@ from evals.validate_dataset import (
 def test_dataset_loads_without_live_services() -> None:
     cases = load_dataset()
 
-    assert len(cases) >= MINIMUM_CASE_COUNT
+    assert len(cases) == EXPECTED_CASE_COUNT
     assert len({case.eval_id for case in cases}) == len(cases)
     assert {tag for case in cases for tag in case.tags} >= REQUIRED_CATEGORIES
 
@@ -90,3 +90,14 @@ def test_dataset_rejects_duplicate_eval_ids() -> None:
 
     with pytest.raises(DatasetValidationError, match="unique"):
         validate_dataset((*cases[:-1], duplicate))
+
+
+def test_dataset_rejects_a_case_count_other_than_twelve() -> None:
+    cases = load_dataset()
+
+    with pytest.raises(DatasetValidationError, match="exactly 12"):
+        validate_dataset(cases[:-1])
+
+    extra = cases[-1].model_copy(update={"eval_id": "eval-unplanned-thirteenth-case"})
+    with pytest.raises(DatasetValidationError, match="exactly 12"):
+        validate_dataset((*cases, extra))
