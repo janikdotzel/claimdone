@@ -16,6 +16,7 @@ import claimdone_api.media.validation as media_validation
 from claimdone_api.contracts import GateReasonCode
 from claimdone_api.media import (
     MAX_IMAGE_BYTES,
+    MAX_TEXT_BYTES,
     AudioUpload,
     AuditField,
     CaseHandle,
@@ -260,6 +261,19 @@ def test_empty_or_non_pcm_audio_is_rejected(tmp_path: Path) -> None:
         )
         assert result.decision.reason_codes == (GateReasonCode.G0_INPUT_MODE_INVALID,)
         assert result.session is None
+
+
+def test_text_statement_has_a_deterministic_utf8_byte_limit(tmp_path: Path) -> None:
+    request = replace(valid_request(), text="ü" * (MAX_TEXT_BYTES // 2 + 1))
+
+    result = start_intake(
+        CaseMediaStore(tmp_path / "media"),
+        request,
+        decided_at=DECIDED_AT,
+    )
+
+    assert result.session is None
+    assert result.decision.reason_codes == (GateReasonCode.G0_INPUT_MODE_INVALID,)
 
 
 def test_exif_summary_hides_sensitive_values_and_no_model_exists_before_g1(

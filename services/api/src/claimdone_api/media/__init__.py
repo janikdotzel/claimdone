@@ -1,6 +1,7 @@
 """Safe local intake and privacy-gate surface."""
 
 from .pipeline import MediaPreparationError, prepare_g1, start_intake, store_transcript
+from .resources import PersistentCaseMediaCleaner
 from .storage import CaseMediaStore, MediaStorageError, UnsafeStoragePath
 from .types import (
     AudioUpload,
@@ -23,11 +24,18 @@ from .types import (
     StoredAssetRef,
     StoredImage,
 )
-from .validation import MAX_AUDIO_SECONDS, MAX_IMAGE_BYTES, PCM_WAV_MEDIA_TYPE, validate_g0
+from .validation import (
+    MAX_AUDIO_SECONDS,
+    MAX_IMAGE_BYTES,
+    MAX_TEXT_BYTES,
+    PCM_WAV_MEDIA_TYPE,
+    validate_g0,
+)
 
 __all__ = [
     "MAX_AUDIO_SECONDS",
     "MAX_IMAGE_BYTES",
+    "MAX_TEXT_BYTES",
     "PCM_WAV_MEDIA_TYPE",
     "AudioUpload",
     "AuditField",
@@ -45,6 +53,7 @@ __all__ = [
     "MediaPreparationError",
     "MediaStorageError",
     "ModelAsset",
+    "PersistentCaseMediaCleaner",
     "PreparedMedia",
     "PrivacyResult",
     "PrivacyReview",

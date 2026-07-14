@@ -28,6 +28,7 @@ from .types import (
 )
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_TEXT_BYTES = 16 * 1024
 MAX_AUDIO_SECONDS = Fraction(60, 1)
 PCM_WAV_MEDIA_TYPE = "audio/wav"
 
@@ -78,6 +79,11 @@ def validate_g0(
     text_is_valid = request.text is None or type(request.text) is str
     if type(request.text) is str:
         normalized_text = request.text.strip() or None
+        if (
+            normalized_text is not None
+            and len(normalized_text.encode("utf-8")) > MAX_TEXT_BYTES
+        ):
+            reasons.add(GateReasonCode.G0_INPUT_MODE_INVALID)
     audio_is_present = request.audio is not None
     if not text_is_valid or (normalized_text is None) is (not audio_is_present):
         reasons.add(GateReasonCode.G0_INPUT_MODE_INVALID)
