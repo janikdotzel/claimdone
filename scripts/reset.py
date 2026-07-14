@@ -18,6 +18,7 @@ EXACT_GENERATED_PATHS = (
     Path("apps/web/next-env.d.ts"),
     Path("apps/web/tsconfig.tsbuildinfo"),
     Path("coverage"),
+    Path("evals/generated"),
 )
 
 CACHE_SEARCH_ROOTS = (

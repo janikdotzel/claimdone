@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: check-runtime setup dev test lint typecheck reset
+.PHONY: check-runtime setup dev test lint typecheck eval-deterministic reset
 
 check-runtime:
 	@bash scripts/check_runtime.sh
@@ -19,6 +19,9 @@ lint:
 
 typecheck:
 	@bash scripts/verify.sh typecheck
+
+eval-deterministic:
+	@bash scripts/eval_deterministic.sh
 
 reset:
 	@bash scripts/reset.sh

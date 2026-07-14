@@ -323,7 +323,8 @@
     },
     "expectation": {
       "allowedFacts": [
-        {"field": "collision_type", "status": "user_stated", "value": "rear_end", "minimumConfidence": null}
+        {"field": "collision_type", "status": "user_stated", "value": "rear_end", "minimumConfidence": null},
+        {"field": "collision_type", "status": "observed", "value": "side_contact", "minimumConfidence": 0.8}
       ],
       "forbiddenFactFields": ["injury_status", "immediate_danger"],
       "expectedMissingFields": [],

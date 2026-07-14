@@ -37,6 +37,7 @@ def test_reset_removes_only_generated_state(tmp_path: Path) -> None:
         _write(project, "services/api/src/example/__pycache__/module.pyc"),
         _write(project, "evals/__pycache__/validate_dataset.pyc"),
         _write(project, "evals/tests/__pycache__/test_dataset.pyc"),
+        _write(project, "evals/generated/deterministic-report.json"),
     )
     preserved = {
         _write(project, ".env", "local-secret"): "local-secret",

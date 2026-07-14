@@ -13,11 +13,14 @@ from claimdone_api.contracts import EvalCase
 from claimdone_api.contracts.enums import (
     AllowedTool,
     CaseState,
+    EvidenceField,
+    FactStatus,
     GateId,
     GateReasonCode,
     RequiredClaimField,
     VerificationState,
 )
+from evals.observations import EVAL_002_GATE_IDS
 
 DATASET_PATH = Path(__file__).with_name("dataset.json")
 EXPECTED_CASE_COUNT = 12
@@ -87,9 +90,59 @@ def _validate_case(case: EvalCase) -> None:
     if len(set(case.input.fixture_ids)) != len(case.input.fixture_ids):
         raise DatasetValidationError(f"{case.eval_id}: fixture IDs must be unique")
 
+    expected_gates = case.expectation.expected_gate_decisions
+    expected_gate_ids = tuple(decision.gate_id for decision in expected_gates)
+    if len(set(expected_gate_ids)) != len(expected_gate_ids):
+        raise DatasetValidationError(f"{case.eval_id}: expected gate IDs must be unique")
+    gate_order = {gate_id: index for index, gate_id in enumerate(GateId)}
+    positions = tuple(gate_order[gate_id] for gate_id in expected_gate_ids)
+    if positions != tuple(sorted(positions)):
+        raise DatasetValidationError(
+            f"{case.eval_id}: expected gate history must be in strictly increasing order"
+        )
+    first_failure = next(
+        (index for index, decision in enumerate(expected_gates) if not decision.passed),
+        None,
+    )
+    if first_failure is not None and first_failure != len(expected_gates) - 1:
+        raise DatasetValidationError(
+            f"{case.eval_id}: expected gate history must stop after its first failure"
+        )
+    if any(gate_id not in EVAL_002_GATE_IDS for gate_id in expected_gate_ids):
+        raise DatasetValidationError(
+            f"{case.eval_id}: expected gate is not owned by an EVAL-002 grader"
+        )
+
     allowed_fields = [fact.field for fact in case.expectation.allowed_facts]
-    if len(set(allowed_fields)) != len(allowed_fields):
-        raise DatasetValidationError(f"{case.eval_id}: allowed fact fields must be unique")
+    duplicate_fields = {
+        field for field in set(allowed_fields) if allowed_fields.count(field) > 1
+    }
+    derived_conflict_fields: set[EvidenceField] = set()
+    for field in duplicate_fields:
+        facts = tuple(fact for fact in case.expectation.allowed_facts if fact.field is field)
+        strict_values = {(type(fact.value), fact.value) for fact in facts}
+        if (
+            len(facts) != 2
+            or any(
+                fact.status not in {FactStatus.OBSERVED, FactStatus.USER_STATED}
+                for fact in facts
+            )
+            or len(strict_values) != len(facts)
+        ):
+            raise DatasetValidationError(
+                f"{case.eval_id}: duplicate allowed facts must be exactly two distinct "
+                "supported conflicts"
+            )
+        derived_conflict_fields.add(field)
+    expects_g4_conflict = any(
+        decision.gate_id is GateId.G4_PROVENANCE
+        and GateReasonCode.G4_CONFLICTING_SOURCES in decision.reason_codes
+        for decision in case.expectation.expected_gate_decisions
+    )
+    if bool(derived_conflict_fields) is not expects_g4_conflict:
+        raise DatasetValidationError(
+            f"{case.eval_id}: allowed fact conflicts must match G4_CONFLICTING_SOURCES"
+        )
     overlap = set(allowed_fields) & set(case.expectation.forbidden_fact_fields)
     if overlap:
         raise DatasetValidationError(

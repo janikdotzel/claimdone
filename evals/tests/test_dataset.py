@@ -1,7 +1,7 @@
 import pytest
 
 from claimdone_api.contracts import EvalCase
-from claimdone_api.contracts.enums import AllowedTool, GateReasonCode
+from claimdone_api.contracts.enums import AllowedTool, FactStatus, GateId, GateReasonCode
 from evals.validate_dataset import (
     EXPECTED_CASE_COUNT,
     PRE_TOOL_SAFETY_GATES,
@@ -252,3 +252,115 @@ def test_exhausted_budget_cannot_be_bypassed_by_omitting_limit_reason() -> None:
     assert GateReasonCode.G5_CLARIFICATION_LIMIT not in gate.reason_codes
     with pytest.raises(DatasetValidationError, match="exhausted clarification budget"):
         validate_dataset((*cases[:case_index], mutated, *cases[case_index + 1 :]))
+
+
+def test_conflict_case_uses_two_distinct_supported_allowed_facts() -> None:
+    case = next(
+        case
+        for case in load_dataset()
+        if case.eval_id == "eval-uncertain-conflicting-impact"
+    )
+    facts = case.expectation.allowed_facts
+
+    assert len(facts) == 2
+    assert facts[0].field is facts[1].field
+    assert (type(facts[0].value), facts[0].value) != (
+        type(facts[1].value),
+        facts[1].value,
+    )
+    assert {fact.status for fact in facts} == {
+        FactStatus.USER_STATED,
+        FactStatus.OBSERVED,
+    }
+
+
+@pytest.mark.parametrize("mutation", ["same_value", "unsupported", "missing", "third"])
+def test_dataset_rejects_malformed_or_unpaired_fact_conflicts(mutation: str) -> None:
+    cases = load_dataset()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if case.eval_id == "eval-uncertain-conflicting-impact"
+    )
+    case = cases[case_index]
+    first, second = case.expectation.allowed_facts
+    allowed_facts = case.expectation.allowed_facts
+    if mutation == "same_value":
+        allowed_facts = (first, second.model_copy(update={"value": first.value}))
+    elif mutation == "unsupported":
+        allowed_facts = (first, second.model_copy(update={"status": FactStatus.UNKNOWN}))
+    elif mutation == "third":
+        allowed_facts = (
+            first,
+            second,
+            first.model_copy(update={"value": "front_contact"}),
+        )
+    else:
+        allowed_facts = (first,)
+    expectation = case.expectation.model_copy(update={"allowed_facts": allowed_facts})
+    mutated = case.model_copy(update={"expectation": expectation})
+
+    with pytest.raises(
+        DatasetValidationError,
+        match="distinct supported conflicts|must match G4_CONFLICTING_SOURCES",
+    ):
+        validate_dataset((*cases[:case_index], mutated, *cases[case_index + 1 :]))
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "reverse", "continue_with_g11"])
+def test_dataset_rejects_noncanonical_expected_gate_history(mutation: str) -> None:
+    cases = load_dataset()
+    if mutation == "continue_with_g11":
+        case_index = next(
+            index
+            for index, case in enumerate(cases)
+            if case.eval_id == "eval-missing-date-de"
+        )
+    else:
+        case_index = next(
+            index for index, case in enumerate(cases) if case.eval_id == "eval-happy-de-a"
+        )
+    case = cases[case_index]
+    gates = case.expectation.expected_gate_decisions
+    if mutation == "duplicate":
+        changed_gates = (gates[0], gates[0], *gates[1:])
+        message = "expected gate IDs must be unique"
+    elif mutation == "reverse":
+        changed_gates = tuple(reversed(gates))
+        message = "strictly increasing order"
+    else:
+        g11 = gates[-1].model_copy(
+            update={
+                "gate_id": GateId.G11_RELEASE,
+                "passed": True,
+                "reason_codes": (),
+            }
+        )
+        changed_gates = (*gates, g11)
+        message = "stop after its first failure"
+    expectation = case.expectation.model_copy(
+        update={"expected_gate_decisions": changed_gates}
+    )
+    changed = case.model_copy(update={"expectation": expectation})
+
+    with pytest.raises(DatasetValidationError, match=message):
+        validate_dataset((*cases[:case_index], changed, *cases[case_index + 1 :]))
+
+
+@pytest.mark.parametrize(
+    "unhandled_gate",
+    [GateId.G0_INTAKE, GateId.G1_PRIVACY, GateId.G11_RELEASE],
+)
+def test_dataset_rejects_expected_gate_without_eval_002_grader(
+    unhandled_gate: GateId,
+) -> None:
+    cases = load_dataset()
+    case = cases[0]
+    gate = case.expectation.expected_gate_decisions[0].model_copy(
+        update={"gate_id": unhandled_gate}
+    )
+    expectation = case.expectation.model_copy(update={"expected_gate_decisions": (gate,)})
+    changed = case.model_copy(update={"expectation": expectation})
+
+    with pytest.raises(DatasetValidationError, match="not owned by an EVAL-002 grader"):
+        validate_dataset((changed, *cases[1:]))

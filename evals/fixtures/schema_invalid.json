@@ -1,0 +1,6 @@
+{
+  "contractVersion": "3.0.0",
+  "caseId": "synthetic-invalid-schema",
+  "state": "review",
+  "unexpectedField": "must be rejected"
+}
