@@ -3,11 +3,12 @@
 import os
 import stat
 import wave
+import zlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from PIL import Image
@@ -16,6 +17,9 @@ import claimdone_api.media.validation as media_validation
 from claimdone_api.contracts import GateReasonCode
 from claimdone_api.media import (
     MAX_IMAGE_BYTES,
+    MAX_IMAGE_HEIGHT,
+    MAX_IMAGE_PIXELS,
+    MAX_IMAGE_WIDTH,
     MAX_TEXT_BYTES,
     AudioUpload,
     AuditField,
@@ -52,6 +56,17 @@ def image_bytes(image_format: str, *, artist: str | None = None) -> bytes:
     output = BytesIO()
     image.save(output, format=image_format, exif=exif)
     return output.getvalue()
+
+
+def png_with_header_dimensions(width: int, height: int) -> bytes:
+    """Change only IHDR dimensions; never allocate the represented pixel buffer."""
+
+    content = bytearray(image_bytes("PNG"))
+    assert content[12:16] == b"IHDR"
+    content[16:20] = width.to_bytes(4, "big")
+    content[20:24] = height.to_bytes(4, "big")
+    content[29:33] = (zlib.crc32(content[12:29]) & 0xFFFFFFFF).to_bytes(4, "big")
+    return bytes(content)
 
 
 def wav_bytes(*, seconds: int, frame_rate: int = 1) -> bytes:
@@ -172,6 +187,46 @@ def test_each_g0_reason_blocks_before_persistence(
     assert result.session is None
     assert not result.decision.passed
     assert reason in result.decision.reason_codes
+    assert case_directories(store) == []
+
+
+@pytest.mark.parametrize(
+    ("width", "height"),
+    (
+        (MAX_IMAGE_WIDTH + 1, 1),
+        (1, MAX_IMAGE_HEIGHT + 1),
+        (5_000, MAX_IMAGE_PIXELS // 5_000 + 1),
+    ),
+)
+def test_header_dimension_and_pixel_bombs_block_before_pillow_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    height: int,
+) -> None:
+    request = valid_request()
+    malicious_size = (width, height)
+    request = replace(
+        request,
+        images=(
+            ImageUpload(png_with_header_dimensions(width, height), "image/png"),
+            *request.images[1:],
+        ),
+    )
+    original_load = Image.Image.load
+
+    def guarded_load(image: Image.Image, *args: Any, **kwargs: Any) -> Any:
+        if image.size == malicious_size:
+            raise AssertionError("oversized image reached Pillow decompression")
+        return original_load(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "load", guarded_load)
+    store = CaseMediaStore(tmp_path / "media")
+
+    result = start_intake(store, request, decided_at=DECIDED_AT)
+
+    assert result.session is None
+    assert result.decision.reason_codes == (GateReasonCode.G0_IMAGE_TOO_LARGE,)
     assert case_directories(store) == []
 
 

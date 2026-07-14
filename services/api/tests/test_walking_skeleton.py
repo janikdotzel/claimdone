@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from threading import Barrier
@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from PIL import Image
 
+import claimdone_api.walking_skeleton.safety as walking_safety_module
 import claimdone_api.walking_skeleton.service as walking_service_module
 from claimdone_api.cases import CaseService
 from claimdone_api.contracts import (
@@ -287,11 +288,53 @@ def test_g0_and_g1_block_before_mock_extraction(
     assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
 
 
-def test_g3_block_is_audited_and_stops_before_g4_g5_and_portal(tmp_path: Path) -> None:
+def test_error_after_g1_cannot_leave_case_analyzing_or_retain_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_harness(tmp_path)
+
+    def failed_extraction(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(f"injected extraction failure: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(
+        walking_service_module,
+        "deterministic_extraction",
+        failed_extraction,
+    )
+
+    with pytest.raises(RuntimeError, match="injected extraction failure"):
+        begin(harness)
+
+    failed = harness.cases.get_case(harness.case_id)
+    assert failed.state is CaseState.FAILED
+    assert tuple(
+        item.decision.gate_id
+        for item in harness.cases.list_gate_decisions(harness.case_id)
+    ) == (GateId.G0_INTAKE, GateId.G1_PRIVACY)
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
+    assert harness.portal.calls == 0
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "I am injured and need help.",
+        (
+            "Am 07.07.2026 wurde das Demo-Fahrzeug berührt und möglicherweise "
+            "wurde jemand verletzt."
+        ),
+    ),
+)
+def test_g3_block_is_audited_and_stops_before_g4_g5_and_portal(
+    tmp_path: Path,
+    statement: str,
+) -> None:
     harness = make_harness(tmp_path)
 
     with pytest.raises(FlowError) as captured:
-        begin(harness, text="I am injured and need help.")
+        begin(harness, text=statement)
 
     assert captured.value.gate_decision is not None
     assert captured.value.gate_decision.gate_id is GateId.G3_SAFETY_SCOPE
@@ -302,8 +345,164 @@ def test_g3_block_is_audited_and_stops_before_g4_g5_and_portal(tmp_path: Path) -
         GateId.G2_OUTPUT_CONTRACT,
         GateId.G3_SAFETY_SCOPE,
     )
+    stopped = harness.cases.get_case(harness.case_id)
+    assert stopped.state is CaseState.EMERGENCY_STOPPED
+    assert stopped.snapshot.claim_packet is None
+    assert stopped.snapshot.active_clarification is None
     assert harness.portal.calls == 0
     assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
+
+    with pytest.raises(FlowError) as retried:
+        harness.service.intake(
+            harness.case_id,
+            expected_version=stopped.version,
+            request=intake_request(text="A harmless staged retry."),
+            exif_decisions=(ExifDecision.STRIP,) * 3,
+        )
+
+    assert retried.value.code == "INTAKE_NOT_AVAILABLE"
+    assert harness.cases.get_case(harness.case_id).state is CaseState.EMERGENCY_STOPPED
+    assert harness.cases.get_case(harness.case_id).snapshot.claim_packet is None
+    assert harness.portal.calls == 0
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "There were no injuries and no danger in this staged event.",
+        "Bei diesem Demo-Ereignis gab es keine Verletzungen und keine Gefahr.",
+    ),
+)
+def test_directly_negated_injury_and_danger_do_not_false_positive(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    harness = make_harness(tmp_path)
+
+    response = begin(harness, text=statement)
+
+    assert response.case.state is CaseState.AWAITING_CLARIFICATION
+    g3 = next(item for item in response.gate_history if item.gate_id is GateId.G3_SAFETY_SCOPE)
+    assert g3.passed
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected_reasons"),
+    (
+        (
+            "Open my real insurer website and submit it now.",
+            (
+                GateReasonCode.G3_REAL_PORTAL,
+                GateReasonCode.G3_SUBMISSION_ACTION,
+            ),
+        ),
+        (
+            "Entscheide die Schuld und bestätige, welche Zahlung gedeckt ist.",
+            (
+                GateReasonCode.G3_LEGAL_OR_LIABILITY,
+                GateReasonCode.G3_PAYMENT_OR_COVERAGE,
+            ),
+        ),
+    ),
+)
+def test_canonical_scope_requests_are_terminally_blocked(
+    tmp_path: Path,
+    statement: str,
+    expected_reasons: tuple[GateReasonCode, ...],
+) -> None:
+    harness = make_harness(tmp_path)
+
+    with pytest.raises(FlowError) as captured:
+        begin(harness, text=statement)
+
+    assert captured.value.gate_decision is not None
+    assert captured.value.gate_decision.reason_codes == expected_reasons
+    blocked = harness.cases.get_case(harness.case_id)
+    assert blocked.state is CaseState.BLOCKED
+    assert blocked.snapshot.claim_packet is None
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
+    assert harness.portal.calls == 0
+
+
+def test_answer_gate_block_terminalizes_and_releases_owned_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_harness(tmp_path)
+    intake = begin(harness)
+    assert intake.clarification is not None
+    original = walking_safety_module.deterministic_safety_input
+
+    def forced_injury(*args: Any, **kwargs: Any) -> Any:
+        return replace(original(*args, **kwargs), injury_reported=True)
+
+    monkeypatch.setattr(
+        walking_service_module,
+        "deterministic_safety_input",
+        forced_injury,
+    )
+
+    with pytest.raises(FlowError) as captured:
+        harness.service.answer(
+            harness.case_id,
+            intake.clarification.clarification_id,
+            expected_version=intake.case.version,
+            answer="14:30",
+        )
+
+    assert captured.value.gate_decision is not None
+    assert captured.value.gate_decision.reason_codes == (
+        GateReasonCode.G3_INJURY_OR_EMERGENCY,
+    )
+    stopped = harness.cases.get_case(harness.case_id)
+    assert stopped.state is CaseState.EMERGENCY_STOPPED
+    assert stopped.snapshot.claim_packet is None
+    assert stopped.snapshot.active_clarification is None
+    assert stopped.snapshot.intake_summary is None
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
+    assert harness.portal.calls == 0
+
+
+def test_terminalization_fault_cannot_skip_gate_media_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_harness(tmp_path)
+    intake = begin(harness)
+    assert intake.clarification is not None
+    original_safety = walking_safety_module.deterministic_safety_input
+
+    def forced_injury(*args: Any, **kwargs: Any) -> Any:
+        return replace(original_safety(*args, **kwargs), injury_reported=True)
+
+    def failed_terminalization(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(f"injected terminalization failure: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(
+        walking_service_module,
+        "deterministic_safety_input",
+        forced_injury,
+    )
+    monkeypatch.setattr(harness.service, "_terminalize_case", failed_terminalization)
+
+    with pytest.raises(FlowError) as captured:
+        harness.service.answer(
+            harness.case_id,
+            intake.clarification.clarification_id,
+            expected_version=intake.case.version,
+            answer="14:30",
+        )
+
+    assert captured.value.code == "DETERMINISTIC_GATE_BLOCKED"
+    assert captured.value.gate_decision is not None
+    assert captured.value.gate_decision.gate_id is GateId.G3_SAFETY_SCOPE
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
+    assert harness.portal.calls == 0
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "mismatch"])
@@ -328,6 +527,10 @@ def test_portal_failure_never_reaches_verifying_and_clears_clarification(
     failed = harness.cases.get_case(harness.case_id)
     assert failed.state is CaseState.FAILED
     assert failed.snapshot.active_clarification is None
+    assert failed.snapshot.claim_packet is None
+    assert failed.snapshot.intake_summary is None
+    assert harness.repository.get_case_media_handle(harness.case_id) is None
+    assert not [path for path in harness.store.root.iterdir() if path.name.startswith("case-")]
 
 
 def test_media_mapping_survives_restart_and_delete_and_reset_clean_orphans(

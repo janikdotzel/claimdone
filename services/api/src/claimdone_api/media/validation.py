@@ -28,9 +28,16 @@ from .types import (
 )
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_WIDTH = 8_192
+MAX_IMAGE_HEIGHT = 8_192
+MAX_IMAGE_PIXELS = 20_000_000
 MAX_TEXT_BYTES = 16 * 1024
 MAX_AUDIO_SECONDS = Fraction(60, 1)
 PCM_WAV_MEDIA_TYPE = "audio/wav"
+
+# Pillow performs its decompression-bomb check while parsing the image header.
+# Keep its process-wide ceiling aligned with our stricter explicit boundary.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
@@ -55,6 +62,10 @@ _SENSITIVE_EXIF_TAGS = {
     "XPTitle",
 }
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class _ImageDimensionsTooLarge(ValueError):
+    """Internal distinction between size limits and invalid image encoding."""
 
 
 def validate_g0(
@@ -145,16 +156,23 @@ def _validate_image(
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(BytesIO(upload.content)) as candidate:
                 pillow_format = candidate.format
+                width, height = candidate.size
+                if not _dimensions_are_allowed(width, height):
+                    raise _ImageDimensionsTooLarge
                 candidate.verify()
             with Image.open(BytesIO(upload.content)) as image:
                 image.load()
                 image_format = _FORMAT_BY_PILLOW.get(image.format or pillow_format or "")
-                if image_format is not detected_format or image.width < 1 or image.height < 1:
+                if image_format is not detected_format or image.size != (width, height):
                     raise ValueError("Decoded image format or dimensions do not match magic bytes")
+                if not _dimensions_are_allowed(image.width, image.height):
+                    raise _ImageDimensionsTooLarge
                 exif_summary = _summarize_exif(image.getexif())
                 width, height = image.size
+    except _ImageDimensionsTooLarge:
+        return None, {GateReasonCode.G0_IMAGE_TOO_LARGE}
     except (Image.DecompressionBombError, Image.DecompressionBombWarning):
-        return None, {GateReasonCode.G0_IMAGE_TYPE_INVALID}
+        return None, {GateReasonCode.G0_IMAGE_TOO_LARGE}
     except (OSError, UnidentifiedImageError, ValueError, SyntaxError):
         return None, {GateReasonCode.G0_IMAGE_TYPE_INVALID}
 
@@ -170,6 +188,14 @@ def _validate_image(
             exif_summary=exif_summary,
         ),
         set(),
+    )
+
+
+def _dimensions_are_allowed(width: int, height: int) -> bool:
+    return (
+        1 <= width <= MAX_IMAGE_WIDTH
+        and 1 <= height <= MAX_IMAGE_HEIGHT
+        and width * height <= MAX_IMAGE_PIXELS
     )
 
 

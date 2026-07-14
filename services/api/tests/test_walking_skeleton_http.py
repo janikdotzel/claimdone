@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import wave
+import zlib
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -18,7 +19,7 @@ from PIL import Image
 from starlette.types import Message, Scope
 
 from claimdone_api.main import ApiSettings, create_app
-from claimdone_api.media import MAX_TEXT_BYTES
+from claimdone_api.media import MAX_IMAGE_WIDTH, MAX_TEXT_BYTES
 from claimdone_api.walking_skeleton.body_limit import RequestBodyLimitMiddleware
 from claimdone_api.walking_skeleton.models import (
     PortalDraftFields,
@@ -68,6 +69,15 @@ def wav_bytes() -> bytes:
         audio.setframerate(8)
         audio.writeframes(b"\x80" * 8)
     return output.getvalue()
+
+
+def png_with_header_dimensions(width: int, height: int) -> bytes:
+    content = bytearray(image_bytes("PNG"))
+    assert content[12:16] == b"IHDR"
+    content[16:20] = width.to_bytes(4, "big")
+    content[20:24] = height.to_bytes(4, "big")
+    content[29:33] = (zlib.crc32(content[12:29]) & 0xFFFFFFFF).to_bytes(4, "big")
+    return bytes(content)
 
 
 def multipart_parts(
@@ -187,6 +197,14 @@ def test_audio_happy_path_uses_owned_transcript_asset_across_restart(
     assert transcript["sha256"] == hashlib.sha256(
         transcript["text"].encode("utf-8")
     ).hexdigest()
+    provenance = cast(
+        list[dict[str, Any]],
+        intake_body["case"]["claimPacket"]["provenance"],
+    )
+    transcript_provenance = next(
+        item for item in provenance if item["evidenceId"] == transcript["evidenceId"]
+    )
+    assert transcript_provenance["userConfirmed"] is False
 
     restarted_client, restarted_portal = client_for(tmp_path)
     clarification = cast(dict[str, Any], intake_body["clarification"])
@@ -201,6 +219,48 @@ def test_audio_happy_path_uses_owned_transcript_asset_across_restart(
     assert answered.status_code == 200, answered.text
     assert answered.json()["case"]["state"] == "verifying"
     assert restarted_portal.calls == 1
+
+
+def test_non_fixture_wav_is_model_uncertain_and_terminally_blocked(
+    tmp_path: Path,
+) -> None:
+    client, portal = client_for(tmp_path)
+    created = create_case(client)
+    output = BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(1)
+        audio.setframerate(16)
+        audio.writeframes(b"\x81" * 16)
+    parts = [part for part in multipart_parts() if part[0] != "statementText"]
+    parts.append(("audio", ("other.wav", output.getvalue(), "audio/wav")))
+
+    response = client.post(
+        f"/api/cases/{created['caseId']}/intake",
+        files=parts,
+    )
+
+    assert response.status_code == 422, response.text
+    error = cast(dict[str, Any], response.json()["error"])
+    assert error["gateDecision"]["gateId"] == "G3"
+    assert error["reasonCodes"] == ["G3_MODEL_UNCERTAIN"]
+    blocked = client.get(f"/api/cases/{created['caseId']}")
+    assert blocked.status_code == 200
+    blocked_case = cast(dict[str, Any], blocked.json())
+    assert blocked_case["state"] == "blocked"
+    assert blocked_case["claimPacket"] is None
+    assert blocked_case["activeClarification"] is None
+    assert portal.calls == 0
+    media_root = tmp_path / "state" / "media"
+    assert not [path for path in media_root.iterdir() if path.name.startswith("case-")]
+
+    retry = client.post(
+        f"/api/cases/{created['caseId']}/intake",
+        files=multipart_parts(expected_version=str(blocked_case["version"])),
+    )
+    assert retry.status_code == 409
+    assert retry.json()["error"]["code"] == "INTAKE_NOT_AVAILABLE"
+    assert portal.calls == 0
 
 
 def test_router_stale_intake_returns_409_before_media_processing(tmp_path: Path) -> None:
@@ -322,6 +382,35 @@ def test_text_limit_is_a_field_near_deterministic_g0_error(tmp_path: Path) -> No
     assert error["gateDecision"]["gateId"] == "G0"
     assert error["reasonCodes"] == ["G0_INPUT_MODE_INVALID"]
     assert error["fieldErrors"][0]["field"] == "statement"
+
+
+def test_safe_image_dimension_limit_has_a_field_near_size_error(tmp_path: Path) -> None:
+    client, _ = client_for(tmp_path)
+    created = create_case(client)
+    parts = multipart_parts()
+    image_index = next(index for index, part in enumerate(parts) if part[0] == "images")
+    parts[image_index] = (
+        "images",
+        (
+            "wide.png",
+            png_with_header_dimensions(MAX_IMAGE_WIDTH + 1, 1),
+            "image/png",
+        ),
+    )
+
+    response = client.post(
+        f"/api/cases/{created['caseId']}/intake",
+        files=parts,
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["reasonCodes"] == ["G0_IMAGE_TOO_LARGE"]
+    assert error["fieldErrors"][0] == {
+        "field": "images",
+        "message": "Each image must be at most 10 MB and within safe dimensions.",
+        "reasonCode": "G0_IMAGE_TOO_LARGE",
+    }
 
 
 def test_content_length_and_streamed_body_limits_include_cors_on_413(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -15,11 +15,13 @@ from pydantic import ValidationError
 from claimdone_api.cases import CaseService, CaseView
 from claimdone_api.cases.errors import CaseNotFoundError, CaseVersionConflictError
 from claimdone_api.contracts import (
+    TERMINAL_CASE_STATES,
     ActorType,
     CaseState,
     ClaimPacket,
     EvidenceKind,
     GateDecision,
+    GateReasonCode,
     PortalState,
     RequiredClaimField,
     VerificationState,
@@ -28,6 +30,7 @@ from claimdone_api.gates import (
     ClarificationQuestion,
     ModelExtraction,
     ModelOutputEnvelope,
+    ModelSafetySignal,
     evaluate_g2,
     evaluate_g3,
     evaluate_g4,
@@ -68,6 +71,15 @@ from .safety import deterministic_safety_input
 
 _TIME_ANSWER = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _QUESTION = "What time did the staged incident occur? Use HH:MM."
+_SYNTHETIC_AUDIO_FIXTURE_SHA256 = (
+    "c0ca2899a565ec085e64438fc58496c0debacdcc9e8602f3af275b7b56108820"
+)
+_SYNTHETIC_AUDIO_TRANSCRIPT = (
+    "A staged second vehicle contacted the rear of the demo vehicle in Berlin."
+)
+_UNSUPPORTED_AUDIO_TRANSCRIPT = (
+    "No transcript is available for this non-fixture synthetic audio."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +205,24 @@ class WalkingSkeletonService:
             )
             raise self._gate_error(privacy.decision, failed.version)
 
+        record = current
         try:
+            record = self._record_decisions(
+                record,
+                (start.decision, privacy.decision),
+            )
+            record = self._cases.transition_case(
+                case_id,
+                expected_version=record.version,
+                target=CaseState.DISCLOSED,
+                actor=ActorType.SYSTEM,
+            )
+            record = self._cases.transition_case(
+                case_id,
+                expected_version=record.version,
+                target=CaseState.ANALYZING,
+                actor=ActorType.SYSTEM,
+            )
             statement_ref, statement = self._statement_for_initial(
                 session,
                 privacy.prepared,
@@ -206,93 +235,87 @@ class WalkingSkeletonService:
             try:
                 decisions = self._run_g2_to_g5(
                     extraction,
-                    statement.text,
+                    statement,
                     prefix=(start.decision, privacy.decision),
                     expect_clarification=True,
                 )
             except GateRunBlocked as blocked:
-                failed = self._record_decisions(current, blocked.decisions)
-                raise self._gate_error(blocked.decision, failed.version) from blocked
-        except Exception:
-            self._media_store.delete_case(session.handle)
-            raise
-
-        try:
-            record = self._record_decisions(current, decisions)
-        except Exception:
-            self._media_store.delete_case(session.handle)
-            raise
-        try:
+                record = self._record_decisions(record, blocked.decisions[2:])
+                record, finalization_error = self._terminalize_and_release(
+                    record,
+                    self._terminal_state_for(blocked.decision),
+                    session.handle,
+                )
+                raise self._gate_error(blocked.decision, record.version) from (
+                    finalization_error or blocked
+                )
+            record = self._record_decisions(record, decisions[2:])
             self._repository.bind_case_media_handle(
                 case_id=case_id,
                 storage_name=session.handle.storage_name,
                 created_at=self._aware_now(),
             )
-        except Exception:
-            self._media_store.delete_case(session.handle)
+            summary = persisted_intake(
+                session,
+                statement=statement_ref,
+                exif_decisions=exif_decisions,
+            )
+            record = self._cases.save_intake_summary(
+                case_id,
+                expected_version=record.version,
+                summary=summary.model_dump(mode="json", by_alias=True),
+            )
+            packet = build_packet(
+                case_id=case_id,
+                state=CaseState.AWAITING_CLARIFICATION,
+                portal_state=PortalState.DRAFT,
+                extraction=extraction,
+                gate_decisions=decisions,
+            )
+            record = self._cases.transition_case(
+                case_id,
+                expected_version=record.version,
+                target=CaseState.AWAITING_CLARIFICATION,
+                actor=ActorType.SYSTEM,
+                claim_packet=packet,
+            )
+            clarification_id = self._clarification_id_factory()
+            expected_answer_version = record.version + 1
+            clarification = ClarificationView.model_validate(
+                {
+                    "clarificationId": clarification_id,
+                    "field": RequiredClaimField.INCIDENT_TIME.value,
+                    "question": _QUESTION,
+                    "expectedVersion": expected_answer_version,
+                }
+            )
+            record = self._cases.save_active_clarification(
+                case_id,
+                expected_version=record.version,
+                clarification=clarification.model_dump(mode="json", by_alias=True),
+            )
+            return FlowResponse.model_validate(
+                {
+                    "requestId": self._request_id_factory(),
+                    "case": CaseView.from_record(record),
+                    "draftRevision": record.version,
+                    "gateHistory": decisions,
+                    "phase": FlowPhase.AWAITING_CLARIFICATION,
+                    "clarification": clarification,
+                    "portal": None,
+                }
+            )
+        except FlowError:
             raise
-        record = self._cases.transition_case(
-            case_id,
-            expected_version=record.version,
-            target=CaseState.DISCLOSED,
-            actor=ActorType.SYSTEM,
-        )
-        record = self._cases.transition_case(
-            case_id,
-            expected_version=record.version,
-            target=CaseState.ANALYZING,
-            actor=ActorType.SYSTEM,
-        )
-        summary = persisted_intake(
-            session,
-            statement=statement_ref,
-            exif_decisions=exif_decisions,
-        )
-        record = self._cases.save_intake_summary(
-            case_id,
-            expected_version=record.version,
-            summary=summary.model_dump(mode="json", by_alias=True),
-        )
-        packet = build_packet(
-            case_id=case_id,
-            state=CaseState.AWAITING_CLARIFICATION,
-            portal_state=PortalState.DRAFT,
-            extraction=extraction,
-            gate_decisions=decisions,
-        )
-        record = self._cases.transition_case(
-            case_id,
-            expected_version=record.version,
-            target=CaseState.AWAITING_CLARIFICATION,
-            actor=ActorType.SYSTEM,
-            claim_packet=packet,
-        )
-        clarification_id = self._clarification_id_factory()
-        expected_answer_version = record.version + 1
-        clarification = ClarificationView.model_validate(
-            {
-                "clarificationId": clarification_id,
-                "field": RequiredClaimField.INCIDENT_TIME.value,
-                "question": _QUESTION,
-                "expectedVersion": expected_answer_version,
-            }
-        )
-        record = self._cases.save_active_clarification(
-            case_id,
-            expected_version=record.version,
-            clarification=clarification.model_dump(mode="json", by_alias=True),
-        )
-        return FlowResponse.model_validate(
-            {
-                "requestId": self._request_id_factory(),
-                "case": CaseView.from_record(record),
-                "draftRevision": record.version,
-                "gateHistory": decisions,
-                "phase": FlowPhase.AWAITING_CLARIFICATION,
-                "clarification": clarification,
-                "portal": None,
-            }
-        )
+        except Exception as error:
+            _record, finalization_error = self._terminalize_and_release(
+                record,
+                CaseState.FAILED,
+                session.handle,
+            )
+            if finalization_error is not None:
+                error.add_note("Terminal state or owned-media cleanup also failed.")
+            raise
 
     def answer(
         self,
@@ -398,7 +421,12 @@ class WalkingSkeletonService:
             ) from error
         if not g0.passed:
             failed = self._record_decisions(current, (g0,))
-            raise self._gate_error(g0, failed.version)
+            failed, finalization_error = self._terminalize_and_release(
+                failed,
+                self._terminal_state_for(g0),
+                handle,
+            )
+            raise self._gate_error(g0, failed.version) from finalization_error
         try:
             privacy = prepare_g1(
                 self._media_store,
@@ -425,7 +453,12 @@ class WalkingSkeletonService:
             ) from error
         if not privacy.decision.passed or privacy.prepared is None:
             failed = self._record_decisions(current, (g0, privacy.decision))
-            raise self._gate_error(privacy.decision, failed.version)
+            failed, finalization_error = self._terminalize_and_release(
+                failed,
+                self._terminal_state_for(privacy.decision),
+                handle,
+            )
+            raise self._gate_error(privacy.decision, failed.version) from finalization_error
 
         try:
             clarification_ref = self._media_store.write_bytes(
@@ -452,13 +485,20 @@ class WalkingSkeletonService:
         try:
             decisions = self._run_g2_to_g5(
                 extraction,
-                statement.text,
+                statement,
                 prefix=(g0, privacy.decision),
                 expect_clarification=False,
             )
         except GateRunBlocked as blocked:
             failed = self._record_decisions(current, blocked.decisions)
-            raise self._gate_error(blocked.decision, failed.version) from blocked
+            failed, finalization_error = self._terminalize_and_release(
+                failed,
+                self._terminal_state_for(blocked.decision),
+                handle,
+            )
+            raise self._gate_error(blocked.decision, failed.version) from (
+                finalization_error or blocked
+            )
         record = self._record_decisions(current, decisions)
         record = self._cases.save_active_clarification(
             case_id,
@@ -493,23 +533,17 @@ class WalkingSkeletonService:
                     "Rendered portal fields differ from the authoritative draft"
                 )
         except PortalUnavailableError as error:
-            failed_packet = self._packet_state(
-                filling_packet,
+            failed, finalization_error = self._terminalize_and_release(
+                record,
                 CaseState.FAILED,
-                PortalState.DRAFT,
-            )
-            failed = self._cases.transition_case(
-                case_id,
-                expected_version=record.version,
-                target=CaseState.FAILED,
-                claim_packet=failed_packet,
+                handle,
             )
             raise FlowError(
                 "PORTAL_UNAVAILABLE",
                 "The sandbox portal could not reach review.",
                 502,
                 current_version=failed.version,
-            ) from error
+            ) from (finalization_error or error)
 
         verifying_packet = self._packet_state(
             filling_packet,
@@ -544,7 +578,7 @@ class WalkingSkeletonService:
     def _run_g2_to_g5(
         self,
         extraction: ModelExtraction,
-        statement: str,
+        statement: StatementSource,
         *,
         prefix: tuple[GateDecision, GateDecision],
         expect_clarification: bool,
@@ -562,8 +596,13 @@ class WalkingSkeletonService:
             raise GateRunBlocked((*prefix, g2.decision))
         safety = evaluate_g3(
             deterministic_safety_input(
-                statement,
+                statement.text,
                 tuple(reference.provenance_id for reference in extraction.provenance),
+                model_signal=(
+                    ModelSafetySignal.UNCERTAIN
+                    if statement.safety_uncertain
+                    else ModelSafetySignal.SAFE
+                ),
             )
         )
         if not safety.decision.passed:
@@ -643,16 +682,25 @@ class WalkingSkeletonService:
                 sha256=session.text.sha256,
                 text=prepared.text,
                 kind=EvidenceKind.USER_STATEMENT,
+                user_confirmed=True,
+                safety_uncertain=False,
             )
-        if prepared.audio is None:
+        if prepared.audio is None or session.audio is None:
             raise RuntimeError("Validated intake did not preserve one statement mode")
-        transcript = "A staged second vehicle contacted the rear of the demo vehicle in Berlin."
+        fixture_audio = session.audio.sha256 == _SYNTHETIC_AUDIO_FIXTURE_SHA256
+        transcript = (
+            _SYNTHETIC_AUDIO_TRANSCRIPT
+            if fixture_audio
+            else _UNSUPPORTED_AUDIO_TRANSCRIPT
+        )
         transcript_ref = store_transcript(self._media_store, session, transcript)
         return transcript_ref, StatementSource(
             local_ref=transcript_ref.file_id,
             sha256=transcript_ref.sha256,
             text=transcript,
             kind=EvidenceKind.TRANSCRIPT,
+            user_confirmed=False,
+            safety_uncertain=not fixture_audio,
         )
 
     def _statement_from_persisted(
@@ -665,14 +713,20 @@ class WalkingSkeletonService:
             handle,
             statement_ref,
         ).decode("utf-8")
+        is_user_statement = persisted.text is not None
         return StatementSource(
             local_ref=statement_ref.file_id,
             sha256=statement_ref.sha256,
             text=text,
             kind=(
                 EvidenceKind.USER_STATEMENT
-                if persisted.text is not None
+                if is_user_statement
                 else EvidenceKind.TRANSCRIPT
+            ),
+            user_confirmed=is_user_statement,
+            safety_uncertain=(
+                persisted.audio is not None
+                and persisted.audio.sha256 != _SYNTHETIC_AUDIO_FIXTURE_SHA256
             ),
         )
 
@@ -740,6 +794,80 @@ class WalkingSkeletonService:
         body["state"] = state.value
         body["portalState"] = portal.value
         return ClaimPacket.model_validate(body)
+
+    def _terminalize_case(
+        self,
+        record: CaseRecord,
+        target: CaseState,
+    ) -> CaseRecord:
+        if record.state in TERMINAL_CASE_STATES:
+            return record
+        current = record
+        if current.snapshot.active_clarification is not None:
+            current = self._cases.save_active_clarification(
+                current.case_id,
+                expected_version=current.version,
+                clarification=None,
+            )
+        if current.snapshot.claim_packet is not None:
+            current = self._cases.save_claim_packet(
+                current.case_id,
+                expected_version=current.version,
+                claim_packet=None,
+            )
+        if current.snapshot.intake_summary is not None:
+            current = self._cases.save_intake_summary(
+                current.case_id,
+                expected_version=current.version,
+                summary=None,
+            )
+        return self._cases.transition_case(
+            current.case_id,
+            expected_version=current.version,
+            target=target,
+            actor=ActorType.SYSTEM,
+        )
+
+    def _release_media_handle(self, case_id: str, handle: CaseHandle) -> None:
+        delete_error: Exception | None = None
+        try:
+            self._media_store.delete_case(handle)
+        except Exception as error:
+            delete_error = error
+        try:
+            self._repository.unbind_case_media_handle(case_id, handle.storage_name)
+        except Exception:
+            if delete_error is None:
+                raise
+        if delete_error is not None:
+            raise delete_error
+
+    def _terminalize_and_release(
+        self,
+        record: CaseRecord,
+        target: CaseState,
+        handle: CaseHandle,
+    ) -> tuple[CaseRecord, Exception | None]:
+        finalization_error: Exception | None = None
+        current = record
+        try:
+            current = self._terminalize_case(record, target)
+        except Exception as error:
+            finalization_error = error
+        try:
+            self._release_media_handle(record.case_id, handle)
+        except Exception as error:
+            if finalization_error is None:
+                finalization_error = error
+        with suppress(Exception):
+            current = self._cases.get_case(record.case_id)
+        return current, finalization_error
+
+    @staticmethod
+    def _terminal_state_for(decision: GateDecision) -> CaseState:
+        if GateReasonCode.G3_INJURY_OR_EMERGENCY in decision.reason_codes:
+            return CaseState.EMERGENCY_STOPPED
+        return CaseState.BLOCKED
 
     @staticmethod
     def _gate_error(decision: GateDecision, version: int | None) -> FlowError:

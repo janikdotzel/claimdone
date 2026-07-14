@@ -27,6 +27,9 @@ from .types import (
 from .validation import (
     MAX_AUDIO_SECONDS,
     MAX_IMAGE_BYTES,
+    MAX_IMAGE_HEIGHT,
+    MAX_IMAGE_PIXELS,
+    MAX_IMAGE_WIDTH,
     MAX_TEXT_BYTES,
     PCM_WAV_MEDIA_TYPE,
     validate_g0,
@@ -35,6 +38,9 @@ from .validation import (
 __all__ = [
     "MAX_AUDIO_SECONDS",
     "MAX_IMAGE_BYTES",
+    "MAX_IMAGE_HEIGHT",
+    "MAX_IMAGE_PIXELS",
+    "MAX_IMAGE_WIDTH",
     "MAX_TEXT_BYTES",
     "PCM_WAV_MEDIA_TYPE",
     "AudioUpload",

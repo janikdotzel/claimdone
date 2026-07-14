@@ -309,7 +309,9 @@ def _gate_reason_message(reason: str) -> str:
     messages = {
         "G0_IMAGE_COUNT_INVALID": "Exactly three images are required.",
         "G0_IMAGE_TYPE_INVALID": "Every image must be a valid JPG or PNG.",
-        "G0_IMAGE_TOO_LARGE": "Each image must be at most 10 MB.",
+        "G0_IMAGE_TOO_LARGE": (
+            "Each image must be at most 10 MB and within safe dimensions."
+        ),
         "G0_INPUT_MODE_INVALID": (
             "Provide exactly one bounded text statement or one PCM WAV statement."
         ),

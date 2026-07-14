@@ -33,6 +33,8 @@ class StatementSource:
     sha256: str
     text: str
     kind: EvidenceKind
+    user_confirmed: bool
+    safety_uncertain: bool
 
 
 def deterministic_extraction(
@@ -120,7 +122,7 @@ def deterministic_extraction(
             "provenanceId": "prov-statement",
             "evidenceId": "evidence-statement",
             "locator": "staged statement",
-            "userConfirmed": True,
+            "userConfirmed": statement.user_confirmed,
         }
     )
     fixture_provenance = ProvenanceRef.model_validate(
