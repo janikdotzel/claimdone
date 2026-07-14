@@ -122,6 +122,11 @@ class FixedClock:
         return next(self._values)
 
 
+@pytest.fixture(autouse=True)
+def isolate_openai_custom_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+
+
 def wav_bytes(*, frame_count: int = 80, sample_rate: int = 80) -> bytes:
     output = BytesIO()
     with wave.open(output, "wb") as candidate:
@@ -209,8 +214,16 @@ def test_openai_factory_injects_key_and_enforces_bounded_no_retry_client(
     assert captured["max_retries"] == 0
     assert captured["timeout"] == 45.0
     assert captured["base_url"] == "https://api.openai.com/v1"
+    assert captured["admin_api_key"] == ""
+    assert captured["webhook_secret"] == ""
     assert captured["organization"] == "org-test"
     assert captured["project"] == "proj-test"
+    protected_headers = cast(dict[str, str], captured["default_headers"])
+    assert protected_headers == {
+        "Authorization": "Bearer test-only-secret",
+        "OpenAI-Organization": "org-test",
+        "OpenAI-Project": "proj-test",
+    }
 
 
 def test_openai_factory_ignores_sdk_environment_routing_and_tenant_defaults(
@@ -219,6 +232,8 @@ def test_openai_factory_ignores_sdk_environment_routing_and_tenant_defaults(
     monkeypatch.setenv("OPENAI_BASE_URL", "https://attacker.invalid/v1")
     monkeypatch.setenv("OPENAI_ORG_ID", "org-attacker")
     monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-attacker")
+    monkeypatch.setenv("OPENAI_ADMIN_KEY", "sk-admin-attacker")
+    monkeypatch.setenv("OPENAI_WEBHOOK_SECRET", "whsec-attacker")
 
     client = cast(
         openai.OpenAI,
@@ -233,7 +248,53 @@ def test_openai_factory_ignores_sdk_environment_routing_and_tenant_defaults(
     assert str(client.base_url) == "https://api.openai.com/v1/"
     assert client.organization == "org-explicit"
     assert client.project == "proj-explicit"
+    assert client.admin_api_key == ""
+    assert client.webhook_secret == ""
     assert client.max_retries == 0
+    protected_headers = httpx.Headers(cast(dict[str, str], client.default_headers))
+    assert protected_headers["authorization"] == "Bearer sk-test-only-not-real"
+    assert protected_headers["openai-organization"] == "org-explicit"
+    assert protected_headers["openai-project"] == "proj-explicit"
+
+
+@pytest.mark.parametrize(
+    "custom_headers",
+    [
+        (
+            "Authorization: Bearer attacker\n"
+            "OpenAI-Organization: org-attacker\n"
+            "OpenAI-Project: proj-attacker"
+        ),
+        (
+            "authorization: Bearer attacker\n"
+            "openai-organization: org-attacker\n"
+            "openai-project: proj-attacker"
+        ),
+    ],
+)
+def test_openai_factory_fails_before_client_for_environment_custom_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    custom_headers: str,
+) -> None:
+    constructor_called = False
+
+    def forbidden_constructor(**_kwargs: object) -> object:
+        nonlocal constructor_called
+        constructor_called = True
+        raise AssertionError("Client construction must not be reached")
+
+    monkeypatch.setattr(openai, "OpenAI", forbidden_constructor)
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", custom_headers)
+
+    with pytest.raises(ValueError, match="OPENAI_CUSTOM_HEADERS"):
+        create_openai_client(
+            api_key="sk-test-only-not-real",
+            config=ProviderConfig(),
+            organization="org-explicit",
+            project="proj-explicit",
+        )
+
+    assert constructor_called is False
 
 
 @pytest.mark.parametrize(

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal, Protocol, TypedDict, cast
 
 from .config import ProviderConfig, ProviderMode
 
 OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+_DISABLED_SDK_SECRET = ""
 
 
 class InputTextPart(TypedDict):
@@ -94,15 +96,24 @@ def create_openai_client(
         raise ValueError("An explicitly injected organization is required")
     if type(project) is not str or not project.strip():
         raise ValueError("An explicitly injected project is required")
+    if os.environ.get("OPENAI_CUSTOM_HEADERS"):
+        raise ValueError("OPENAI_CUSTOM_HEADERS must be unset or empty")
 
     # Import lazily so deterministic tests need only their injected fake client.
     from openai import OpenAI
 
     client = OpenAI(
         api_key=api_key,
+        admin_api_key=_DISABLED_SDK_SECRET,
         base_url=OPENAI_API_BASE_URL,
+        default_headers={
+            "Authorization": f"Bearer {api_key}",
+            "OpenAI-Organization": organization,
+            "OpenAI-Project": project,
+        },
         organization=organization,
         project=project,
+        webhook_secret=_DISABLED_SDK_SECRET,
         max_retries=config.sdk_max_retries,
         timeout=max(
             config.extraction_timeout_seconds,

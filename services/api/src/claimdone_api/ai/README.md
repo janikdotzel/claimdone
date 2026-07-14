@@ -9,6 +9,9 @@ to HTTP or persistence in this worktree.
 - `create_openai_client` requires explicitly injected API-key, organization, and
   project values and pins the API origin to `https://api.openai.com/v1`. OpenAI
   SDK environment defaults cannot redirect the client or select another tenant.
+  Non-empty `OPENAI_CUSTOM_HEADERS` fails before construction, protected auth and
+  tenant headers are supplied explicitly, and unrelated admin/webhook environment
+  secrets are disabled with explicit empty values.
 - `OpenAITranscriber` accepts only bounded, server-named PCM WAV bytes and makes
   one transcription call. It returns normalized text or a sanitized terminal
   `ProviderFailure`; it never retries.
@@ -27,10 +30,13 @@ to HTTP or persistence in this worktree.
   `build_visible_tool_plan` is deterministic and may include one clarification
   only when the canonical G5 result accepted it.
 
-No adapter reads environment variables, logs request or response content, stores
-remote request IDs, or persists images, audio, statements, prompts, or responses.
-The production client factory requires an explicitly injected key and always sets
-`max_retries=0`. Tests use injected fake clients and make no network requests.
+No adapter consumes environment-provided credentials, routing, tenant selection,
+or headers. The client factory only checks whether `OPENAI_CUSTOM_HEADERS` is
+non-empty so it can fail closed without retaining or logging the value. No adapter
+logs request or response content, stores remote request IDs, or persists images,
+audio, statements, prompts, or responses. The factory requires an explicitly
+injected key and always sets `max_retries=0`. Tests use staged credentials or
+injected fake clients and make no network requests.
 
 `ProviderCallTelemetry` projects the same content-free operation, model, mode,
 sequence, retry, and duration metadata into successful-call and terminal-failure
