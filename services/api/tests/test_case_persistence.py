@@ -105,12 +105,17 @@ def test_schema_migration_enables_wal_and_is_repeatable(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_schema WHERE type = 'table'"
         ).fetchall()
     assert journal_mode == ("wal",)
-    assert schema_version == (2,)
+    assert schema_version == (3,)
     assert {str(row[0]) for row in table_rows} >= {
         "cases",
         "audit_events",
         "gate_decisions",
         "case_media_handles",
+        "workflow_events",
+        "case_transcripts",
+        "provider_usage_ledger",
+        "authority_capabilities",
+        "sandbox_receipts",
     }
 
 
@@ -123,6 +128,12 @@ def test_schema_version_one_upgrades_without_losing_cases(tmp_path: Path) -> Non
         created_at=NOW,
     )
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE sandbox_receipts")
+        connection.execute("DROP TABLE authority_capabilities")
+        connection.execute("DROP TABLE provider_usage_ledger")
+        connection.execute("DROP TABLE case_transcripts")
+        connection.execute("DROP TABLE workflow_events")
+        connection.execute("DROP INDEX audit_events_projection_source_idx")
         connection.execute("DROP TABLE case_media_handles")
         connection.execute("PRAGMA user_version = 1")
 
@@ -130,7 +141,7 @@ def test_schema_version_one_upgrades_without_losing_cases(tmp_path: Path) -> Non
 
     assert upgraded.get_case("case-before-media-mapping") is not None
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE name = 'case_media_handles'"
         ).fetchone() == ("case_media_handles",)
@@ -139,7 +150,7 @@ def test_schema_version_one_upgrades_without_losing_cases(tmp_path: Path) -> Non
 def test_newer_schema_version_is_never_downgraded(tmp_path: Path) -> None:
     database_path = tmp_path / "future.db"
     with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(UnsupportedSchemaVersionError, match="newer than supported"):
         SqliteCaseRepository(database_path)
@@ -149,7 +160,7 @@ def test_newer_schema_version_is_never_downgraded(tmp_path: Path) -> None:
         case_table = connection.execute(
             "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'cases'"
         ).fetchone()
-    assert schema_version == (3,)
+    assert schema_version == (4,)
     assert case_table is None
 
 

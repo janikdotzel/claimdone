@@ -1,5 +1,6 @@
 """Validated case workflow and persistence orchestration."""
 
+import hashlib
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -19,6 +20,7 @@ from claimdone_api.contracts import (
     ClaimPacket,
     GateDecision,
     PortalState,
+    TranscriptConfirmationRequest,
     validate_case_transition,
 )
 from claimdone_api.contracts.state_machine import InvalidCaseTransition
@@ -29,7 +31,9 @@ from claimdone_api.persistence import (
     CaseSnapshot,
     SequencedAuditEvent,
     SequencedGateDecision,
+    SequencedWorkflowEvent,
     SqliteCaseRepository,
+    TranscriptTransitionResult,
     portal_state_after_transition,
     validate_portal_state,
 )
@@ -137,6 +141,21 @@ class CaseService:
             occurred_at=occurred_at,
         )
         try:
+            if target is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION:
+                transcript_id, local_ref, digest = self._pending_transcript_identity(
+                    case_id,
+                    snapshot,
+                )
+                return self._repository.save_pending_transcript_and_transition(
+                    case_id=case_id,
+                    expected_case_version=expected_version,
+                    transcript_id=transcript_id,
+                    transcript_sha256=digest,
+                    local_ref=local_ref,
+                    snapshot=snapshot,
+                    event=event,
+                    updated_at=occurred_at,
+                ).case
             return self._repository.transition_case(
                 case_id=case_id,
                 expected_version=expected_version,
@@ -151,6 +170,61 @@ class CaseService:
             raise self._version_conflict(error) from error
         except InvalidCaseTransition as error:
             raise InvalidCaseStateTransitionError(current.state, target) from error
+
+    def confirm_transcript(
+        self,
+        case_id: str,
+        *,
+        expected_case_version: int,
+        confirmation: TranscriptConfirmationRequest,
+    ) -> TranscriptTransitionResult:
+        """Bind explicit human confirmation and enter analysis atomically."""
+
+        if confirmation.case_id != case_id:
+            raise CaseSnapshotValidationError(
+                "Transcript confirmation caseId must match the selected case"
+            )
+        if confirmation.expected_version != expected_case_version:
+            raise CaseVersionConflictError(
+                case_id,
+                confirmation.expected_version,
+                expected_case_version,
+            )
+        current = self._get_case_for_update(case_id, expected_case_version)
+        target = CaseState.ANALYZING
+        try:
+            validate_case_transition(current.state, target)
+        except InvalidCaseTransition as error:
+            raise InvalidCaseStateTransitionError(current.state, target) from error
+        snapshot = replace(
+            current.snapshot,
+            portal_state=portal_state_after_transition(
+                current.snapshot.portal_state,
+                target,
+            ),
+        )
+        occurred_at = self._aware_now()
+        event = build_state_change_event(
+            case_id=case_id,
+            current=current.state,
+            target=target,
+            actor=ActorType.HUMAN,
+            occurred_at=occurred_at,
+        )
+        try:
+            return self._repository.confirm_transcript_and_transition(
+                case_id=case_id,
+                expected_case_version=expected_case_version,
+                transcript_id=confirmation.transcript_id,
+                transcript_sha256=confirmation.transcript_sha256,
+                snapshot=snapshot,
+                event=event,
+                updated_at=occurred_at,
+            )
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
 
     def save_intake_summary(
         self,
@@ -294,6 +368,16 @@ class CaseService:
         self.get_case(case_id)
         return self._repository.list_gate_decisions(case_id, after=after, limit=limit)
 
+    def list_workflow_events(
+        self,
+        case_id: str,
+        *,
+        after: int = 0,
+        limit: int = 100,
+    ) -> tuple[SequencedWorkflowEvent, ...]:
+        self.get_case(case_id)
+        return self._repository.list_workflow_events(case_id, after=after, limit=limit)
+
     def reset_demo(self) -> int:
         return self._reset_service.reset()
 
@@ -364,6 +448,46 @@ class CaseService:
         if value is None:
             return None
         return _JSON_OBJECT_ADAPTER.validate_python(dict(value), strict=True)
+
+    @staticmethod
+    def _pending_transcript_identity(
+        case_id: str,
+        snapshot: CaseSnapshot,
+    ) -> tuple[str, str, str]:
+        summary = snapshot.intake_summary
+        statement = None if summary is None else summary.get("statement")
+        audio = None if summary is None else summary.get("audio")
+        text = None if summary is None else summary.get("text")
+        if not isinstance(statement, dict) or not isinstance(audio, dict) or text is not None:
+            raise CaseSnapshotValidationError(
+                "Transcript confirmation requires a persisted audio statement"
+            )
+        audio_ref = audio.get("fileId")
+        audio_media_type = audio.get("mediaType")
+        audio_digest = audio.get("sha256")
+        if (
+            not isinstance(audio_ref, str)
+            or not re.fullmatch(r"audio-[a-f0-9]{32}\.wav", audio_ref)
+            or audio_media_type != "audio/wav"
+            or not isinstance(audio_digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", audio_digest)
+        ):
+            raise CaseSnapshotValidationError("Persisted audio reference is invalid")
+        local_ref = statement.get("fileId")
+        digest = statement.get("sha256")
+        media_type = statement.get("mediaType")
+        if (
+            not isinstance(local_ref, str)
+            or not re.fullmatch(r"transcript-[a-f0-9]{32}\.txt", local_ref)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            or media_type != "text/plain"
+        ):
+            raise CaseSnapshotValidationError("Persisted transcript reference is invalid")
+        identity = hashlib.sha256(
+            f"claimdone-transcript-v1\0{case_id}\0{local_ref}\0{digest}".encode()
+        ).hexdigest()
+        return f"transcript-{identity[:32]}", local_ref, digest
 
     @staticmethod
     def _version_conflict(error: CaseRecordVersionConflictError) -> CaseVersionConflictError:

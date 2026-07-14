@@ -1,6 +1,6 @@
 """Immutable values exchanged with the SQLite repository."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
 
@@ -12,6 +12,11 @@ from claimdone_api.contracts import (
     ClaimPacket,
     GateDecision,
     PortalState,
+    ProviderFailureCategory,
+    ProviderModelId,
+    SandboxReceipt,
+    WorkflowEventEnvelope,
+    WorkflowOperation,
 )
 
 type JsonObject = dict[str, JsonValue]
@@ -99,3 +104,80 @@ class SequencedGateDecision:
 
     sequence: int
     decision: GateDecision
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptRecord:
+    """Content-free transcript state; text remains in the owned media store."""
+
+    transcript_id: str
+    case_id: str
+    version: int
+    bound_case_version: int
+    transcript_sha256: str
+    local_ref: str
+    confirmed: bool
+    created_at: datetime
+    confirmed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptTransitionResult:
+    """Case and transcript written by one SQLite transaction."""
+
+    case: CaseRecord
+    transcript: TranscriptRecord
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityCapabilityRecord:
+    """Digest-only local authority capability metadata."""
+
+    digest: bytes = field(repr=False)
+    case_id: str
+    role: str
+    purpose: str
+    bound_case_version: int
+    issued_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None
+    revoked_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUsageLedgerRecord:
+    """Queryable, content-free provider telemetry bound to one workflow cursor."""
+
+    source_audit_sequence: int
+    case_id: str
+    operation: WorkflowOperation
+    model_id: ProviderModelId
+    provider_mode: str
+    call_sequence: int
+    retry_attempt: int
+    duration_ms: int
+    status: str
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    estimated_cost_micros: int | None
+    currency: str | None
+    pricing_snapshot_id: str | None
+    failure_category: ProviderFailureCategory | None
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SequencedWorkflowEvent:
+    """Canonical redacted projection with its database-owned replay cursor."""
+
+    sequence: int
+    envelope: WorkflowEventEnvelope
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxReceiptRecord:
+    """Validated redacted receipt persisted only by the later AUTH transaction."""
+
+    receipt: SandboxReceipt
+    created_at: datetime
