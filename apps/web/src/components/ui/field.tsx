@@ -117,8 +117,8 @@ export function TextArea({
 }
 
 type CheckboxFieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, "id" | "type"> & {
-  description?: string;
-  error?: string;
+  description?: string | undefined;
+  error?: string | undefined;
   id: string;
   label: string;
 };

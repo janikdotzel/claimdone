@@ -8,7 +8,7 @@ export type GateStatus = "passed" | "blocked" | "pending";
 type GateBadgeProps = {
   gateId: string;
   label: string;
-  reason?: string;
+  reason?: string | undefined;
   status: GateStatus;
 };
 
