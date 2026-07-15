@@ -11,17 +11,18 @@ from .base import (
     ContractVersion,
     ExactlyEight,
     ExactlyThree,
+    ExactlyThreeAttachmentIdentifiers,
     Identifier,
     NonEmptyText,
     ShortText,
     StrictInteger,
+    UpToThreeAttachmentIdentifiers,
     WireAwareDatetime,
     WireDate,
     WireTime,
 )
 from .enums import CounterpartyKnown, PortalState, PortalVariant
 
-ExactlyThreePortalAttachments = Annotated[tuple[Identifier, ...], Field(min_length=3, max_length=3)]
 DraftDateText = Annotated[StrictStr, Field(max_length=10)]
 DraftTimeText = Annotated[StrictStr, Field(max_length=21)]
 DraftShortText = Annotated[StrictStr, Field(max_length=512)]
@@ -45,7 +46,7 @@ class PortalDraftFields(PortalWireModel):
     vehicle_registration: DraftShortText
     counterparty_known: Literal[""] | CounterpartyKnown
     narrative: DraftNarrativeText
-    attachments: Annotated[tuple[Identifier, ...], Field(max_length=3)]
+    attachments: UpToThreeAttachmentIdentifiers
 
 
 class PortalReviewFields(ContractModel):
@@ -59,7 +60,7 @@ class PortalReviewFields(ContractModel):
     vehicle_registration: ShortText
     counterparty_known: CounterpartyKnown
     narrative: NonEmptyText
-    attachments: ExactlyThreePortalAttachments
+    attachments: ExactlyThreeAttachmentIdentifiers
 
 
 class PortalSessionView(ContractModel):

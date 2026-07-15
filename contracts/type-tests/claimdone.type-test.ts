@@ -7,23 +7,30 @@ import type {
   ReleaseDecision,
   ToolCallWorkflowEvent,
   ToolInvocation,
+  VerificationReport,
   WorkflowCaseView,
   WorkflowSnapshot,
 } from "../generated/claimdone";
 
 const threeAttachments: ClaimData["attachments"] = ["one", "two", "three"];
+const expectedAttachmentIds: VerificationReport["expectedAttachmentIds"] = [
+  "one",
+  "two",
+  "three",
+];
+const actualAttachmentIds: VerificationReport["actualAttachmentIds"] = ["one"];
 const noSubmissionAuthority: ClaimScope["agentCanSubmit"] = false;
 const gateResult: GateDecision["passed"] = false;
 const releaseResult: ReleaseDecision["passed"] = false;
 const invocation: ToolInvocation = {
-  contractVersion: "3.0.0",
+  contractVersion: "4.0.0",
   invocationId: "trusted-invocation-1",
   sequence: 1,
   tool: "inspect_evidence",
   arguments: {},
 };
 const caseView = {
-  contractVersion: "3.0.0",
+  contractVersion: "4.0.0",
   caseId: "case-1",
   state: "created",
   version: 1,
@@ -31,7 +38,7 @@ const caseView = {
   updatedAt: "2026-07-14T12:00:00Z",
 } as const satisfies WorkflowCaseView;
 const clarificationAnswer: ClarificationAnswerRequest = {
-  contractVersion: "3.0.0",
+  contractVersion: "4.0.0",
   caseId: "case-1",
   clarificationId: "clarification-1",
   field: "incident_date",
@@ -40,7 +47,7 @@ const clarificationAnswer: ClarificationAnswerRequest = {
   answer: "  exact answer  ",
 };
 const workflowSnapshot: WorkflowSnapshot = {
-  contractVersion: "3.0.0",
+  contractVersion: "4.0.0",
   requestId: "request-1",
   case: caseView,
   claimPacket: null,
@@ -70,11 +77,17 @@ const terminalTool: ToolCallWorkflowEvent = {
 // @ts-expect-error ClaimData requires exactly three attachment references.
 const twoAttachments: ClaimData["attachments"] = ["one", "two"];
 
+// @ts-expect-error Verification expectedAttachmentIds requires exactly three references.
+const shortExpectedAttachmentIds: VerificationReport["expectedAttachmentIds"] = [
+  "one",
+  "two",
+];
+
 // @ts-expect-error The agent submission boundary is the literal false.
 const forbiddenSubmissionAuthority: ClaimScope["agentCanSubmit"] = true;
 
 const forbiddenInvocationArguments: ToolInvocation = {
-  contractVersion: "3.0.0",
+  contractVersion: "4.0.0",
   invocationId: "trusted-invocation-2",
   sequence: 2,
   tool: "inspect_form",

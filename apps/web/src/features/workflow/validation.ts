@@ -29,7 +29,7 @@ export class WorkflowPayloadError extends Error {
 
 type JsonRecord = Record<string, unknown>;
 
-const CONTRACT_VERSION = "3.0.0";
+const CONTRACT_VERSION = "4.0.0";
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const WIRE_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -533,6 +533,14 @@ function validateSnapshotStateMatrix(root: JsonRecord, state: CaseState): void {
     if (finalAttempt?.portalVersion !== (portal as JsonRecord).version) {
       fail("$.verificationAttempts", "final portalVersion must match the portal session");
     }
+    const finalReport = finalAttempt?.report as JsonRecord | undefined;
+    const portalFields = (portal as JsonRecord).fields as JsonRecord;
+    if (!sameJson(finalReport?.actualAttachmentIds, portalFields.attachments)) {
+      fail(
+        "$.verificationAttempts",
+        "final actualAttachmentIds must match the rendered portal attachments",
+      );
+    }
   }
   if (state === "review") {
     const packetRecord = packet as JsonRecord;
@@ -595,6 +603,12 @@ function validateAttemptPacketBindings(
     series.attempts as readonly unknown[]
   ).entries()) {
     const report = (attemptValue as JsonRecord).report as JsonRecord;
+    if (!sameJson(report.expectedAttachmentIds, claim.attachments)) {
+      fail(
+        `${path}.verificationAttempts.attempts[${attemptIndex}].report.expectedAttachmentIds`,
+        "must exactly match the ordered canonical ClaimData attachments",
+      );
+    }
     for (const resultValue of report.fieldResults as readonly unknown[]) {
       const result = resultValue as JsonRecord;
       if (
@@ -712,6 +726,12 @@ function validatePacketCrossReferences(
     }
   }
   const verification = packet.verification as JsonRecord;
+  if (!sameJson(verification.expectedAttachmentIds, attachments)) {
+    fail(
+      `${path}.verification.expectedAttachmentIds`,
+      "must exactly match the ordered canonical ClaimData attachments",
+    );
+  }
   requireKnownSources(verification.fieldResults as readonly unknown[], `${path}.verification.fieldResults`);
 
   const factIds = facts.map((entry) => (entry as JsonRecord).factId);
@@ -854,7 +874,7 @@ function validatePacketCrossReferences(
   };
   for (const resultValue of verification.fieldResults as readonly unknown[]) {
     const result = resultValue as JsonRecord;
-    if (result.field === "attachments") fail(`${path}.verification.fieldResults`, "attachments use count verification");
+    if (result.field === "attachments") fail(`${path}.verification.fieldResults`, "attachments use ID verification");
     if (!sameJson(result.expected, claimValueByField[result.field as string])) {
       fail(`${path}.verification.fieldResults`, "expected values must match canonical ClaimData");
     }
@@ -985,7 +1005,7 @@ function validateEvidenceItem(value: unknown, path: string): void {
     "transcript",
     "clarification",
   ] as const);
-  identifier(item.localRef, `${path}.localRef`);
+  attachmentIdentifier(item.localRef, `${path}.localRef`);
   oneOf(item.mediaType, `${path}.mediaType`, [
     "image/jpeg",
     "image/png",
@@ -1078,7 +1098,7 @@ function validateClaimData(value: unknown, path: string): void {
     "policyReference",
     "vehicleRegistration",
   ]);
-  exactArrayLength(item.attachments, `${path}.attachments`, 3, identifier);
+  attachmentIdentifiers(item.attachments, `${path}.attachments`, 3, 3);
   for (const key of [
     "claimantName",
     "location",
@@ -1194,8 +1214,10 @@ function validateGateDecision(value: unknown, path: string): void {
 function validateVerificationReport(value: unknown, path: string): void {
   const item = object(value, path, [
     "actualAttachmentCount",
+    "actualAttachmentIds",
     "deterministicMatch",
     "expectedAttachmentCount",
+    "expectedAttachmentIds",
     "fieldResults",
     "modelReportedMismatch",
     "reviewAllowed",
@@ -1203,10 +1225,19 @@ function validateVerificationReport(value: unknown, path: string): void {
     "verifiedAt",
   ]);
   nullable(item.actualAttachmentCount, `${path}.actualAttachmentCount`, (entry, entryPath) => {
-    integer(entry, entryPath, 0);
+    integer(entry, entryPath, 0, 3);
+  });
+  nullable(item.actualAttachmentIds, `${path}.actualAttachmentIds`, (entry, entryPath) => {
+    attachmentIdentifiers(entry, entryPath, 0, 3);
   });
   nullable(item.deterministicMatch, `${path}.deterministicMatch`, boolean);
   literal(item.expectedAttachmentCount, `${path}.expectedAttachmentCount`, 3);
+  const expectedAttachmentIds = attachmentIdentifiers(
+    item.expectedAttachmentIds,
+    `${path}.expectedAttachmentIds`,
+    3,
+    3,
+  );
   const fields = array(item.fieldResults, `${path}.fieldResults`, validateVerificationField);
   boolean(item.modelReportedMismatch, `${path}.modelReportedMismatch`);
   boolean(item.reviewAllowed, `${path}.reviewAllowed`);
@@ -1222,8 +1253,23 @@ function validateVerificationReport(value: unknown, path: string): void {
   const requiredScalarFields = REQUIRED_FIELDS.filter((field) => field !== "attachments");
   const fieldsComplete = sameStringSet(fieldNames, new Set(requiredScalarFields));
   const fieldsMatch = fieldsComplete && fields.every((field) => (field as JsonRecord).status === "match");
-  const attachmentsEvaluated = item.actualAttachmentCount !== null;
-  const attachmentsMatch = item.actualAttachmentCount === 3;
+  if (expectedAttachmentIds.length !== item.expectedAttachmentCount) {
+    fail(`${path}.expectedAttachmentCount`, "must equal expectedAttachmentIds length");
+  }
+  const actualCountPresent = item.actualAttachmentCount !== null;
+  const actualIdsPresent = item.actualAttachmentIds !== null;
+  if (actualCountPresent !== actualIdsPresent) {
+    fail(path, "actualAttachmentCount and actualAttachmentIds must be jointly set");
+  }
+  const actualAttachmentIds = item.actualAttachmentIds as readonly unknown[] | null;
+  if (
+    actualAttachmentIds !== null &&
+    item.actualAttachmentCount !== actualAttachmentIds.length
+  ) {
+    fail(`${path}.actualAttachmentCount`, "must equal actualAttachmentIds length");
+  }
+  const attachmentsEvaluated = actualIdsPresent;
+  const attachmentsMatch = sameJson(actualAttachmentIds, expectedAttachmentIds);
   const fieldMismatch = fields.some((field) => (field as JsonRecord).status !== "match");
   const attachmentMismatch = attachmentsEvaluated && !attachmentsMatch;
   if (fieldsComplete && attachmentsEvaluated) {
@@ -1240,7 +1286,7 @@ function validateVerificationReport(value: unknown, path: string): void {
   const reviewAllowed = item.status === "verified" && item.deterministicMatch === true && item.modelReportedMismatch === false && fieldsMatch && attachmentsMatch;
   if (item.reviewAllowed !== reviewAllowed) fail(`${path}.reviewAllowed`, "must be derived from deterministic verification");
   if (item.status === "pending") {
-    if (item.deterministicMatch !== null || item.verifiedAt !== null || fields.length !== 0 || item.actualAttachmentCount !== null || item.modelReportedMismatch !== false) {
+    if (item.deterministicMatch !== null || item.verifiedAt !== null || fields.length !== 0 || item.actualAttachmentCount !== null || item.actualAttachmentIds !== null || item.modelReportedMismatch !== false) {
       fail(path, "pending verification cannot contain results, signals, or a timestamp");
     }
   } else if (item.verifiedAt === null) {
@@ -1342,7 +1388,7 @@ function validatePortalFields(value: unknown, path: string): void {
     "policyReference",
     "vehicleRegistration",
   ]);
-  array(item.attachments, `${path}.attachments`, identifier, 0, 3);
+  attachmentIdentifiers(item.attachments, `${path}.attachments`, 0, 3);
   safeText(item.claimantName, `${path}.claimantName`, 0, 512);
   safeText(item.incidentDate, `${path}.incidentDate`, 0, 10);
   safeText(item.incidentTime, `${path}.incidentTime`, 0, 21);
@@ -1432,7 +1478,9 @@ function validateVerificationSeries(value: unknown, path: string): void {
   }
   if (
     firstReport.expectedAttachmentCount !== secondReport.expectedAttachmentCount ||
-    firstReport.actualAttachmentCount !== secondReport.actualAttachmentCount
+    firstReport.actualAttachmentCount !== secondReport.actualAttachmentCount ||
+    !sameJson(firstReport.expectedAttachmentIds, secondReport.expectedAttachmentIds) ||
+    !sameJson(firstReport.actualAttachmentIds, secondReport.actualAttachmentIds)
   ) {
     fail(`${path}.attempts[1].report`, "a scalar repair cannot change attachment verification");
   }
@@ -1524,7 +1572,7 @@ function validateVerificationAttempt(value: unknown, path: string): void {
     report.status !== "mismatch" ||
     report.deterministicMatch !== false ||
     report.modelReportedMismatch !== false ||
-    report.actualAttachmentCount !== report.expectedAttachmentCount ||
+    !sameJson(report.actualAttachmentIds, report.expectedAttachmentIds) ||
     !sameStringSet(
       results.map((result) => (result as JsonRecord).field),
       new Set(expectedFields),
@@ -1552,15 +1600,16 @@ function deriveG8ReasonCodes(report: JsonRecord): GateReasonCode[] {
     reasons.push("G8_FIELD_MISMATCH");
   }
   if (
-    report.actualAttachmentCount !== null &&
-    report.actualAttachmentCount !== report.expectedAttachmentCount
+    report.actualAttachmentIds !== null &&
+    !sameJson(report.actualAttachmentIds, report.expectedAttachmentIds)
   ) {
     reasons.push("G8_ATTACHMENT_MISMATCH");
   }
   if (
     !sameStringSet(presentFields, new Set(expectedFields)) ||
     results.some((result) => (result as JsonRecord).status === "missing") ||
-    report.actualAttachmentCount === null
+    report.actualAttachmentCount === null ||
+    report.actualAttachmentIds === null
   ) {
     reasons.push("G8_REQUIRED_FIELD_MISSING");
   }
@@ -1903,15 +1952,6 @@ function array(
   return value;
 }
 
-function exactArrayLength(
-  value: unknown,
-  path: string,
-  length: number,
-  validator: (entry: unknown, entryPath: string) => unknown,
-): void {
-  array(value, path, validator, length, length);
-}
-
 function oneOf<const T extends readonly (string | number)[]>(
   value: unknown,
   path: string,
@@ -1983,6 +2023,23 @@ function identifier(value: unknown, path: string): string {
     fail(path, "must be a valid identifier");
   }
   return value;
+}
+
+function attachmentIdentifier(value: unknown, path: string): string {
+  return identifier(value, path);
+}
+
+function attachmentIdentifiers(
+  value: unknown,
+  path: string,
+  minimum: number,
+  maximum: number,
+): readonly unknown[] {
+  const identifiers = array(value, path, attachmentIdentifier, minimum, maximum);
+  if (new Set(identifiers).size !== identifiers.length) {
+    fail(path, "attachment identifiers must be unique");
+  }
+  return identifiers;
 }
 
 function digest(value: unknown, path: string): string {

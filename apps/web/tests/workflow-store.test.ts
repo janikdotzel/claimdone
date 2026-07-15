@@ -471,7 +471,7 @@ function createdSnapshot(caseId: string, version: number): WorkflowSnapshot {
 function stateEvent(cursor: number): WorkflowEventEnvelope {
   return parseWorkflowEventEnvelope({
     caseId: "case-happy-001",
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     cursor,
     event: { actor: "system", fromState: "created", kind: "state", toState: "disclosed" },
     eventId: `workflow-event-${cursor}`,
@@ -485,7 +485,7 @@ function stateEvent(cursor: number): WorkflowEventEnvelope {
 function clarificationEvent(cursor: number): WorkflowEventEnvelope {
   return parseWorkflowEventEnvelope({
     caseId: "case-happy-001",
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     cursor,
     event: {
       field: "incident_date",
@@ -504,11 +504,11 @@ function clarificationEvent(cursor: number): WorkflowEventEnvelope {
 function failedGateEvent(cursor: number): WorkflowEventEnvelope {
   return parseWorkflowEventEnvelope({
     caseId: "case-happy-001",
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     cursor,
     event: {
       decision: {
-        contractVersion: "3.0.0",
+        contractVersion: "4.0.0",
         decidedAt: "2026-07-14T12:00:20Z",
         deterministicPassed: false,
         evidenceRefs: [],

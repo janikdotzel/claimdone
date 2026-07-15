@@ -48,6 +48,7 @@ from claimdone_api.walking_skeleton.legacy_boundary import (
 
 NOW = datetime(2026, 7, 14, 12, tzinfo=UTC)
 DIGEST = "a" * 64
+HAPPY_PATH = Path(__file__).resolve().parents[3] / "contracts/examples/happy_path.json"
 
 
 def _gate() -> GateDecision:
@@ -455,6 +456,76 @@ def test_persisted_v2_contract_root_is_rejected_unchanged_with_reset_guidance(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
         ).fetchall() == schema_before
+
+
+def test_current_schema_rejects_v3_claim_packet_without_relabel_or_mutation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "persisted-contract-v3.db"
+    repository = SqliteCaseRepository(database_path)
+    repository.create_case(
+        case_id="case-v3-persisted",
+        redacted_metadata={},
+        created_at=NOW,
+    )
+    packet = cast(dict[str, Any], json.loads(HAPPY_PATH.read_text(encoding="utf-8")))
+    packet.update(
+        {
+            "contractVersion": "3.0.0",
+            "caseId": "case-v3-persisted",
+            "state": "created",
+            "portalState": "draft",
+            "gateDecisions": [],
+            "verification": {
+                "status": "pending",
+                "deterministicMatch": None,
+                "modelReportedMismatch": False,
+                "fieldResults": [],
+                "expectedAttachmentCount": 3,
+                "actualAttachmentCount": None,
+                "reviewAllowed": False,
+                "verifiedAt": None,
+            },
+        }
+    )
+    packet_json = json.dumps(
+        packet,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE cases SET claim_packet_json = ? WHERE case_id = ?",
+            (packet_json, "case-v3-persisted"),
+        )
+        version_before = connection.execute("PRAGMA user_version").fetchone()
+        dump_before = tuple(connection.iterdump())
+    assert version_before == (6,)
+
+    with pytest.raises(
+        PersistedDataIntegrityError,
+        match="does not match the current contracts",
+    ) as captured:
+        SqliteCaseRepository(database_path)
+    assert captured.value.__cause__ is not None
+    assert "contractVersion" in str(captured.value.__cause__)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == version_before
+        assert tuple(connection.iterdump()) == dump_before
+        persisted = json.loads(
+            str(
+                connection.execute(
+                    "SELECT claim_packet_json FROM cases WHERE case_id = ?",
+                    ("case-v3-persisted",),
+                ).fetchone()[0]
+            )
+        )
+    assert persisted["contractVersion"] == "3.0.0"
+    assert "expectedAttachmentIds" not in persisted["verification"]
+    assert "actualAttachmentIds" not in persisted["verification"]
 
 
 def test_legacy_naive_timestamp_maps_to_reset_error_without_mutation(

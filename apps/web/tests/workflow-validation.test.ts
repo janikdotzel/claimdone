@@ -18,7 +18,7 @@ import {
 } from "../src/features/workflow/validation";
 
 describe("closed workflow snapshot parser", () => {
-  it("accepts canonical Contract 3.0 verifying and review fixtures", () => {
+  it("accepts canonical Contract 4.0 verifying and review fixtures", () => {
     expect(parseWorkflowSnapshot(VERIFYING_SNAPSHOT).case.state).toBe("verifying");
     expect(parseWorkflowSnapshot(REVIEW_SNAPSHOT).case.state).toBe("review");
     expect(parseWorkflowSnapshot(REPAIR_SNAPSHOT).verificationAttempts?.attempts).toHaveLength(2);
@@ -136,7 +136,7 @@ describe("closed workflow snapshot parser", () => {
     const laterPacket = record(laterGateFailure.claimPacket);
     laterPacket.state = "failed";
     array(laterPacket.gateDecisions).push({
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
       decidedAt: "2026-07-14T12:00:06Z",
       deterministicPassed: false,
       evidenceRefs: [],
@@ -301,6 +301,31 @@ describe("closed workflow snapshot parser", () => {
     expect(() => parseWorkflowSnapshot(changedNonTarget)).toThrow(
       /deterministicMatch|non-target rendered field/,
     );
+
+    const changedAttachmentIdentity = cloneRecord(REPAIR_SNAPSHOT);
+    const identityAttempts = array(
+      record(changedAttachmentIdentity.verificationAttempts).attempts,
+    );
+    const repairedReport = record(record(identityAttempts[1]).report);
+    const replacement = ["alternate-ref-1", "alternate-ref-2", "alternate-ref-3"];
+    repairedReport.expectedAttachmentIds = replacement;
+    repairedReport.actualAttachmentIds = replacement;
+    expect(() => parseWorkflowSnapshot(changedAttachmentIdentity)).toThrow(
+      /scalar repair cannot change attachment verification/,
+    );
+
+    const attachmentMismatchRepair = cloneRecord(REPAIR_SNAPSHOT);
+    const mismatchAttempts = array(
+      record(attachmentMismatchRepair.verificationAttempts).attempts,
+    );
+    record(record(mismatchAttempts[0]).report).actualAttachmentIds = [
+      "wrong-ref-1",
+      "wrong-ref-2",
+      "wrong-ref-3",
+    ];
+    expect(() => parseWorkflowSnapshot(attachmentMismatchRepair)).toThrow(
+      /complete deterministic scalar mismatch/,
+    );
   });
 
   it("derives verification field and report authority instead of trusting flags", () => {
@@ -318,6 +343,156 @@ describe("closed workflow snapshot parser", () => {
     const falseApproval = cloneRecord(REVIEW_SNAPSHOT);
     record(record(falseApproval.claimPacket).verification).reviewAllowed = false;
     expect(() => parseWorkflowSnapshot(falseApproval)).toThrow(/reviewAllowed/);
+  });
+
+  it("makes ordered attachment identity authoritative over counts and model agreement", () => {
+    for (const actualIds of [
+      ["wrong-ref-1", "wrong-ref-2", "wrong-ref-3"],
+      ["local-ref-2", "local-ref-1", "local-ref-3"],
+    ]) {
+      const forgedMatch = cloneRecord(REVIEW_SNAPSHOT);
+      record(record(forgedMatch.claimPacket).verification).actualAttachmentIds = actualIds;
+      expect(() => parseWorkflowSnapshot(forgedMatch)).toThrow(
+        /derived from all fields and attachments/,
+      );
+    }
+
+    const wrongExpected = cloneRecord(REVIEW_SNAPSHOT);
+    const expectedReport = record(record(wrongExpected.claimPacket).verification);
+    const replacement = ["alternate-ref-1", "alternate-ref-2", "alternate-ref-3"];
+    expectedReport.expectedAttachmentIds = replacement;
+    expectedReport.actualAttachmentIds = replacement;
+    expect(() => parseWorkflowSnapshot(wrongExpected)).toThrow(
+      /canonical ClaimData attachments/,
+    );
+
+    const inconsistentCount = cloneRecord(REVIEW_SNAPSHOT);
+    record(record(inconsistentCount.claimPacket).verification).actualAttachmentCount = 2;
+    expect(() => parseWorkflowSnapshot(inconsistentCount)).toThrow(
+      /actualAttachmentIds length/,
+    );
+  });
+
+  it("rejects padded IDs on every attachment identity surface", () => {
+    const paddedEvidence = cloneRecord(REVIEW_SNAPSHOT);
+    record(array(record(paddedEvidence.claimPacket).evidence)[0]).localRef =
+      " local-ref-1";
+    expect(() => parseWorkflowSnapshot(paddedEvidence)).toThrow(/identifier/);
+
+    const paddedClaim = cloneRecord(REVIEW_SNAPSHOT);
+    array(record(record(paddedClaim.claimPacket).claim).attachments)[0] =
+      " local-ref-1";
+    expect(() => parseWorkflowSnapshot(paddedClaim)).toThrow(/identifier/);
+
+    const paddedExpected = cloneRecord(REVIEW_SNAPSHOT);
+    array(
+      record(record(paddedExpected.claimPacket).verification).expectedAttachmentIds,
+    )[0] = " local-ref-1";
+    expect(() => parseWorkflowSnapshot(paddedExpected)).toThrow(/identifier/);
+
+    const paddedActual = cloneRecord(REVIEW_SNAPSHOT);
+    array(
+      record(record(paddedActual.claimPacket).verification).actualAttachmentIds,
+    )[0] = " local-ref-1";
+    expect(() => parseWorkflowSnapshot(paddedActual)).toThrow(/identifier/);
+
+    const paddedPortal = cloneRecord(REVIEW_SNAPSHOT);
+    array(record(record(paddedPortal.portalSession).fields).attachments)[0] =
+      " local-ref-1";
+    expect(() => parseWorkflowSnapshot(paddedPortal)).toThrow(/identifier/);
+  });
+
+  it("rejects duplicate attachment identities before equality can launder them", () => {
+    const duplicateClaim = cloneRecord(REVIEW_SNAPSHOT);
+    const claimAttachments = array(
+      record(record(duplicateClaim.claimPacket).claim).attachments,
+    );
+    claimAttachments[1] = claimAttachments[0];
+    expect(() => parseWorkflowSnapshot(duplicateClaim)).toThrow(/must be unique/);
+
+    const duplicateExpected = cloneRecord(REVIEW_SNAPSHOT);
+    const expectedIds = array(
+      record(record(duplicateExpected.claimPacket).verification).expectedAttachmentIds,
+    );
+    expectedIds[1] = expectedIds[0];
+    expect(() => parseWorkflowSnapshot(duplicateExpected)).toThrow(/must be unique/);
+
+    const duplicateActual = cloneRecord(REVIEW_SNAPSHOT);
+    const actualIds = array(
+      record(record(duplicateActual.claimPacket).verification).actualAttachmentIds,
+    );
+    actualIds[1] = actualIds[0];
+    expect(() => parseWorkflowSnapshot(duplicateActual)).toThrow(/must be unique/);
+
+    const duplicatePortal = cloneRecord(REVIEW_SNAPSHOT);
+    const portalAttachments = array(
+      record(record(duplicatePortal.portalSession).fields).attachments,
+    );
+    portalAttachments[1] = portalAttachments[0];
+    expect(() => parseWorkflowSnapshot(duplicatePortal)).toThrow(/must be unique/);
+
+    const duplicateEvidenceProjection = cloneRecord(REVIEW_SNAPSHOT);
+    const images = array(record(duplicateEvidenceProjection.claimPacket).evidence)
+      .map((entry) => record(entry))
+      .filter((entry) => entry.kind === "image");
+    record(images[1]).localRef = record(images[0]).localRef;
+    expect(() => parseWorkflowSnapshot(duplicateEvidenceProjection)).toThrow(
+      /image localRefs/,
+    );
+  });
+
+  it("binds every attempt attachment identity to the packet and rendered portal", () => {
+    const wrongExpected = cloneRecord(VERIFYING_SNAPSHOT);
+    wrongExpected.verificationAttempts = structuredClone(
+      REVIEW_SNAPSHOT.verificationAttempts,
+    );
+    const expectedAttempt = record(
+      array(record(wrongExpected.verificationAttempts).attempts)[0],
+    );
+    const expectedReport = record(expectedAttempt.report);
+    const replacement = ["alternate-ref-1", "alternate-ref-2", "alternate-ref-3"];
+    expectedReport.expectedAttachmentIds = replacement;
+    expectedReport.actualAttachmentIds = replacement;
+    record(record(wrongExpected.portalSession).fields).attachments = replacement;
+    expect(() => parseWorkflowSnapshot(wrongExpected)).toThrow(
+      /canonical ClaimData attachments/,
+    );
+
+    const wrongRendered = cloneRecord(VERIFYING_SNAPSHOT);
+    wrongRendered.verificationAttempts = structuredClone(
+      REVIEW_SNAPSHOT.verificationAttempts,
+    );
+    record(record(wrongRendered.portalSession).fields).attachments = [
+      "local-ref-2",
+      "local-ref-1",
+      "local-ref-3",
+    ];
+    expect(() => parseWorkflowSnapshot(wrongRendered)).toThrow(
+      /rendered portal attachments/,
+    );
+  });
+
+  it("treats short non-null attachment IDs as mismatch rather than missing", () => {
+    const blocked = cloneRecord(G8_BLOCKED_SNAPSHOT);
+    const packet = record(blocked.claimPacket);
+    const packetReport = record(packet.verification);
+    const attempts = array(record(blocked.verificationAttempts).attempts);
+    const attempt = record(attempts[0]);
+    const attemptReport = record(attempt.report);
+    const shortIds = ["local-ref-1", "local-ref-2"];
+    for (const report of [packetReport, attemptReport]) {
+      report.actualAttachmentCount = 2;
+      report.actualAttachmentIds = shortIds;
+    }
+    for (const gate of [
+      record(array(packet.gateDecisions)[8]),
+      record(attempt.gateDecision),
+    ]) {
+      gate.reasonCodes = ["G8_FIELD_MISMATCH", "G8_ATTACHMENT_MISMATCH"];
+    }
+    record(record(blocked.portalSession).fields).attachments = shortIds;
+
+    expect(parseWorkflowSnapshot(blocked).case.state).toBe("blocked");
   });
 
   it("derives compound G8 reasons in backend order", () => {
@@ -511,6 +686,9 @@ function setCompoundG8Failure(
   const attempts = array(record(snapshot.verificationAttempts).attempts);
   const attempt = record(attempts[0]);
   applyCompoundVerificationReport(record(attempt.report));
+  record(record(snapshot.portalSession).fields).attachments = structuredClone(
+    array(record(attempt.report).actualAttachmentIds),
+  );
   const attemptGate = record(attempt.gateDecision);
   attemptGate.modelBlocked = reasonCodes.includes("G8_MODEL_MISMATCH");
   attemptGate.reasonCodes = [...reasonCodes];
@@ -518,6 +696,7 @@ function setCompoundG8Failure(
 
 function applyCompoundVerificationReport(report: Record<string, unknown>): void {
   report.actualAttachmentCount = 2;
+  report.actualAttachmentIds = array(report.expectedAttachmentIds).slice(0, 2);
   report.deterministicMatch = false;
   report.fieldResults = array(report.fieldResults).filter(
     (field) => record(field).field !== "incident_time",

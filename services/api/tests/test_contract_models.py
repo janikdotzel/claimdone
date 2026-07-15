@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient as FastAPITestClient
 from pydantic import ValidationError
 
-from claimdone_api.contracts import AuditEvent, ClaimPacket, GateDecision
+from claimdone_api.contracts import AuditEvent, ClaimPacket, GateDecision, VerificationReport
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 HAPPY_PATH = REPOSITORY_ROOT / "contracts" / "examples" / "happy_path.json"
@@ -29,7 +29,7 @@ def happy_data() -> dict[str, Any]:
 
 def gate_data() -> dict[str, Any]:
     return {
-        "contractVersion": "3.0.0",
+        "contractVersion": "4.0.0",
         "gateId": "G3",
         "deterministicPassed": True,
         "modelBlocked": False,
@@ -42,7 +42,7 @@ def gate_data() -> dict[str, Any]:
 
 def audit_data() -> dict[str, Any]:
     return {
-        "contractVersion": "3.0.0",
+        "contractVersion": "4.0.0",
         "eventId": "audit-1",
         "caseId": "case-1",
         "eventType": "case_state_changed",
@@ -211,6 +211,160 @@ def test_verification_expected_value_must_match_claim_data() -> None:
         ClaimPacket.model_validate(data)
 
 
+def test_verification_expected_attachment_ids_must_match_claim_data_in_order() -> None:
+    data = happy_data()
+    replacement = ["alternate-ref-1", "alternate-ref-2", "alternate-ref-3"]
+    data["verification"]["expectedAttachmentIds"] = replacement
+    data["verification"]["actualAttachmentIds"] = replacement
+
+    with pytest.raises(ValidationError, match="expectedAttachmentIds must exactly match"):
+        ClaimPacket.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("evidence", 0, "localRef"),
+        ("claim", "attachments", 0),
+        ("verification", "expectedAttachmentIds", 0),
+        ("verification", "actualAttachmentIds", 0),
+    ],
+)
+def test_attachment_ids_reject_padded_wire_values(path: tuple[str | int, ...]) -> None:
+    data: Any = happy_data()
+    target: Any = data
+    for segment in path[:-1]:
+        target = target[segment]
+    target[path[-1]] = f" {target[path[-1]]}"
+
+    with pytest.raises(ValidationError, match="exact wire format"):
+        ClaimPacket.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("claim", "attachments"),
+        ("verification", "expectedAttachmentIds"),
+        ("verification", "actualAttachmentIds"),
+    ],
+)
+def test_attachment_identity_arrays_reject_duplicate_ids(
+    path: tuple[str, str],
+) -> None:
+    data: Any = happy_data()
+    target: Any = data
+    for segment in path:
+        target = target[segment]
+    target[1] = target[0]
+
+    with pytest.raises(ValidationError, match="attachment identifiers must be unique"):
+        ClaimPacket.model_validate(data)
+
+
+def test_duplicate_image_local_refs_cannot_pass_the_evidence_projection() -> None:
+    data = happy_data()
+    images = [item for item in data["evidence"] if item["kind"] == "image"]
+    images[1]["localRef"] = images[0]["localRef"]
+
+    with pytest.raises(ValidationError, match="image local refs"):
+        ClaimPacket.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "actual_ids",
+    [
+        ["wrong-ref-1", "wrong-ref-2", "wrong-ref-3"],
+        ["local-ref-2", "local-ref-1", "local-ref-3"],
+    ],
+)
+def test_same_count_wrong_or_reordered_attachment_ids_cannot_claim_a_match(
+    actual_ids: list[str],
+) -> None:
+    report = deepcopy(happy_data()["verification"])
+    report["actualAttachmentIds"] = actual_ids
+
+    with pytest.raises(ValidationError, match="derived from all fields and attachments"):
+        VerificationReport.model_validate(report)
+
+    report.update(
+        {
+            "status": "mismatch",
+            "deterministicMatch": False,
+            "reviewAllowed": False,
+        }
+    )
+    validated = VerificationReport.model_validate(report)
+
+    assert validated.actual_attachment_count == validated.expected_attachment_count == 3
+    assert validated.actual_attachment_ids != validated.expected_attachment_ids
+
+
+def test_short_attachment_ids_block_but_are_not_missing_when_count_matches() -> None:
+    report = deepcopy(happy_data()["verification"])
+    report.update(
+        {
+            "status": "mismatch",
+            "deterministicMatch": False,
+            "actualAttachmentCount": 2,
+            "actualAttachmentIds": report["expectedAttachmentIds"][:2],
+            "reviewAllowed": False,
+        }
+    )
+
+    validated = VerificationReport.model_validate(report)
+
+    assert validated.actual_attachment_count == 2
+    assert validated.actual_attachment_ids is not None
+
+
+@pytest.mark.parametrize(
+    ("actual_count", "actual_ids"),
+    [
+        (None, ["local-ref-1"]),
+        (1, None),
+        (2, ["local-ref-1", "local-ref-2", "local-ref-3"]),
+    ],
+)
+def test_attachment_count_and_ids_must_be_joint_and_length_consistent(
+    actual_count: int | None,
+    actual_ids: list[str] | None,
+) -> None:
+    report = deepcopy(happy_data()["verification"])
+    report["actualAttachmentCount"] = actual_count
+    report["actualAttachmentIds"] = actual_ids
+
+    with pytest.raises(ValidationError, match="jointly set|must equal actualAttachmentIds"):
+        VerificationReport.model_validate(report)
+
+
+def test_attachment_id_bounds_reject_short_expected_and_too_many_actual_ids() -> None:
+    short_expected = deepcopy(happy_data()["verification"])
+    short_expected["expectedAttachmentIds"] = short_expected["expectedAttachmentIds"][:2]
+    with pytest.raises(ValidationError):
+        VerificationReport.model_validate(short_expected)
+
+    too_many_actual = deepcopy(happy_data()["verification"])
+    too_many_actual["actualAttachmentCount"] = 4
+    too_many_actual["actualAttachmentIds"] = [
+        "local-ref-1",
+        "local-ref-2",
+        "local-ref-3",
+        "local-ref-4",
+    ]
+    with pytest.raises(ValidationError):
+        VerificationReport.model_validate(too_many_actual)
+
+
+def test_model_match_signal_cannot_override_wrong_attachment_identity() -> None:
+    report = deepcopy(happy_data()["verification"])
+    report["actualAttachmentIds"] = ["wrong-ref-1", "wrong-ref-2", "wrong-ref-3"]
+    report["modelReportedMismatch"] = False
+
+    with pytest.raises(ValidationError, match="derived from all fields and attachments"):
+        VerificationReport.model_validate(report)
+
+
 def test_verification_time_uses_exact_claim_json_serialization() -> None:
     data = happy_data()
     data["claim"]["incidentTime"] = "14:30:00Z"
@@ -279,7 +433,9 @@ def test_pre_review_case_cannot_claim_later_portal_state(
         "modelReportedMismatch": False,
         "fieldResults": [],
         "expectedAttachmentCount": 3,
+        "expectedAttachmentIds": data["claim"]["attachments"],
         "actualAttachmentCount": None,
+        "actualAttachmentIds": None,
         "reviewAllowed": False,
         "verifiedAt": None,
     }
@@ -301,7 +457,9 @@ def test_verifying_case_uses_portal_review_for_fresh_comparison() -> None:
         "modelReportedMismatch": False,
         "fieldResults": [],
         "expectedAttachmentCount": 3,
+        "expectedAttachmentIds": data["claim"]["attachments"],
         "actualAttachmentCount": None,
+        "actualAttachmentIds": None,
         "reviewAllowed": False,
         "verifiedAt": None,
     }
@@ -323,7 +481,9 @@ def test_stop_states_reject_human_approved_portal_state(case_state: str) -> None
         "modelReportedMismatch": False,
         "fieldResults": [],
         "expectedAttachmentCount": 3,
+        "expectedAttachmentIds": data["claim"]["attachments"],
         "actualAttachmentCount": None,
+        "actualAttachmentIds": None,
         "reviewAllowed": False,
         "verifiedAt": None,
     }

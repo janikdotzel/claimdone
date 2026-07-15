@@ -37,7 +37,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -169,7 +169,8 @@
           "maxItems": 3,
           "minItems": 3,
           "title": "Attachments",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "claimantName": {
           "anyOf": [
@@ -309,7 +310,7 @@
           "$ref": "#/$defs/ClaimData"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -435,7 +436,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -498,7 +499,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -635,7 +636,7 @@
       "description": "Versioned eval input and ground truth, usable without a live model.",
       "properties": {
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -706,7 +707,7 @@
           "type": "array"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -768,7 +769,7 @@
       "description": "One closed metric check with grader failure separate from observed gates.",
       "properties": {
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1043,7 +1044,7 @@
       "description": "One required closed metric aggregate with explicit denominator semantics.",
       "properties": {
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1147,7 +1148,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1553,7 +1554,7 @@
       "description": "Immutable gate event; model signals can only add a block.",
       "properties": {
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -1964,7 +1965,8 @@
           },
           "maxItems": 3,
           "title": "Attachments",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "claimantName": {
           "maxLength": 512,
@@ -2077,7 +2079,8 @@
           "maxItems": 3,
           "minItems": 3,
           "title": "Attachments",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "claimantName": {
           "maxLength": 512,
@@ -2162,7 +2165,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2573,7 +2576,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2666,7 +2669,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -2801,7 +2804,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3049,7 +3052,7 @@
           "$ref": "#/$defs/ToolInvocationArguments"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3130,7 +3133,7 @@
           "type": "boolean"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3180,7 +3183,7 @@
           "type": "boolean"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3252,7 +3255,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3340,7 +3343,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         }
@@ -3496,6 +3499,7 @@
         "actualAttachmentCount": {
           "anyOf": [
             {
+              "maximum": 3,
               "minimum": 0,
               "type": "integer"
             },
@@ -3504,6 +3508,25 @@
             }
           ],
           "title": "Actualattachmentcount"
+        },
+        "actualAttachmentIds": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+                "type": "string"
+              },
+              "maxItems": 3,
+              "type": "array",
+              "uniqueItems": true
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actualattachmentids"
         },
         "deterministicMatch": {
           "anyOf": [
@@ -3520,6 +3543,19 @@
           "const": 3,
           "title": "Expectedattachmentcount",
           "type": "integer"
+        },
+        "expectedAttachmentIds": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Expectedattachmentids",
+          "type": "array",
+          "uniqueItems": true
         },
         "fieldResults": {
           "items": {
@@ -3558,7 +3594,9 @@
         "modelReportedMismatch",
         "fieldResults",
         "expectedAttachmentCount",
+        "expectedAttachmentIds",
         "actualAttachmentCount",
+        "actualAttachmentIds",
         "reviewAllowed",
         "verifiedAt"
       ],
@@ -3637,7 +3675,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3683,7 +3721,7 @@
           "type": "string"
         },
         "contractVersion": {
-          "const": "3.0.0",
+          "const": "4.0.0",
           "title": "Contractversion",
           "type": "string"
         },
@@ -3827,7 +3865,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -3893,7 +3931,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -3986,7 +4024,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4052,7 +4090,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4138,7 +4176,7 @@
               "$ref": "#/$defs/ClarificationView"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4224,7 +4262,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4333,7 +4371,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4442,7 +4480,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4551,7 +4589,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4633,7 +4671,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4722,7 +4760,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4822,7 +4860,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4888,7 +4926,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -4954,7 +4992,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -5043,7 +5081,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -5123,7 +5161,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -5212,7 +5250,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -5292,7 +5330,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -5381,7 +5419,7 @@
               "type": "null"
             },
             "contractVersion": {
-              "const": "3.0.0",
+              "const": "4.0.0",
               "title": "Contractversion",
               "type": "string"
             },
@@ -5436,7 +5474,7 @@
       "title": "WorkflowSnapshot"
     }
   },
-  "$id": "https://claimdone.local/contracts/3.0.0/claimdone.schema.json",
+  "$id": "https://claimdone.local/contracts/4.0.0/claimdone.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "JSON Schema 2020-12 catalog compatible with the OpenAPI 3.1 schema dialect.",
   "title": "ClaimDone canonical contracts",
@@ -5513,7 +5551,7 @@
       "review"
     ]
   },
-  "x-contract-version": "3.0.0",
+  "x-contract-version": "4.0.0",
   "x-root-models": {
     "AuditEvent": {
       "$ref": "#/$defs/AuditEvent"

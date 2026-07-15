@@ -10,7 +10,9 @@ from .base import (
     Confidence,
     ContractModel,
     ContractVersion,
+    ExactAttachmentIdentifier,
     ExactlyThree,
+    ExactlyThreeAttachmentIdentifiers,
     Identifier,
     JsonScalar,
     NonEmptyText,
@@ -18,6 +20,7 @@ from .base import (
     ShortText,
     StrictBoolean,
     StrictInteger,
+    UpToThreeAttachmentIdentifiers,
     WireAwareDatetime,
     WireDate,
     WireTime,
@@ -42,7 +45,6 @@ from .enums import (
 from .state_machine import InvalidCaseTransition, validate_case_transition
 
 NonEmptyIdentifiers = Annotated[tuple[Identifier, ...], Field(min_length=1)]
-ExactlyThreeIdentifiers = Annotated[tuple[Identifier, ...], Field(min_length=3, max_length=3)]
 REVIEW_GATE_SEQUENCE = (
     GateId.G0_INTAKE,
     GateId.G1_PRIVACY,
@@ -77,7 +79,7 @@ class EvidenceItem(ContractModel):
 
     evidence_id: Identifier
     kind: EvidenceKind
-    local_ref: Identifier
+    local_ref: ExactAttachmentIdentifier
     media_type: Literal["image/jpeg", "image/png", "text/plain"]
     sha256: Sha256Digest
     text: NonEmptyText | None
@@ -162,7 +164,7 @@ class ClaimData(ContractModel):
     vehicle_registration: ShortText | None
     counterparty_known: CounterpartyKnown
     narrative: NonEmptyText | None
-    attachments: ExactlyThreeIdentifiers
+    attachments: ExactlyThreeAttachmentIdentifiers
     missing_required_fields: tuple[RequiredClaimField, ...]
     field_provenance: tuple[FieldProvenance, ...]
 
@@ -287,7 +289,9 @@ class VerificationReport(ContractModel):
     model_reported_mismatch: StrictBoolean
     field_results: tuple[VerificationFieldResult, ...]
     expected_attachment_count: ExactlyThree
-    actual_attachment_count: Annotated[StrictInteger, Field(ge=0)] | None
+    expected_attachment_ids: ExactlyThreeAttachmentIdentifiers
+    actual_attachment_count: Annotated[StrictInteger, Field(ge=0, le=3)] | None
+    actual_attachment_ids: UpToThreeAttachmentIdentifiers | None
     review_allowed: StrictBoolean
     verified_at: WireAwareDatetime | None
 
@@ -304,8 +308,20 @@ class VerificationReport(ContractModel):
         fields_match = fields_complete and all(
             result.status is VerificationFieldStatus.MATCH for result in self.field_results
         )
-        attachments_evaluated = self.actual_attachment_count is not None
-        attachments_match = self.actual_attachment_count == self.expected_attachment_count
+        if len(self.expected_attachment_ids) != self.expected_attachment_count:
+            raise ValueError("expectedAttachmentCount must equal expectedAttachmentIds length")
+        actual_count_present = self.actual_attachment_count is not None
+        actual_ids_present = self.actual_attachment_ids is not None
+        if actual_count_present is not actual_ids_present:
+            raise ValueError("actualAttachmentCount and actualAttachmentIds must be jointly set")
+        if (
+            self.actual_attachment_count is not None
+            and self.actual_attachment_ids is not None
+            and self.actual_attachment_count != len(self.actual_attachment_ids)
+        ):
+            raise ValueError("actualAttachmentCount must equal actualAttachmentIds length")
+        attachments_evaluated = actual_ids_present
+        attachments_match = self.actual_attachment_ids == self.expected_attachment_ids
         attachment_mismatch = attachments_evaluated and not attachments_match
         deterministic_inputs_complete = fields_complete and attachments_evaluated
         if deterministic_inputs_complete:
@@ -337,6 +353,7 @@ class VerificationReport(ContractModel):
                 or self.verified_at is not None
                 or self.field_results
                 or self.actual_attachment_count is not None
+                or self.actual_attachment_ids is not None
                 or self.model_reported_mismatch
             ):
                 raise ValueError(
@@ -431,6 +448,11 @@ class ClaimPacket(ContractModel):
             raise ValueError("ClaimPacket requires exactly three image evidence items")
         if tuple(item.local_ref for item in images) != self.claim.attachments:
             raise ValueError("Claim attachments must exactly match the three image local refs")
+        if self.verification.expected_attachment_ids != self.claim.attachments:
+            raise ValueError(
+                "Verification expectedAttachmentIds must exactly match canonical "
+                "ClaimData attachments"
+            )
 
         provenance_ids = tuple(reference.provenance_id for reference in self.provenance)
         if len(set(provenance_ids)) != len(provenance_ids):
@@ -480,7 +502,7 @@ class ClaimPacket(ContractModel):
         }
         for result in self.verification.field_results:
             if result.field is RequiredClaimField.ATTACHMENTS:
-                raise ValueError("Attachments must be verified through attachment counts")
+                raise ValueError("Attachments must be verified through attachment IDs")
             canonical_value = canonical_claim_values[result.field]
             if (
                 type(result.expected) is not type(canonical_value)

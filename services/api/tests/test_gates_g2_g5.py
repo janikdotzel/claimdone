@@ -153,7 +153,9 @@ def incomplete_packet(
         "modelReportedMismatch": False,
         "fieldResults": [],
         "expectedAttachmentCount": 3,
+        "expectedAttachmentIds": data["claim"]["attachments"],
         "actualAttachmentCount": None,
+        "actualAttachmentIds": None,
         "reviewAllowed": False,
         "verifiedAt": None,
     }
@@ -222,8 +224,8 @@ def test_g2_accepts_only_strict_duplicate_free_json_and_exact_inventory() -> Non
     unknown = extraction_data()
     unknown["unknownField"] = True
     duplicate = extraction_payload().replace(
-        '"contractVersion": "3.0.0",',
-        '"contractVersion": "3.0.0", "contractVersion": "3.0.0",',
+        '"contractVersion": "4.0.0",',
+        '"contractVersion": "4.0.0", "contractVersion": "4.0.0",',
         1,
     )
     for payload in (json.dumps(unknown), duplicate, "[1, 2]", b"\xff"):

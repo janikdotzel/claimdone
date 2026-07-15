@@ -402,7 +402,7 @@ describe("clarification payload builder", () => {
       answer: "  2026-07-14\n",
       caseId: clarification.caseId,
       clarificationId: clarification.clarificationId,
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
       expectedVersion: clarification.expectedVersion,
       field: clarification.field,
       round: clarification.round,

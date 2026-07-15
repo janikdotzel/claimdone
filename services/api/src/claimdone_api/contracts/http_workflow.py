@@ -460,6 +460,15 @@ class WorkflowSnapshot(ContractModel):
                 raise ValueError(f"{state.value} cannot expose VerificationAttemptSeries")
             if self.claim_packet is None:
                 raise ValueError("VerificationAttemptSeries requires a bound ClaimPacket")
+            if any(
+                attempt.report.expected_attachment_ids
+                != self.claim_packet.claim.attachments
+                for attempt in self.verification_attempts.attempts
+            ):
+                raise ValueError(
+                    "Every verification attempt expectedAttachmentIds must match "
+                    "ClaimData attachments"
+                )
 
         if (
             self.portal_session is not None
@@ -472,6 +481,13 @@ class WorkflowSnapshot(ContractModel):
             if final_attempt.portal_version != self.portal_session.version:
                 raise ValueError(
                     "Final verification portalVersion must match portal session version"
+                )
+            if (
+                final_attempt.report.actual_attachment_ids
+                != self.portal_session.fields.attachments
+            ):
+                raise ValueError(
+                    "Final verification actualAttachmentIds must match rendered portal attachments"
                 )
 
         if state is CaseState.REVIEW:

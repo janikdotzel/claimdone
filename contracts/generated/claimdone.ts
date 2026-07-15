@@ -3,7 +3,7 @@
 /* eslint-disable */
 
 
-export const CONTRACT_VERSION = "3.0.0" as const;
+export const CONTRACT_VERSION = "4.0.0" as const;
 
 export const AGENT_CAN_SUBMIT = false as const;
 
@@ -15,7 +15,7 @@ export type AllowedTool = "inspect_evidence" | "check_required_fields" | "ask_cl
 export interface AuditEvent {
   readonly actor: ActorType;
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly details: readonly [];
   readonly eventId: string;
   readonly eventType: AuditEventType;
@@ -48,7 +48,7 @@ export interface ClaimData {
 export interface ClaimPacket {
   readonly caseId: string;
   readonly claim: ClaimData;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly evidence: ReadonlyArray<EvidenceItem>;
   readonly facts: ReadonlyArray<EvidenceFact>;
   readonly gateDecisions: ReadonlyArray<GateDecision>;
@@ -71,7 +71,7 @@ export interface ClarificationAnswerRequest {
   readonly answer: string;
   readonly caseId: string;
   readonly clarificationId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly expectedVersion: number;
   readonly field: RequiredClaimField;
   readonly round: 1 | 2 | 3;
@@ -82,7 +82,7 @@ export type ClarificationStatus = "requested" | "confirmed" | "exhausted";
 export interface ClarificationView {
   readonly caseId: string;
   readonly clarificationId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly expectedVersion: number;
   readonly field: RequiredClaimField;
   readonly question: string;
@@ -108,7 +108,7 @@ export interface DeterministicEvalExpectation {
 }
 
 export interface EvalCase {
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly evalId: string;
   readonly evaluationMode: EvaluationMode;
   readonly expectation: EvalExpectation;
@@ -121,7 +121,7 @@ export interface EvalCase {
 
 export interface EvalCaseResult {
   readonly checks: ReadonlyArray<EvalCheckResult>;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly deterministicPassed: boolean;
   readonly durationMs: number;
   readonly evalId: string;
@@ -132,7 +132,7 @@ export interface EvalCaseResult {
 }
 
 export interface EvalCheckResult {
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly failureCode: EvalFailureCode | null;
   readonly graderType: EvalGraderType;
   readonly metricId: EvalMetricId;
@@ -171,7 +171,7 @@ export interface EvalInput {
 }
 
 export interface EvalMetricAggregate {
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly denominator: number;
   readonly metricId: EvalMetricId;
   readonly numerator: number;
@@ -189,7 +189,7 @@ export interface EvalRunSummary {
   readonly caseResults: ReadonlyArray<EvalCaseResult>;
   readonly commitSha: string;
   readonly completedAt: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly datasetSha256: string;
   readonly datasetVersion: string;
   readonly deterministicPassed: boolean;
@@ -252,7 +252,7 @@ export interface FieldProvenance {
 }
 
 export interface GateDecision {
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly decidedAt: string;
   readonly deterministicPassed: boolean;
   readonly evidenceRefs: ReadonlyArray<string>;
@@ -350,7 +350,7 @@ export interface PortalReviewFields {
 export interface PortalSessionView {
   readonly auditCount?: number | null;
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly fields: PortalDraftFields;
   readonly state: "draft" | "review";
   readonly updatedAt: string;
@@ -421,7 +421,7 @@ export type ReleaseCheckId = "deterministic_tests" | "safety_evals" | "eval_thre
 
 export interface ReleaseDecision {
   readonly commitSha: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly deterministicChecks: ReadonlyArray<ReleaseCheck>;
   readonly deterministicPassed: boolean;
   readonly evaluatedAt: string;
@@ -436,7 +436,7 @@ export interface ReleaseDecision {
 
 export interface RenderedPortalSnapshot {
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly fields: PortalDraftFields;
   readonly renderedAt: string;
   readonly state: "review";
@@ -461,7 +461,7 @@ export interface SandboxReceipt {
   readonly approvalId: string;
   readonly approvedAt: string;
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly environment: "sandbox";
   readonly humanApproved: true;
   readonly receiptId: string;
@@ -495,7 +495,7 @@ export type ToolCallWorkflowEvent = { readonly invocationId: string; readonly ki
 
 export interface ToolInvocation {
   readonly arguments: ToolInvocationArguments;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly invocationId: string;
   readonly sequence: number;
   readonly tool: AllowedTool;
@@ -511,7 +511,7 @@ export interface ToolPlan {
 export interface TranscriptConfirmationRequest {
   readonly caseId: string;
   readonly confirmed: true;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly expectedVersion: number;
   readonly transcriptId: string;
   readonly transcriptSha256: string;
@@ -520,7 +520,7 @@ export interface TranscriptConfirmationRequest {
 export interface TranscriptConfirmationView {
   readonly caseId: string;
   readonly confirmed: false;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly text: string;
   readonly transcriptId: string;
   readonly transcriptSha256: string;
@@ -532,7 +532,7 @@ export interface VerificationAttempt {
   readonly attemptNumber: 1 | 2;
   readonly caseId: string;
   readonly caseState: "verifying";
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly final: boolean;
   readonly gateDecision: GateDecision | null;
   readonly portalVersion: number;
@@ -544,7 +544,7 @@ export interface VerificationAttempt {
 export interface VerificationAttemptSeries {
   readonly attempts: ReadonlyArray<VerificationAttempt>;
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
 }
 
 export interface VerificationFieldResult {
@@ -567,8 +567,10 @@ export interface VerificationRepairMetadata {
 
 export interface VerificationReport {
   readonly actualAttachmentCount: number | null;
+  readonly actualAttachmentIds: ReadonlyArray<string> | null;
   readonly deterministicMatch: boolean | null;
   readonly expectedAttachmentCount: 3;
+  readonly expectedAttachmentIds: readonly [string, string, string];
   readonly fieldResults: ReadonlyArray<VerificationFieldResult>;
   readonly modelReportedMismatch: boolean;
   readonly reviewAllowed: boolean;
@@ -590,7 +592,7 @@ export interface VerificationWorkflowEvent {
 
 export interface WorkflowCaseView {
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly createdAt: string;
   readonly state: CaseState;
   readonly updatedAt: string;
@@ -599,7 +601,7 @@ export interface WorkflowCaseView {
 
 export interface WorkflowEventEnvelope {
   readonly caseId: string;
-  readonly contractVersion: "3.0.0";
+  readonly contractVersion: "4.0.0";
   readonly cursor: number;
   readonly event: StateWorkflowEvent | GateWorkflowEvent | ClarificationWorkflowEvent | PlanStepWorkflowEvent | ToolCallWorkflowEvent | PortalFillWorkflowEvent | VerificationWorkflowEvent | RetryWorkflowEvent | OperationalFailureWorkflowEvent | ProviderCallWorkflowEvent;
   readonly eventId: string;
@@ -611,7 +613,7 @@ export interface WorkflowEventEnvelope {
 
 export type WorkflowOperation = "transcription" | "extraction" | "computer_use" | "verification";
 
-export type WorkflowSnapshot = { readonly case: WorkflowCaseView & { readonly state: "created"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "disclosed"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "analyzing"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "analyzing"; } | null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "awaiting_transcript_confirmation"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: TranscriptConfirmationView; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "awaiting_clarification"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "awaiting_clarification"; }; readonly clarification: ClarificationView; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "ready_to_fill"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "ready_to_fill"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView & { readonly state: "draft"; } | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "filling"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "filling"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView & { readonly state: "draft"; } | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "verifying"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "review"; readonly state: "verifying"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView & { readonly state: "review"; }; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "review"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "review"; readonly state: "review"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView & { readonly state: "review"; }; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries; } | { readonly case: WorkflowCaseView & { readonly state: "blocked"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "blocked"; }; readonly claimPacket: ClaimPacket & { readonly state: "blocked"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "human_approved"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "human_approved"; readonly state: "human_approved"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "receipt"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: null; readonly receipt: SandboxReceipt; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "emergency_stopped"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "emergency_stopped"; }; readonly claimPacket: ClaimPacket & { readonly state: "emergency_stopped"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "abandoned"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "abandoned"; }; readonly claimPacket: ClaimPacket & { readonly state: "abandoned"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "failed"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "failed"; }; readonly claimPacket: ClaimPacket & { readonly state: "failed"; }; readonly clarification: null; readonly contractVersion: "3.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; };
+export type WorkflowSnapshot = { readonly case: WorkflowCaseView & { readonly state: "created"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "disclosed"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "analyzing"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "analyzing"; } | null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "awaiting_transcript_confirmation"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: TranscriptConfirmationView; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "awaiting_clarification"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "awaiting_clarification"; }; readonly clarification: ClarificationView; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "ready_to_fill"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "ready_to_fill"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView & { readonly state: "draft"; } | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "filling"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "draft"; readonly state: "filling"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView & { readonly state: "draft"; } | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "verifying"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "review"; readonly state: "verifying"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView & { readonly state: "review"; }; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "review"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "review"; readonly state: "review"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView & { readonly state: "review"; }; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries; } | { readonly case: WorkflowCaseView & { readonly state: "blocked"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "blocked"; }; readonly claimPacket: ClaimPacket & { readonly state: "blocked"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "human_approved"; }; readonly claimPacket: ClaimPacket & { readonly portalState: "human_approved"; readonly state: "human_approved"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "receipt"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: null; readonly receipt: SandboxReceipt; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "emergency_stopped"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "emergency_stopped"; }; readonly claimPacket: ClaimPacket & { readonly state: "emergency_stopped"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "abandoned"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "abandoned"; }; readonly claimPacket: ClaimPacket & { readonly state: "abandoned"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; } | { readonly case: WorkflowCaseView & { readonly state: "failed"; }; readonly claimPacket: null; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: null; } | { readonly case: WorkflowCaseView & { readonly state: "failed"; }; readonly claimPacket: ClaimPacket & { readonly state: "failed"; }; readonly clarification: null; readonly contractVersion: "4.0.0"; readonly portalSession: PortalSessionView | null; readonly receipt: null; readonly requestId: string; readonly transcriptConfirmation: null; readonly verificationAttempts: VerificationAttemptSeries | null; };
 
 
 export const CONTRACT_ROOT_MODELS = [

@@ -95,10 +95,11 @@ class VerificationAttempt(ContractModel):
                 present_fields != expected_fields
                 or any(result.status is VerificationFieldStatus.MISSING for result in field_results)
                 or self.report.actual_attachment_count is None
+                or self.report.actual_attachment_ids is None
             )
             if (
-                self.report.actual_attachment_count is not None
-                and self.report.actual_attachment_count != self.report.expected_attachment_count
+                self.report.actual_attachment_ids is not None
+                and self.report.actual_attachment_ids != self.report.expected_attachment_ids
             ):
                 expected_reasons.append(GateReasonCode.G8_ATTACHMENT_MISMATCH)
             if required_missing:
@@ -136,7 +137,7 @@ class VerificationAttempt(ContractModel):
             raise ValueError("A repair requires deterministicMatch=false")
         if self.report.model_reported_mismatch:
             raise ValueError("A model-only signal cannot authorize a deterministic repair")
-        if self.report.actual_attachment_count != self.report.expected_attachment_count:
+        if self.report.actual_attachment_ids != self.report.expected_attachment_ids:
             raise ValueError("Attachment mismatch cannot be repaired through a scalar field")
         expected_fields = set(RequiredClaimField) - {RequiredClaimField.ATTACHMENTS}
         if {result.field for result in self.report.field_results} != expected_fields:
@@ -209,6 +210,8 @@ class VerificationAttemptSeries(ContractModel):
         if (
             first.report.expected_attachment_count != second.report.expected_attachment_count
             or first.report.actual_attachment_count != second.report.actual_attachment_count
+            or first.report.expected_attachment_ids != second.report.expected_attachment_ids
+            or first.report.actual_attachment_ids != second.report.actual_attachment_ids
         ):
             raise ValueError("Scalar repair cannot change attachment verification")
         return self

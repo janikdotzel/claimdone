@@ -1,4 +1,4 @@
-"""V3 closed HTTP workflow roots and cross-payload authority tests."""
+"""Closed HTTP workflow roots and cross-payload authority tests."""
 
 import json
 from copy import deepcopy
@@ -250,6 +250,7 @@ def test_workflow_case_view_is_closed_versioned_and_timestamp_ordered() -> None:
 
     for field, value in (
         ("version", True),
+        ("contractVersion", "3.0.0"),
         ("contractVersion", "2.1.0"),
         ("contractVersion", "2.0.0"),
     ):
@@ -361,6 +362,7 @@ def test_clarification_answer_preserves_exact_whitespace_and_is_fully_bound() ->
         ("answer", True),
         ("round", True),
         ("expectedVersion", True),
+        ("contractVersion", "3.0.0"),
         ("contractVersion", "2.1.0"),
         ("contractVersion", "2.0.0"),
     ):
@@ -387,6 +389,34 @@ def test_verifying_snapshot_may_have_portal_review_without_completed_series() ->
     assert snapshot.verification_attempts is None
 
 
+def test_verification_attempt_attachment_ids_bind_to_packet_and_rendered_portal() -> None:
+    wrong_expected = snapshot_data("verifying")
+    wrong_expected["claimPacket"] = packet_for_state("verifying")
+    wrong_expected["portalSession"] = portal_data()
+    wrong_expected["verificationAttempts"] = verification_series_data()
+    report = wrong_expected["verificationAttempts"]["attempts"][0]["report"]
+    replacement = ["alternate-ref-1", "alternate-ref-2", "alternate-ref-3"]
+    report["expectedAttachmentIds"] = replacement
+    report["actualAttachmentIds"] = replacement
+    wrong_expected["portalSession"]["fields"]["attachments"] = replacement
+
+    with pytest.raises(ValidationError, match="expectedAttachmentIds must match"):
+        WorkflowSnapshot.model_validate(wrong_expected)
+
+    wrong_actual = snapshot_data("verifying")
+    wrong_actual["claimPacket"] = packet_for_state("verifying")
+    wrong_actual["portalSession"] = portal_data()
+    wrong_actual["verificationAttempts"] = verification_series_data()
+    wrong_actual["portalSession"]["fields"]["attachments"] = [
+        "local-ref-2",
+        "local-ref-1",
+        "local-ref-3",
+    ]
+
+    with pytest.raises(ValidationError, match="actualAttachmentIds must match"):
+        WorkflowSnapshot.model_validate(wrong_actual)
+
+
 def test_review_requires_bound_packet_portal_and_final_successful_g8() -> None:
     valid = WorkflowSnapshot.model_validate(review_snapshot_data())
     assert valid.case.state == "review"
@@ -411,19 +441,24 @@ def test_review_requires_bound_packet_portal_and_final_successful_g8() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "error"),
     [
-        ("location", "Berln"),
-        ("attachments", ["local-ref-1", "local-ref-2", "wrong-ref"]),
+        ("location", "Berln", "exact portal values"),
+        (
+            "attachments",
+            ["local-ref-1", "local-ref-2", "wrong-ref"],
+            "actualAttachmentIds must match",
+        ),
     ],
 )
 def test_review_rejects_portal_values_not_exactly_equal_to_packet(
     field: str,
     value: object,
+    error: str,
 ) -> None:
     unsafe = review_snapshot_data()
     unsafe["portalSession"]["fields"][field] = value
-    with pytest.raises(ValidationError, match="exact portal values"):
+    with pytest.raises(ValidationError, match=error):
         WorkflowSnapshot.model_validate(unsafe)
 
 
@@ -452,7 +487,7 @@ def test_review_rejects_nested_case_state_and_version_mismatch(mutation: str) ->
     elif mutation == "portal_version":
         unsafe["portalSession"]["version"] = 4
     elif mutation == "nested_contract_version":
-        unsafe["claimPacket"]["contractVersion"] = "2.1.0"
+        unsafe["claimPacket"]["contractVersion"] = "3.0.0"
     else:  # pragma: no cover - parameter table is exhaustive
         raise AssertionError(mutation)
     with pytest.raises(ValidationError):
@@ -572,7 +607,7 @@ def test_workflow_snapshot_is_closed_and_rejects_bool_case_version() -> None:
     with pytest.raises(ValidationError):
         WorkflowSnapshot.model_validate(unsafe)
 
-    for old_version in ("2.1.0", "2.0.0", "1.0.0"):
+    for old_version in ("3.0.0", "2.1.0", "2.0.0", "1.0.0"):
         old = snapshot_data("created")
         old["contractVersion"] = old_version
         with pytest.raises(ValidationError):

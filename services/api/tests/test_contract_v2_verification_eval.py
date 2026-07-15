@@ -49,6 +49,7 @@ def mismatch_report(
             "status": "mismatch",
             "deterministicMatch": False,
             "actualAttachmentCount": attachment_count,
+            "actualAttachmentIds": report["expectedAttachmentIds"][:attachment_count],
             "reviewAllowed": False,
         }
     )
@@ -225,6 +226,78 @@ def test_partial_or_third_repair_and_changed_attachments_are_impossible() -> Non
                     first,
                     VerificationAttempt.model_validate(changed_attachments),
                 ],
+            }
+        )
+
+
+def test_same_count_wrong_attachment_ids_block_g8_and_scalar_repair() -> None:
+    wrong_ids = ["wrong-ref-1", "wrong-ref-2", "wrong-ref-3"]
+    repairable = repairable_attempt_data()
+    repairable["report"]["actualAttachmentIds"] = wrong_ids
+
+    with pytest.raises(ValidationError, match="Attachment mismatch cannot be repaired"):
+        VerificationAttempt.model_validate(repairable)
+
+    final = passing_attempt_data()
+    final["report"].update(
+        {
+            "status": "mismatch",
+            "deterministicMatch": False,
+            "actualAttachmentIds": wrong_ids,
+            "reviewAllowed": False,
+        }
+    )
+    final["gateDecision"] = make_gate_decision(
+        GateId.G8_VERIFICATION,
+        deterministic_reasons=(GateReasonCode.G8_ATTACHMENT_MISMATCH,),
+        decided_at=datetime(2026, 7, 14, 12, 0, 11, tzinfo=UTC),
+    )
+
+    attempt = VerificationAttempt.model_validate(final)
+
+    assert attempt.gate_decision is not None
+    assert attempt.gate_decision.reason_codes == (
+        GateReasonCode.G8_ATTACHMENT_MISMATCH,
+    )
+
+
+def test_short_non_null_attachment_ids_are_mismatch_not_required_missing() -> None:
+    final = passing_attempt_data()
+    final["report"].update(
+        {
+            "status": "mismatch",
+            "deterministicMatch": False,
+            "actualAttachmentCount": 2,
+            "actualAttachmentIds": final["report"]["expectedAttachmentIds"][:2],
+            "reviewAllowed": False,
+        }
+    )
+    final["gateDecision"] = make_gate_decision(
+        GateId.G8_VERIFICATION,
+        deterministic_reasons=(GateReasonCode.G8_ATTACHMENT_MISMATCH,),
+        decided_at=datetime(2026, 7, 14, 12, 0, 11, tzinfo=UTC),
+    )
+
+    attempt = VerificationAttempt.model_validate(final)
+
+    assert attempt.gate_decision is not None
+    assert GateReasonCode.G8_REQUIRED_FIELD_MISSING not in attempt.gate_decision.reason_codes
+
+
+def test_repair_series_preserves_exact_expected_and_actual_attachment_ids() -> None:
+    first = VerificationAttempt.model_validate(repairable_attempt_data())
+    changed_ids = repaired_attempt_data()
+    replacement = ["alternate-ref-1", "alternate-ref-2", "alternate-ref-3"]
+    changed_ids["report"]["expectedAttachmentIds"] = replacement
+    changed_ids["report"]["actualAttachmentIds"] = replacement
+    second = VerificationAttempt.model_validate(changed_ids)
+
+    with pytest.raises(ValidationError, match="cannot change attachment verification"):
+        VerificationAttemptSeries.model_validate(
+            {
+                "contractVersion": CONTRACT_VERSION,
+                "caseId": first.case_id,
+                "attempts": [first, second],
             }
         )
 

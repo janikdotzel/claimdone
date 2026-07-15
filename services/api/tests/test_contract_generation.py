@@ -94,7 +94,49 @@ def test_exact_three_attachments_render_as_readonly_tuple() -> None:
 
     assert attachment_schema["minItems"] == 3
     assert attachment_schema["maxItems"] == 3
+    assert attachment_schema["uniqueItems"] is True
+    assert committed_schema()["$defs"]["EvidenceItem"]["properties"]["localRef"][
+        "pattern"
+    ] == "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
     assert "readonly attachments: readonly [string, string, string];" in typescript
+
+
+def test_verification_attachment_identity_schema_has_v4_bounds_and_required_fields() -> None:
+    report = committed_schema()["$defs"]["VerificationReport"]
+    properties = report["properties"]
+    typescript = TYPESCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert properties["expectedAttachmentIds"]["minItems"] == 3
+    assert properties["expectedAttachmentIds"]["maxItems"] == 3
+    assert properties["expectedAttachmentIds"]["uniqueItems"] is True
+    actual_ids = properties["actualAttachmentIds"]["anyOf"][0]
+    assert actual_ids["maxItems"] == 3
+    assert actual_ids["uniqueItems"] is True
+    actual_count = properties["actualAttachmentCount"]["anyOf"][0]
+    assert actual_count["minimum"] == 0
+    assert actual_count["maximum"] == 3
+    assert {
+        "expectedAttachmentCount",
+        "expectedAttachmentIds",
+        "actualAttachmentCount",
+        "actualAttachmentIds",
+    }.issubset(report["required"])
+    assert (
+        "readonly expectedAttachmentIds: readonly [string, string, string];"
+        in typescript
+    )
+    assert "readonly actualAttachmentIds: ReadonlyArray<string> | null;" in typescript
+
+
+def test_portal_attachment_schemas_require_unique_ids() -> None:
+    definitions = committed_schema()["$defs"]
+
+    assert definitions["PortalDraftFields"]["properties"]["attachments"][
+        "uniqueItems"
+    ] is True
+    assert definitions["PortalReviewFields"]["properties"]["attachments"][
+        "uniqueItems"
+    ] is True
 
 
 def test_generated_transition_map_covers_every_case_state() -> None:

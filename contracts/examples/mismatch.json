@@ -1,5 +1,5 @@
 {
-  "contractVersion": "3.0.0",
+  "contractVersion": "4.0.0",
   "caseId": "case-mismatch-001",
   "state": "blocked",
   "portalState": "review",
@@ -60,7 +60,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "3.0.0",
+      "contractVersion": "4.0.0",
       "gateId": "G8",
       "deterministicPassed": false,
       "modelBlocked": false,
@@ -78,7 +78,17 @@
       {"field": "location", "expected": "Berlin", "actual": "Berln", "status": "mismatch", "sourceRefs": ["prov-statement"]}
     ],
     "expectedAttachmentCount": 3,
+    "expectedAttachmentIds": [
+      "mismatch-ref-1",
+      "mismatch-ref-2",
+      "mismatch-ref-3"
+    ],
     "actualAttachmentCount": 3,
+    "actualAttachmentIds": [
+      "mismatch-ref-1",
+      "mismatch-ref-2",
+      "mismatch-ref-3"
+    ],
     "reviewAllowed": false,
     "verifiedAt": "2026-07-14T12:20:00Z"
   }

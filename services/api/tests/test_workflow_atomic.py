@@ -499,7 +499,9 @@ def _packet(
         "modelReportedMismatch": False,
         "fieldResults": (),
         "expectedAttachmentCount": 3,
+        "expectedAttachmentIds": claim_values["attachments"],
         "actualAttachmentCount": None,
+        "actualAttachmentIds": None,
         "reviewAllowed": False,
         "verifiedAt": None,
     }

@@ -9,6 +9,7 @@ from datetime import date, datetime, time
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     BeforeValidator,
@@ -21,17 +22,46 @@ from pydantic import (
     StringConstraints,
 )
 
-CONTRACT_VERSION = "3.0.0"
-ContractVersion: TypeAlias = Literal["3.0.0"]
+CONTRACT_VERSION = "4.0.0"
+ContractVersion: TypeAlias = Literal["4.0.0"]
 
+_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 Identifier: TypeAlias = Annotated[
     StrictStr,
     StringConstraints(
         min_length=1,
         max_length=128,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        pattern=_IDENTIFIER_PATTERN.pattern,
         strip_whitespace=True,
     ),
+]
+
+
+def _require_exact_attachment_identifier(value: object) -> object:
+    if type(value) is not str or _IDENTIFIER_PATTERN.fullmatch(value) is None:
+        raise ValueError("attachment identifier must already use the exact wire format")
+    return value
+
+
+def _require_unique_attachment_identifiers(value: tuple[str, ...]) -> tuple[str, ...]:
+    if len(set(value)) != len(value):
+        raise ValueError("attachment identifiers must be unique")
+    return value
+
+
+ExactAttachmentIdentifier: TypeAlias = Annotated[
+    Identifier,
+    BeforeValidator(_require_exact_attachment_identifier),
+]
+ExactlyThreeAttachmentIdentifiers: TypeAlias = Annotated[
+    tuple[ExactAttachmentIdentifier, ...],
+    Field(min_length=3, max_length=3, json_schema_extra={"uniqueItems": True}),
+    AfterValidator(_require_unique_attachment_identifiers),
+]
+UpToThreeAttachmentIdentifiers: TypeAlias = Annotated[
+    tuple[ExactAttachmentIdentifier, ...],
+    Field(max_length=3, json_schema_extra={"uniqueItems": True}),
+    AfterValidator(_require_unique_attachment_identifiers),
 ]
 NonEmptyText: TypeAlias = Annotated[
     StrictStr,

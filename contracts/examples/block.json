@@ -1,5 +1,5 @@
 {
-  "contractVersion": "3.0.0",
+  "contractVersion": "4.0.0",
   "caseId": "case-block-001",
   "state": "emergency_stopped",
   "portalState": "draft",
@@ -48,7 +48,7 @@
   },
   "gateDecisions": [
     {
-      "contractVersion": "3.0.0",
+      "contractVersion": "4.0.0",
       "gateId": "G3",
       "deterministicPassed": false,
       "modelBlocked": false,
@@ -64,7 +64,13 @@
     "modelReportedMismatch": false,
     "fieldResults": [],
     "expectedAttachmentCount": 3,
+    "expectedAttachmentIds": [
+      "block-ref-1",
+      "block-ref-2",
+      "block-ref-3"
+    ],
     "actualAttachmentCount": null,
+    "actualAttachmentIds": null,
     "reviewAllowed": false,
     "verifiedAt": "2026-07-14T12:10:00Z"
   }

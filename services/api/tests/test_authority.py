@@ -107,7 +107,9 @@ def _packet(case_id: str, state: CaseState) -> ClaimPacket:
             "modelReportedMismatch": False,
             "fieldResults": [],
             "expectedAttachmentCount": 3,
+            "expectedAttachmentIds": data["claim"]["attachments"],
             "actualAttachmentCount": None,
+            "actualAttachmentIds": None,
             "reviewAllowed": False,
             "verifiedAt": None,
         }
@@ -316,7 +318,9 @@ def _verified_report(packet: ClaimPacket, *, verified_at: datetime) -> dict[str,
         "modelReportedMismatch": False,
         "fieldResults": fields,
         "expectedAttachmentCount": 3,
+        "expectedAttachmentIds": packet.claim.attachments,
         "actualAttachmentCount": 3,
+        "actualAttachmentIds": packet.claim.attachments,
         "reviewAllowed": True,
         "verifiedAt": verified_at,
     }
@@ -726,7 +730,7 @@ def test_human_approval_consumes_once_and_returns_only_a_redacted_receipt(
     approved_at = consumed_at + timedelta(microseconds=1)
     rendered_at = approved_at + timedelta(microseconds=1)
     assert receipt == {
-        "contractVersion": "3.0.0",
+        "contractVersion": "4.0.0",
         "receiptId": "receipt-auth-test",
         "caseId": review.case_id,
         "approvalId": "approval-a-test",

@@ -83,7 +83,7 @@ function awaitingResponse(): AwaitingClarificationResponse {
     draftRevision: 4,
     gateHistory: (["G0", "G1", "G2", "G3", "G4", "G5"] as const).map(
       (gateId) => ({
-        contractVersion: "3.0.0" as const,
+        contractVersion: "4.0.0" as const,
         decidedAt: "2026-07-14T12:00:01Z",
         deterministicPassed: gateId !== "G5",
         evidenceRefs: [],

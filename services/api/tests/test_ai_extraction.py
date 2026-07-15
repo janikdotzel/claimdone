@@ -330,7 +330,7 @@ def test_extraction_uses_exact_multimodal_structured_call_and_passes_g2() -> Non
     result = runner(client, [10.0, 10.02]).run(request, call_sequence_start=7)
 
     assert isinstance(result, ExtractionSuccess)
-    assert CONTRACT_VERSION == "3.0.0"
+    assert CONTRACT_VERSION == "4.0.0"
     assert result.extraction == expected
     assert result.g2_run.final_result is not None
     assert result.g2_run.final_result.decision.passed

@@ -42,8 +42,10 @@ const SAFE_FILL_PLAN = {
 
 const PENDING_VERIFICATION = {
   actualAttachmentCount: null,
+  actualAttachmentIds: null,
   deterministicMatch: null,
   expectedAttachmentCount: 3,
+  expectedAttachmentIds: ["local-ref-1", "local-ref-2", "local-ref-3"],
   fieldResults: [],
   modelReportedMismatch: false,
   reviewAllowed: false,
@@ -83,7 +85,7 @@ function packetForState(state: CaseState) {
       gateDecisions: [
         ...packet.gateDecisions.slice(0, 5),
         {
-          contractVersion: "3.0.0",
+          contractVersion: "4.0.0",
           decidedAt: "2026-07-14T12:00:05Z",
           deterministicPassed: false,
           evidenceRefs: ["prov-statement"],
@@ -112,7 +114,7 @@ function packetForState(state: CaseState) {
 function caseView(state: CaseState, version = 7) {
   return {
     caseId: CASE_ID,
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     createdAt: CREATED_AT,
     state,
     updatedAt: UPDATED_AT,
@@ -125,7 +127,7 @@ function baseSnapshot(state: CaseState, version = 7) {
     case: caseView(state, version),
     claimPacket: null,
     clarification: null,
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     portalSession: null,
     receipt: null,
     requestId: `request-${state.replaceAll("_", "-")}`,
@@ -139,7 +141,7 @@ function portalReview() {
   return {
     auditCount: 4,
     caseId: CASE_ID,
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     fields: {
       attachments: [...claim.attachments],
       claimantName: claim.claimantName,
@@ -166,7 +168,7 @@ function verificationAttempts() {
         attemptNumber: 1,
         caseId: CASE_ID,
         caseState: "verifying",
-        contractVersion: "3.0.0",
+        contractVersion: "4.0.0",
         final: true,
         gateDecision:
           canonicalHappyPath.gateDecisions.find((decision) => decision.gateId === "G8") ??
@@ -178,7 +180,7 @@ function verificationAttempts() {
       },
     ],
     caseId: CASE_ID,
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
   };
 }
 
@@ -194,7 +196,7 @@ export const CLARIFICATION_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
     clarification: {
       caseId: CASE_ID,
       clarificationId: "clarification-001",
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
       expectedVersion: 7,
       field: "incident_date",
       question: "What was the date of the staged demo incident?",
@@ -253,7 +255,7 @@ export const EMERGENCY_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
       gateDecisions: [
         ...canonicalHappyPath.gateDecisions.slice(0, 3),
         {
-          contractVersion: "3.0.0",
+          contractVersion: "4.0.0",
           decidedAt: "2026-07-14T12:00:03Z",
           deterministicPassed: false,
           evidenceRefs: ["prov-statement"],
@@ -289,7 +291,7 @@ function mismatchReport() {
 
 function failedG8() {
   return {
-    contractVersion: "3.0.0",
+    contractVersion: "4.0.0",
     decidedAt: "2026-07-14T12:00:08Z",
     deterministicPassed: false,
     evidenceRefs: ["prov-statement"],
@@ -316,7 +318,7 @@ export const REPAIR_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
           attemptNumber: 1,
           caseId: CASE_ID,
           caseState: "verifying",
-          contractVersion: "3.0.0",
+          contractVersion: "4.0.0",
           final: false,
           gateDecision: null,
           portalVersion: 3,
@@ -335,7 +337,7 @@ export const REPAIR_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
           attemptNumber: 2,
           caseId: CASE_ID,
           caseState: "verifying",
-          contractVersion: "3.0.0",
+          contractVersion: "4.0.0",
           final: true,
           gateDecision:
             canonicalHappyPath.gateDecisions.find((decision) => decision.gateId === "G8") ??
@@ -347,7 +349,7 @@ export const REPAIR_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
         },
       ],
       caseId: CASE_ID,
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
     },
   },
   CASE_ID,
@@ -376,7 +378,7 @@ export const G8_BLOCKED_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
           attemptNumber: 1,
           caseId: CASE_ID,
           caseState: "verifying",
-          contractVersion: "3.0.0",
+          contractVersion: "4.0.0",
           final: true,
           gateDecision: failedG8(),
           portalVersion: 3,
@@ -386,7 +388,7 @@ export const G8_BLOCKED_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
         },
       ],
       caseId: CASE_ID,
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
     },
   },
   CASE_ID,
@@ -399,7 +401,7 @@ export const RECEIPT_SNAPSHOT: WorkflowSnapshot = parseWorkflowSnapshot(
       approvalId: "approval-001",
       approvedAt: "2026-07-14T12:00:25Z",
       caseId: CASE_ID,
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
       environment: "sandbox",
       humanApproved: true,
       receiptId: "receipt-001",
@@ -429,7 +431,7 @@ function eventEnvelope(
   return parseWorkflowEventEnvelope(
     {
       caseId: CASE_ID,
-      contractVersion: "3.0.0",
+      contractVersion: "4.0.0",
       cursor,
       event,
       eventId: `workflow-event-${cursor}`,

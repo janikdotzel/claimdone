@@ -1,6 +1,6 @@
 # ClaimDone canonical contracts
 
-Contract version: **3.0.0**
+Contract version: **4.0.0**
 
 The Pydantic models in
 `services/api/src/claimdone_api/contracts/` are the only canonical Python
@@ -117,8 +117,14 @@ future independent evaluation surfaces, not workflow telemetry.
 Portal drafts preserve bounded raw controls, while review values and rendered
 verification snapshots remain separate contracts. Receipt projection is only
 the closed, redacted `SandboxReceipt`; a portal session cannot expose claim
-fields in receipt state. Verification permits at most one evidence-linked
-scalar repair and only a final attempt may emit G8.
+fields in receipt state. Verification compares the exact ordered attachment
+IDs as well as redundant attachment counts. The expected IDs remain bound to
+`ClaimData.attachments`; actual IDs remain bound to the freshly rendered portal
+values. A same-count wrong or reordered list therefore fails G8. Verification
+permits at most one evidence-linked scalar repair, attachment identity cannot
+change during that repair, and only a final attempt may emit G8. Attachment IDs
+are exact raw wire values and unique within every attachment list, so whitespace
+normalization or repeating one physical reference cannot satisfy multiple slots.
 
 Eval result roots bind runs to a dataset SHA-256 and Git commit, require every
 closed metric aggregate, derive those aggregates from case checks, and require
@@ -147,13 +153,20 @@ generated schema and TypeScript artifact in the same integration commit.
 
 Version 2.0.0 was the major boundary that added case states and enum values,
 tightened gate authority, closed persisted details/tool arguments, and added
-new validation invariants. Version 3.0.0 is the next major authority boundary:
-it adds the canonical HTTP workflow roots and intentionally invalidates older
-transcript and telemetry roots through required case identity, state-matrix,
-provider-binding, and duration rules. Every root carries the exact `3.0.0`
-literal. Persisted 1.x or 2.x payloads are neither accepted nor relabelled as
-v3; persistence integration must make any reset or real migration policy
-explicit before older payloads are read.
+new validation invariants. Version 3.0.0 added the canonical HTTP workflow
+roots and intentionally invalidated older transcript and telemetry roots
+through required case identity, state-matrix, provider-binding, and duration
+rules.
+
+Version 4.0.0 is the attachment-identity authority boundary. Verification
+reports now require ordered `expectedAttachmentIds` and nullable ordered
+`actualAttachmentIds`; their redundant counts must be jointly present and
+equal the corresponding list lengths. Exact ID equality controls deterministic
+verification, G8, and repair eligibility. Every root carries the exact `4.0.0`
+literal. Persisted 1.x, 2.x, or 3.x payloads are neither accepted nor relabelled
+as v4. This contract wave does not add a persistence migration: integration
+must explicitly choose a safe local reset or a real validated migration before
+older payloads are read.
 
 ## Examples
 

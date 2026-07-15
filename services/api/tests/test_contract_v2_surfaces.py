@@ -52,6 +52,20 @@ def empty_draft() -> dict[str, object]:
     }
 
 
+def complete_portal_fields() -> dict[str, object]:
+    return {
+        "incidentDate": "2026-07-14",
+        "incidentTime": "14:30:00Z",
+        "location": "Berlin",
+        "claimantName": "Ada Lovelace",
+        "policyReference": "POL-001",
+        "vehicleRegistration": "B-CD-101",
+        "counterpartyKnown": "yes",
+        "narrative": "Synthetic staged collision narrative.",
+        "attachments": ["asset-1", "asset-2", "asset-3"],
+    }
+
+
 def clarification_envelope(cursor: int = 1) -> dict[str, Any]:
     return {
         "contractVersion": CONTRACT_VERSION,
@@ -161,6 +175,53 @@ def test_portal_draft_preserves_empty_raw_controls_but_review_fields_are_complet
 
     with pytest.raises(ValidationError):
         PortalReviewFields.model_validate(empty_draft())
+
+
+@pytest.mark.parametrize("model", [PortalDraftFields, PortalReviewFields])
+@pytest.mark.parametrize(
+    ("attachments", "error"),
+    [
+        ([" asset-1", "asset-2", "asset-3"], "exact wire format"),
+        (["asset-1", "asset-1", "asset-3"], "must be unique"),
+    ],
+)
+def test_portal_attachment_ids_are_exact_and_unique(
+    model: type[PortalDraftFields] | type[PortalReviewFields],
+    attachments: list[str],
+    error: str,
+) -> None:
+    fields = complete_portal_fields()
+    fields["attachments"] = attachments
+
+    with pytest.raises(ValidationError, match=error):
+        model.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    "attachments",
+    [
+        [" asset-1", "asset-2", "asset-3"],
+        ["asset-1", "asset-1", "asset-3"],
+    ],
+)
+def test_rendered_portal_snapshot_rejects_noncanonical_attachment_ids(
+    attachments: list[str],
+) -> None:
+    fields = complete_portal_fields()
+    fields["attachments"] = attachments
+
+    with pytest.raises(ValidationError):
+        RenderedPortalSnapshot.model_validate(
+            {
+                "contractVersion": CONTRACT_VERSION,
+                "caseId": "case-1",
+                "variant": "A",
+                "state": "review",
+                "version": 4,
+                "fields": fields,
+                "renderedAt": NOW,
+            }
+        )
 
 
 def test_receipt_has_only_redacted_summary_and_session_cannot_project_receipt() -> None:
