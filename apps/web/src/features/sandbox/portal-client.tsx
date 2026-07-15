@@ -245,9 +245,24 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
         <div className={styles.errorPanel} role="alert">
           <h2>Portal unavailable</h2>
           <p>{globalError}</p>
-          <button className={styles.primaryButton} onClick={() => void load()} type="button">
-            Try again
-          </button>
+          <div className={styles.formActions}>
+            <button
+              className={styles.primaryButton}
+              disabled={busy}
+              onClick={() => void resetFixture()}
+              type="button"
+            >
+              {busy ? "Creating…" : "Create deterministic fixture"}
+            </button>
+            <button
+              className={styles.secondaryButton}
+              disabled={busy}
+              onClick={() => void load()}
+              type="button"
+            >
+              Try read again
+            </button>
+          </div>
         </div>
       </PortalFrame>
     );

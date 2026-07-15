@@ -17,15 +17,17 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.types import Message, Scope
 
-from claimdone_api.contracts import WorkflowSnapshot
+from claimdone_api.contracts import (
+    CONTRACT_VERSION,
+    PortalDraftFields,
+    RenderedPortalSnapshot,
+    WorkflowSnapshot,
+)
 from claimdone_api.main import ApiSettings, create_app
 from claimdone_api.media import MAX_IMAGE_WIDTH, MAX_TEXT_BYTES
 from claimdone_api.persistence import SqliteCaseRepository
 from claimdone_api.walking_skeleton.body_limit import RequestBodyLimitMiddleware
-from claimdone_api.walking_skeleton.models import (
-    PortalDraftFields,
-    RenderedPortalValues,
-)
+from claimdone_api.walking_skeleton.errors import PortalUnavailableError
 from claimdone_api.walking_skeleton.portal import HttpPortalPort
 
 WEB_ORIGIN = "http://127.0.0.1:3000"
@@ -40,16 +42,19 @@ class HttpTestPortal:
         self,
         case_id: str,
         fields: PortalDraftFields,
-    ) -> tuple[str, RenderedPortalValues]:
+    ) -> tuple[str, RenderedPortalSnapshot]:
         self.calls += 1
         return (
             f"{WEB_ORIGIN}/sandbox/A/cases/{case_id}",
-            RenderedPortalValues.model_validate(
+            RenderedPortalSnapshot.model_validate(
                 {
                     "caseId": case_id,
+                    "contractVersion": CONTRACT_VERSION,
                     "state": "review",
                     "fields": fields.model_dump(mode="json", by_alias=True),
                     "renderedAt": "2026-07-14T12:00:00Z",
+                    "variant": "A",
+                    "version": 3,
                 },
                 strict=False,
             ),
@@ -567,24 +572,13 @@ def test_malformed_and_duplicate_content_length_are_blocked_before_app() -> None
 
 
 def test_http_portal_adapter_uses_narrow_fill_and_idempotent_delete_routes() -> None:
-    fields = PortalDraftFields.model_validate(
-        {
-            "incidentDate": "2026-07-14",
-            "incidentTime": "14:30:00",
-            "location": "Demo Street 1, Berlin",
-            "claimantName": "Demo Claimant",
-            "policyReference": "DEMO-POLICY-001",
-            "vehicleRegistration": "DEMO-CD-1",
-            "counterpartyKnown": "yes",
-            "narrative": "A staged second vehicle contacted the rear of the demo vehicle.",
-            "attachments": ("model-a.jpg", "model-b.png", "model-c.jpg"),
-        }
-    )
+    fields = _adapter_fields()
     calls: list[tuple[str, str]] = []
 
     def portal_view(*, state: str, version: int) -> dict[str, object]:
         return {
             "caseId": "case-adapter-001",
+            "contractVersion": CONTRACT_VERSION,
             "variant": "A",
             "state": state,
             "version": version,
@@ -623,9 +617,12 @@ def test_http_portal_adapter_uses_narrow_fill_and_idempotent_delete_routes() -> 
                 200,
                 json={
                     "caseId": "case-adapter-001",
+                    "contractVersion": CONTRACT_VERSION,
                     "state": "review",
                     "fields": fields.model_dump(mode="json", by_alias=True),
                     "renderedAt": "2026-07-14T12:00:01Z",
+                    "variant": "A",
+                    "version": 3,
                 },
             )
         assert index in {5, 6}
@@ -646,7 +643,99 @@ def test_http_portal_adapter_uses_narrow_fill_and_idempotent_delete_routes() -> 
 
     assert review_url == f"{WEB_ORIGIN}/sandbox/A/cases/case-adapter-001"
     assert rendered.fields == fields
+    assert rendered.case_id == "case-adapter-001"
+    assert rendered.variant.value == "A"
+    assert rendered.version == 3
     assert len(calls) == 6
+
+
+@pytest.mark.parametrize(
+    ("stage", "field", "value"),
+    (
+        ("reset", "caseId", "case-other-001"),
+        ("reset", "variant", "B"),
+        ("reset", "version", 2),
+        ("saved", "caseId", "case-other-001"),
+        ("saved", "variant", "B"),
+        ("saved", "version", 3),
+        ("reviewed", "caseId", "case-other-001"),
+        ("reviewed", "variant", "B"),
+        ("reviewed", "version", 4),
+        ("rendered", "caseId", "case-other-001"),
+        ("rendered", "variant", "B"),
+        ("rendered", "version", 4),
+    ),
+)
+def test_http_portal_adapter_rejects_cross_case_variant_and_version_reads(
+    stage: str,
+    field: str,
+    value: object,
+) -> None:
+    fields = _adapter_fields()
+    call_count = 0
+
+    def session_body(state: str, version: int) -> dict[str, object]:
+        return {
+            "auditCount": version,
+            "caseId": "case-adapter-001",
+            "contractVersion": CONTRACT_VERSION,
+            "fields": fields.model_dump(mode="json", by_alias=True),
+            "state": state,
+            "updatedAt": "2026-07-14T12:00:00Z",
+            "variant": "A",
+            "version": version,
+        }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        response_stage = ("reset", "saved", "reviewed", "rendered")[call_count - 1]
+        if response_stage == "rendered":
+            body: dict[str, object] = {
+                "caseId": "case-adapter-001",
+                "contractVersion": CONTRACT_VERSION,
+                "fields": fields.model_dump(mode="json", by_alias=True),
+                "renderedAt": "2026-07-14T12:00:01Z",
+                "state": "review",
+                "variant": "A",
+                "version": 3,
+            }
+        else:
+            response_version = {"reset": 1, "saved": 2, "reviewed": 3}[response_stage]
+            body = session_body(
+                "review" if response_stage == "reviewed" else "draft",
+                response_version,
+            )
+        if response_stage == stage:
+            body[field] = value
+        return httpx.Response(200, json=body)
+
+    adapter = HttpPortalPort(
+        WEB_ORIGIN,
+        client=httpx.Client(
+            base_url=WEB_ORIGIN,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    with pytest.raises(PortalUnavailableError):
+        adapter.fill_to_review("case-adapter-001", fields)
+
+
+def _adapter_fields() -> PortalDraftFields:
+    return PortalDraftFields.model_validate(
+        {
+            "incidentDate": "2026-07-14",
+            "incidentTime": "14:30:00",
+            "location": "Demo Street 1, Berlin",
+            "claimantName": "Demo Claimant",
+            "policyReference": "DEMO-POLICY-001",
+            "vehicleRegistration": "DEMO-CD-1",
+            "counterpartyKnown": "yes",
+            "narrative": "A staged second vehicle contacted the rear of the demo vehicle.",
+            "attachments": ("model-a.jpg", "model-b.png", "model-c.jpg"),
+        }
+    )
 
 
 @pytest.mark.parametrize(

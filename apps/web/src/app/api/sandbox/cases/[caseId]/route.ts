@@ -8,7 +8,7 @@ interface RouteContext {
 export async function GET(request: Request, context: RouteContext): Promise<Response> {
   try {
     const { caseId } = await context.params;
-    const view = sandboxPortalStore.getOrCreate(caseId, variantFromRequest(request));
+    const view = sandboxPortalStore.read(caseId, variantFromRequest(request));
     return Response.json(view, {
       headers: { "Cache-Control": "no-store" },
       status: 200,

@@ -1,9 +1,11 @@
 import type {
-  ClaimData,
   CounterpartyKnown,
   EvalInput,
+  PortalDraftFields as CanonicalPortalDraftFields,
+  PortalSessionView,
   PortalState,
   RequiredClaimField,
+  RenderedPortalSnapshot,
 } from "../../../../../contracts/generated/claimdone";
 
 export type { CounterpartyKnown, PortalState };
@@ -26,32 +28,11 @@ export const PORTAL_FIXTURES = ["empty", "complete"] as const;
 
 export type PortalFixture = (typeof PORTAL_FIXTURES)[number];
 
-type PortalTextClaimFields = Pick<
-  ClaimData,
-  | "claimantName"
-  | "incidentDate"
-  | "incidentTime"
-  | "location"
-  | "narrative"
-  | "policyReference"
-  | "vehicleRegistration"
->;
-
 /**
  * Editable UI state. Unlike a valid ClaimData payload, a draft may contain
  * empty fields and fewer than three approved server or synthetic demo asset IDs.
  */
-export type PortalDraftFields = Readonly<
-  {
-    readonly [Field in keyof PortalTextClaimFields]: NonNullable<
-      PortalTextClaimFields[Field]
-    >;
-  } & {
-    /** Closed server/demo asset IDs; production evidence authority remains in the backend. */
-    readonly attachments: ReadonlyArray<ClaimData["attachments"][number]>;
-    readonly counterpartyKnown: "" | ClaimData["counterpartyKnown"];
-  }
->;
+export type PortalDraftFields = CanonicalPortalDraftFields;
 
 export type PortalFieldName = keyof PortalDraftFields;
 
@@ -92,29 +73,17 @@ export interface PortalAuditEntry {
 export interface PortalSession {
   readonly caseId: string;
   readonly variant: PortalVariant;
-  readonly state: PortalState;
+  readonly state: PortalSessionView["state"];
   readonly version: number;
   readonly fields: PortalDraftFields;
   readonly audit: readonly PortalAuditEntry[];
   readonly updatedAt: string;
 }
 
-export interface PortalView {
-  readonly caseId: string;
-  readonly variant: PortalVariant;
-  readonly state: PortalState;
-  readonly version: number;
-  readonly fields: PortalDraftFields;
-  readonly auditCount: number;
-  readonly updatedAt: string;
-}
+export type PortalView = Omit<PortalSessionView, "auditCount"> &
+  Readonly<{ readonly auditCount: number }>;
 
-export interface RenderedPortalValues {
-  readonly caseId: string;
-  readonly state: PortalState;
-  readonly fields: PortalDraftFields;
-  readonly renderedAt: string;
-}
+export type RenderedPortalValues = RenderedPortalSnapshot;
 
 export interface PortalErrorBody {
   readonly error: Readonly<{

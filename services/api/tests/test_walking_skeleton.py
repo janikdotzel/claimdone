@@ -15,6 +15,7 @@ from PIL import Image
 import claimdone_api.walking_skeleton.safety as walking_safety_module
 import claimdone_api.walking_skeleton.service as walking_service_module
 from claimdone_api.contracts import (
+    CONTRACT_VERSION,
     CaseState,
     GateId,
     GateReasonCode,
@@ -68,9 +69,12 @@ class RecordingPortal:
             RenderedPortalValues.model_validate(
                 {
                     "caseId": case_id,
+                    "contractVersion": CONTRACT_VERSION,
                     "state": "review",
                     "fields": rendered_fields,
                     "renderedAt": "2026-07-14T12:00:00Z",
+                    "variant": "A",
+                    "version": 3,
                 },
                 strict=False,
             ),

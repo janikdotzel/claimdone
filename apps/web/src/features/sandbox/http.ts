@@ -4,7 +4,11 @@ import type {
   PortalFixture,
   PortalVariant,
 } from "./contracts";
-import { PortalConflictError } from "./store";
+import {
+  PortalConflictError,
+  PortalNotFoundError,
+  PortalStateConflictError,
+} from "./store";
 import {
   assertCaseId,
   parseExpectedVersion,
@@ -61,7 +65,12 @@ export function variantFromRequest(request: Request): PortalVariant {
 }
 
 export function portalErrorResponse(error: unknown): Response {
-  if (error instanceof PortalInputError || error instanceof PortalConflictError) {
+  if (
+    error instanceof PortalInputError ||
+    error instanceof PortalConflictError ||
+    error instanceof PortalNotFoundError ||
+    error instanceof PortalStateConflictError
+  ) {
     const body: PortalErrorBody = {
       error: {
         code: error.code,

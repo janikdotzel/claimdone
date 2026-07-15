@@ -8,9 +8,18 @@ from pydantic import Field, JsonValue, StringConstraints, model_validator
 from claimdone_api.cases.models import ApiModel, CaseView
 from claimdone_api.contracts import (
     GateDecision,
+    RenderedPortalSnapshot,
     RequiredClaimField,
     VerificationState,
 )
+from claimdone_api.contracts import (
+    PortalDraftFields as PortalDraftFields,
+)
+from claimdone_api.contracts import (
+    PortalSessionView as PortalSessionView,
+)
+
+RenderedPortalValues = RenderedPortalSnapshot
 
 
 class FlowPhase(StrEnum):
@@ -78,32 +87,3 @@ class ClarificationAnswerRequest(ApiModel):
 
 class DemoResetResponse(ApiModel):
     deleted_cases: Annotated[int, Field(ge=0)]
-
-
-class PortalDraftFields(ApiModel):
-    incident_date: str
-    incident_time: str
-    location: str
-    claimant_name: str
-    policy_reference: str
-    vehicle_registration: str
-    counterparty_known: str
-    narrative: str
-    attachments: tuple[str, ...]
-
-
-class PortalSessionView(ApiModel):
-    case_id: str
-    variant: Literal["A"]
-    state: str
-    version: Annotated[int, Field(ge=1)]
-    fields: PortalDraftFields
-    audit_count: Annotated[int, Field(ge=0)]
-    updated_at: str
-
-
-class RenderedPortalValues(ApiModel):
-    case_id: str
-    state: Literal["review"]
-    fields: PortalDraftFields
-    rendered_at: str

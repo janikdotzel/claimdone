@@ -5,8 +5,15 @@ from urllib.parse import quote
 
 import httpx
 
+from claimdone_api.contracts import (
+    PortalDraftFields,
+    PortalSessionView,
+    PortalState,
+    PortalVariant,
+    RenderedPortalSnapshot,
+)
+
 from .errors import PortalUnavailableError
-from .models import PortalDraftFields, PortalSessionView, RenderedPortalValues
 
 
 class PortalPort(Protocol):
@@ -14,7 +21,7 @@ class PortalPort(Protocol):
         self,
         case_id: str,
         fields: PortalDraftFields,
-    ) -> tuple[str, RenderedPortalValues]:
+    ) -> tuple[str, RenderedPortalSnapshot]:
         """Reset, fill, stop at review, and freshly read rendered values."""
 
     def cleanup_case(self, case_id: str) -> None:
@@ -41,7 +48,7 @@ class HttpPortalPort:
         self,
         case_id: str,
         fields: PortalDraftFields,
-    ) -> tuple[str, RenderedPortalValues]:
+    ) -> tuple[str, RenderedPortalSnapshot]:
         encoded_case_id = quote(case_id, safe="")
         case_path = f"/api/sandbox/cases/{encoded_case_id}"
         try:
@@ -51,8 +58,12 @@ class HttpPortalPort:
                 json={"caseId": case_id, "fixture": "empty", "variant": "A"},
             )
             reset_view = PortalSessionView.model_validate_json(reset.content)
-            if reset_view.state != "draft":
-                raise PortalUnavailableError("Portal reset did not produce a draft")
+            self._validate_session_view(
+                reset_view,
+                case_id=case_id,
+                expected_state=PortalState.DRAFT,
+                expected_version=1,
+            )
             saved = self._request(
                 "PUT",
                 f"{case_path}/draft?variant=A",
@@ -62,27 +73,59 @@ class HttpPortalPort:
                 },
             )
             saved_view = PortalSessionView.model_validate_json(saved.content)
-            if saved_view.state != "draft":
-                raise PortalUnavailableError("Portal draft save left the draft state")
+            self._validate_session_view(
+                saved_view,
+                case_id=case_id,
+                expected_state=PortalState.DRAFT,
+                expected_version=reset_view.version + 1,
+            )
             reviewed = self._request(
                 "POST",
                 f"{case_path}/review?variant=A",
                 json={"expectedVersion": saved_view.version},
             )
             reviewed_view = PortalSessionView.model_validate_json(reviewed.content)
-            if reviewed_view.state != "review":
-                raise PortalUnavailableError("Portal did not stop at review")
+            self._validate_session_view(
+                reviewed_view,
+                case_id=case_id,
+                expected_state=PortalState.REVIEW,
+                expected_version=saved_view.version + 1,
+            )
             rendered = self._request(
                 "GET",
                 f"{case_path}/rendered-values?variant=A",
             )
-            rendered_values = RenderedPortalValues.model_validate_json(rendered.content)
-            if rendered_values.case_id != case_id:
-                raise PortalUnavailableError("Portal returned values for another case")
+            rendered_values = RenderedPortalSnapshot.model_validate_json(rendered.content)
+            if (
+                rendered_values.case_id != case_id
+                or rendered_values.variant != PortalVariant.A
+                or rendered_values.version != reviewed_view.version
+            ):
+                raise PortalUnavailableError(
+                    "Rendered portal identity differs from the reviewed session"
+                )
         except (httpx.HTTPError, ValueError) as error:
             raise PortalUnavailableError("Sandbox portal request failed") from error
         review_url = f"{self._base_url}/sandbox/A/cases/{encoded_case_id}"
         return review_url, rendered_values
+
+    @staticmethod
+    def _validate_session_view(
+        view: PortalSessionView,
+        *,
+        case_id: str,
+        expected_state: PortalState,
+        expected_version: int,
+    ) -> None:
+        if (
+            view.case_id != case_id
+            or view.variant != PortalVariant.A
+            or view.state != expected_state
+            or view.version != expected_version
+        ):
+            raise PortalUnavailableError(
+                "Sandbox portal session identity, state, or version is inconsistent"
+            )
 
     def cleanup_case(self, case_id: str) -> None:
         encoded_case_id = quote(case_id, safe="")

@@ -5,6 +5,7 @@ import {
   PORTAL_VARIANTS,
   type PortalDraftFields,
   type PortalFieldIssue,
+  type PortalFieldName,
   type PortalFixture,
   type PortalState,
   type PortalVariant,
@@ -16,6 +17,20 @@ const TIME_PATTERN = /^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/;
 const MODEL_ASSET_ID_PATTERN = /^model-[a-f0-9]{32}\.(?:jpg|png)$/;
 const DEMO_ASSET_ID_PATTERN = /^asset-demo-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_ASSET_ID_LENGTH = 128;
+type PortalTextFieldName = Exclude<
+  PortalFieldName,
+  "attachments" | "counterpartyKnown"
+>;
+const PORTAL_TEXT_MAX_CODE_POINTS = {
+  claimantName: 512,
+  incidentDate: 10,
+  incidentTime: 21,
+  location: 512,
+  narrative: 4_000,
+  policyReference: 512,
+  vehicleRegistration: 512,
+} as const satisfies Readonly<Record<PortalTextFieldName, number>>;
+
 export class PortalInputError extends Error {
   readonly code = "PORTAL_INPUT_INVALID";
   readonly status = 422;
@@ -67,11 +82,18 @@ export function parsePortalFields(value: unknown): PortalDraftFields {
   }
 
   const stringKeys = PORTAL_FIELD_NAMES.filter(
-    (key) => key !== "attachments" && key !== "counterpartyKnown",
+    (key): key is PortalTextFieldName =>
+      key !== "attachments" && key !== "counterpartyKnown",
   );
   for (const key of stringKeys) {
-    if (typeof value[key] !== "string") {
+    const fieldValue = value[key];
+    if (typeof fieldValue !== "string") {
       throw new PortalInputError(`${key} must be a string.`);
+    }
+    if (Array.from(fieldValue).length > PORTAL_TEXT_MAX_CODE_POINTS[key]) {
+      throw new PortalInputError(
+        `${key} must contain at most ${PORTAL_TEXT_MAX_CODE_POINTS[key]} characters.`,
+      );
     }
   }
   if (!isCounterpartyKnown(value.counterpartyKnown)) {
