@@ -18,13 +18,13 @@ case "$mode" in
     done
     "$CLAIMDONE_PNPM_BIN" lint:web
     UV_CACHE_DIR="$uv_cache_dir" "$uv_bin" run --frozen --no-sync \
-      --package claimdone-api ruff check services/api scripts/reset.py scripts/tests evals
+      --package claimdone-api ruff check services/api scripts/*.py scripts/tests evals
     ;;
   typecheck)
     "$CLAIMDONE_PNPM_BIN" typecheck:web
     UV_CACHE_DIR="$uv_cache_dir" "$uv_bin" run --frozen --no-sync \
       --package claimdone-api mypy \
-      services/api/src services/api/tests scripts/reset.py scripts/tests evals
+      services/api/src services/api/tests scripts/*.py scripts/tests evals
     ;;
   test)
     "$CLAIMDONE_PNPM_BIN" test:web
