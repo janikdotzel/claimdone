@@ -7,6 +7,11 @@ claimdone_resolve_runtime
 claimdone_require_project_environment
 cd "$CLAIMDONE_ROOT"
 
+if [[ -z "${CLAIMDONE_PORTAL_CONTROL_TOKEN:-}" ]]; then
+  exec "$CLAIMDONE_PYTHON_BIN" \
+    "$CLAIMDONE_ROOT/scripts/portal_control_token.py"
+fi
+
 uv_bin="$(claimdone_uv_bin)"
 uv_cache_dir="$(claimdone_uv_cache_dir)"
 web_pid=""

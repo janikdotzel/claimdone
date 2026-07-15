@@ -24,6 +24,14 @@ from .models import (
 )
 from .playwright import PlaywrightBrowserFactory
 from .policy import PortalOriginPolicy
+from .portal import (
+    HttpPortalGateway,
+    PlaywrightSemanticPortalBrowser,
+    PortalGateway,
+    PortalGatewayError,
+    RenderedCapture,
+    SemanticPortalBrowser,
+)
 from .ports import (
     BrowserOperationError,
     BrowserOperationTimeout,
@@ -61,18 +69,24 @@ __all__ = [
     "ComputerUseRunner",
     "DoubleClickAction",
     "DragAction",
+    "HttpPortalGateway",
     "InvalidComputerResponseError",
     "KeypressAction",
     "MoveAction",
     "PendingComputerSafetyCheckError",
     "PlaywrightBrowserFactory",
+    "PlaywrightSemanticPortalBrowser",
     "Point",
+    "PortalGateway",
+    "PortalGatewayError",
     "PortalOriginPolicy",
     "PortalReviewSignal",
+    "RenderedCapture",
     "ResponsesComputerUseAdapter",
     "ResponsesCreateAPI",
     "ScreenshotAction",
     "ScrollAction",
+    "SemanticPortalBrowser",
     "TypeAction",
     "WaitAction",
 ]

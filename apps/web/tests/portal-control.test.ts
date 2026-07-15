@@ -106,10 +106,11 @@ afterEach(() => {
 });
 
 describe("packet-bound portal store authority", () => {
-  it("pre-stages only ordered attachments and tombstones duplicate or stale run IDs", () => {
+  it("replays only the exact unchanged active setup and preserves run-ID tombstones", () => {
     const store = fixedStore();
     const command = setupCommand("case-control-setup", "run-control-setup", "A");
     const initial = store.setupRun(command);
+    const initialAudit = store.audit(command.caseId);
 
     expect(initial.fields).toEqual({
       attachments: ATTACHMENTS,
@@ -127,15 +128,48 @@ describe("packet-bound portal store authority", () => {
     expect(JSON.stringify(initial)).not.toContain(EXPECTED_FIELDS.claimantName);
     expect(JSON.stringify(store.audit(command.caseId))).not.toContain(command.runId);
 
+    expect(store.setupRun(command)).toEqual(initial);
+    expect(store.read(command.caseId, command.variant)).toEqual(initial);
+    expect(store.audit(command.caseId)).toEqual(initialAudit);
+
+    const alteredCommands: PortalRunSetup[] = [
+      setupCommand(command.caseId, "run-control-other", command.variant),
+      setupCommand("case-control-foreign", command.runId, command.variant),
+      { ...command, variant: "B" },
+      {
+        ...command,
+        expectedFields: {
+          ...command.expectedFields,
+          claimantName: "Different claimant",
+        },
+      },
+      {
+        ...command,
+        expectedFields: {
+          ...command.expectedFields,
+          attachments: [ATTACHMENTS[1], ATTACHMENTS[0], ATTACHMENTS[2]],
+        },
+      },
+    ];
+    for (const altered of alteredCommands) {
+      expect(() => store.setupRun(altered)).toThrow(PortalRunConflictError);
+      expect(store.read(command.caseId, command.variant)).toEqual(initial);
+      expect(store.audit(command.caseId)).toEqual(initialAudit);
+    }
+
+    const saved = store.saveDraft(
+      command.caseId,
+      command.variant,
+      initial.version,
+      EXPECTED_FIELDS,
+    );
+    const auditAfterSave = store.audit(command.caseId);
     expect(() => store.setupRun(command)).toThrow(PortalRunConflictError);
-    expect(() =>
-      store.setupRun(setupCommand(command.caseId, "run-control-other", "A")),
-    ).toThrow(PortalRunConflictError);
-    expect(() =>
-      store.setupRun(setupCommand("case-control-foreign", command.runId, "B")),
-    ).toThrow(PortalRunConflictError);
+    expect(store.read(command.caseId, command.variant)).toEqual(saved);
+    expect(store.audit(command.caseId)).toEqual(auditAfterSave);
 
     store.abortRun(releaseBinding(command));
+    expect(() => store.setupRun(command)).toThrow(PortalRunConflictError);
     expect(() =>
       store.setupRun(setupCommand("case-control-stale", command.runId, "A")),
     ).toThrow(PortalRunConflictError);
@@ -143,6 +177,29 @@ describe("packet-bound portal store authority", () => {
     const fresh = setupCommand(command.caseId, "run-control-fresh", "B");
     expect(store.setupRun(fresh).variant).toBe("B");
     store.abortRun(releaseBinding(fresh));
+
+    const releasedStore = fixedStore();
+    const releasedCommand = setupCommand(
+      "case-control-released",
+      "run-control-released",
+      "A",
+    );
+    const releasedInitial = releasedStore.setupRun(releasedCommand);
+    const releasedSaved = releasedStore.saveDraft(
+      releasedCommand.caseId,
+      releasedCommand.variant,
+      releasedInitial.version,
+      EXPECTED_FIELDS,
+    );
+    releasedStore.advanceToReview(
+      releasedCommand.caseId,
+      releasedCommand.variant,
+      releasedSaved.version,
+    );
+    releasedStore.releaseRun(releaseBinding(releasedCommand));
+    expect(() => releasedStore.setupRun(releasedCommand)).toThrow(
+      PortalRunConflictError,
+    );
   });
 
   it("rejects every non-exact or repeated active-run write before mutation", () => {
@@ -206,7 +263,12 @@ describe("packet-bound portal store authority", () => {
 
     const reviewed = store.advanceToReview(command.caseId, command.variant, saved.version);
     expect(() => store.abortRun(releaseBinding(command))).toThrow(PortalRunConflictError);
-    store.releaseRun(releaseBinding(command));
+    const release = releaseBinding(command);
+    store.releaseRun(release);
+    store.releaseRun(release);
+    expect(() =>
+      store.releaseRun({ ...release, caseId: "case-control-foreign" }),
+    ).toThrow(PortalRunConflictError);
     expect(store.read(command.caseId, command.variant)).toEqual(reviewed);
   });
 
@@ -778,6 +840,13 @@ describe("internal portal-control routes", () => {
     expect(setupResponse.status).toBe(201);
     singletonBindings.push(binding);
     const initial = (await setupResponse.json()) as PortalView;
+    const setupAudit = sandboxPortalStore.audit(command.caseId);
+    const setupReplayResponse = await setupPortalRun(
+      controlRequest("setup", command, CONTROL_TOKEN),
+    );
+    expect(setupReplayResponse.status).toBe(201);
+    expect(await setupReplayResponse.json()).toEqual(initial);
+    expect(sandboxPortalStore.audit(command.caseId)).toEqual(setupAudit);
     const initialJson = JSON.stringify(initial);
     expect(initialJson).not.toContain(command.runId);
     expect(initialJson).not.toContain(CONTROL_TOKEN);
@@ -847,7 +916,11 @@ describe("internal portal-control routes", () => {
     const staleRelease = await releasePortalRun(
       controlRequest("release", binding, CONTROL_TOKEN),
     );
-    expect(staleRelease.status).toBe(409);
+    expect(staleRelease.status).toBe(204);
+    const staleSetup = await setupPortalRun(
+      controlRequest("setup", command, CONTROL_TOKEN),
+    );
+    expect(staleSetup.status).toBe(409);
   });
 });
 

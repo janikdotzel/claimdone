@@ -10,11 +10,14 @@ from fastapi.routing import APIRoute, APIRouter
 from fastapi.testclient import TestClient
 
 from claimdone_api.cases import CaseService
+from claimdone_api.computer_use import HttpPortalGateway
 from claimdone_api.contracts import WorkflowSnapshot
+from claimdone_api.int002 import Int002WorkflowService
 from claimdone_api.main import ApiSettings, create_app
 from claimdone_api.persistence import SqliteCaseRepository
 
 WEB_ORIGIN = "http://127.0.0.1:3000"
+PORTAL_CONTROL_TOKEN = "production-routing-control-token-0001"
 
 
 def _production_app(tmp_path: Path) -> FastAPI:
@@ -23,6 +26,7 @@ def _production_app(tmp_path: Path) -> FastAPI:
             data_dir=tmp_path / "production-routing",
             web_origin=WEB_ORIGIN,
             portal_origin=WEB_ORIGIN,
+            portal_control_token=PORTAL_CONTROL_TOKEN,
         )
     )
 
@@ -47,6 +51,8 @@ def test_production_case_route_matrix_is_exact_and_uses_atomic_authority(
     app = _production_app(tmp_path)
     assert type(app.state.case_service) is CaseService
     assert type(app.state.case_repository) is SqliteCaseRepository
+    assert type(app.state.int002_service) is Int002WorkflowService
+    assert type(app.state.portal_gateway) is HttpPortalGateway
 
     case_routes = tuple(
         route
@@ -65,6 +71,12 @@ def test_production_case_route_matrix_is_exact_and_uses_atomic_authority(
             ("GET", "/api/cases/{case_id}"): 1,
             ("DELETE", "/api/cases/{case_id}"): 1,
             ("GET", "/api/cases/{case_id}/events"): 1,
+            ("POST", "/api/cases/{case_id}/intake"): 1,
+            (
+                "POST",
+                "/api/cases/{case_id}/clarifications/{clarification_id}/answer",
+            ): 1,
+            ("POST", "/api/cases/{case_id}/run"): 1,
         }
     )
 
@@ -80,6 +92,24 @@ def test_production_case_route_matrix_is_exact_and_uses_atomic_authority(
     assert not any(path.startswith("/api/workflow/cases") for path in production_paths)
     assert "/api/cases/{case_id}/events/stream" not in production_paths
     assert "/api/cases/{case_id}/events/history" not in production_paths
+
+
+def test_portal_control_token_is_validated_and_hidden_from_settings_repr() -> None:
+    settings = ApiSettings(portal_control_token=PORTAL_CONTROL_TOKEN)
+
+    assert settings.portal_control_token == PORTAL_CONTROL_TOKEN
+    assert PORTAL_CONTROL_TOKEN not in repr(settings)
+    with pytest.raises(ValueError, match="portal_control_token"):
+        ApiSettings(portal_control_token="too-short")
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ("http://localhost:3000", "http://127.0.0.1:3001", "http://127.0.0.1:3000/"),
+)
+def test_portal_origin_must_match_the_deterministic_g6_origin(origin: str) -> None:
+    with pytest.raises(ValueError, match="deterministic G6 portal origin"):
+        ApiSettings(portal_origin=origin)
 
 
 def test_event_stream_cors_allows_exact_local_origin_and_replay_header(

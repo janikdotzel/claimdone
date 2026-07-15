@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
@@ -16,8 +17,19 @@ from pydantic import BaseModel
 from starlette.types import ASGIApp
 
 from claimdone_api.authority import AuthorityService, create_authority_router
-from claimdone_api.cases import CaseService, create_case_router, create_workflow_router
+from claimdone_api.cases import (
+    CaseService,
+    create_case_router,
+    create_int002_router,
+    create_workflow_router,
+)
 from claimdone_api.cases.router import CaseCrudService
+from claimdone_api.computer_use import (
+    HttpPortalGateway,
+    PlaywrightSemanticPortalBrowser,
+    SemanticPortalBrowser,
+)
+from claimdone_api.int002 import Int002WorkflowService
 from claimdone_api.media import PersistentCaseMediaCleaner
 from claimdone_api.persistence import SqliteCaseRepository
 from claimdone_api.walking_skeleton.body_limit import RequestBodyLimitMiddleware
@@ -30,19 +42,39 @@ if TYPE_CHECKING:
 
 DEFAULT_GLOBAL_BODY_LIMIT = 1024 * 1024
 DEFAULT_INTAKE_BODY_LIMIT = 32 * 1024 * 1024
+CANONICAL_PORTAL_ORIGIN = "http://127.0.0.1:3000"
+
+
+def _new_portal_control_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 @dataclass(frozen=True, slots=True)
 class ApiSettings:
     data_dir: Path = Path(".local/claimdone")
     web_origin: str = "http://127.0.0.1:3000"
-    portal_origin: str = "http://127.0.0.1:3000"
+    portal_origin: str = CANONICAL_PORTAL_ORIGIN
+    portal_control_token: str = field(
+        default_factory=_new_portal_control_token,
+        repr=False,
+    )
     global_body_limit: int = DEFAULT_GLOBAL_BODY_LIMIT
     intake_body_limit: int = DEFAULT_INTAKE_BODY_LIMIT
 
     def __post_init__(self) -> None:
         _validate_local_origin(self.web_origin, "web_origin")
-        _validate_local_origin(self.portal_origin, "portal_origin")
+        _validate_canonical_portal_origin(self.portal_origin)
+        if (
+            type(self.portal_control_token) is not str
+            or not 32 <= len(self.portal_control_token) <= 512
+            or any(
+                not 33 <= ord(character) <= 126
+                for character in self.portal_control_token
+            )
+        ):
+            raise ValueError(
+                "portal_control_token must be 32-512 visible ASCII characters"
+            )
         if self.global_body_limit < 1 or self.intake_body_limit < self.global_body_limit:
             raise ValueError("Body limits must be positive and intake >= global")
 
@@ -56,7 +88,11 @@ class ApiSettings:
             ),
             portal_origin=os.environ.get(
                 "CLAIMDONE_PORTAL_ORIGIN",
-                "http://127.0.0.1:3000",
+                CANONICAL_PORTAL_ORIGIN,
+            ),
+            portal_control_token=os.environ.get(
+                "CLAIMDONE_PORTAL_CONTROL_TOKEN",
+                _new_portal_control_token(),
             ),
         )
 
@@ -101,6 +137,8 @@ def create_app(
     case_service: CaseCrudService
     canonical_repository: SqliteCaseRepository | None = None
     authority_service: AuthorityService | None = None
+    int002_service: Int002WorkflowService | None = None
+    portal_gateway: HttpPortalGateway | None = None
     if enable_legacy_walking_skeleton_for_dev:
         from claimdone_api.walking_skeleton.legacy_boundary import (
             LegacyWalkingCaseBoundary,
@@ -139,6 +177,21 @@ def create_app(
         assert canonical_repository is not None
         case_service = CaseService(canonical_repository, resource_cleaner=cleaner)
         authority_service = AuthorityService(canonical_repository)
+        portal_gateway = HttpPortalGateway(
+            control_token=selected.portal_control_token,
+            origin=selected.portal_origin,
+        )
+
+        def browser_factory() -> SemanticPortalBrowser:
+            return PlaywrightSemanticPortalBrowser(origin=selected.portal_origin)
+
+        int002_service = Int002WorkflowService(
+            case_service,
+            authority_service,
+            portal_gateway,
+            browser_factory,
+            control_token=selected.portal_control_token,
+        )
         walking_service = None
 
     application = _OuterCorsFastAPI(
@@ -158,8 +211,12 @@ def create_app(
         # The older claimdone_api.workflow read-model prototype remains an
         # unwired test fixture. This is the only production case router.
         application.include_router(create_workflow_router(case_service))
+        assert int002_service is not None
+        application.include_router(create_int002_router(int002_service))
         assert authority_service is not None
         application.include_router(create_authority_router(authority_service))
+        assert portal_gateway is not None
+        application.router.add_event_handler("shutdown", portal_gateway.close)
     if walking_service is not None:
         application.include_router(create_walking_skeleton_router(walking_service))
 
@@ -203,6 +260,10 @@ def create_app(
     application.state.media_store = media_store
     if authority_service is not None:
         application.state.authority_service = authority_service
+    if int002_service is not None:
+        application.state.int002_service = int002_service
+    if portal_gateway is not None:
+        application.state.portal_gateway = portal_gateway
     if walking_service is not None:
         application.state.walking_skeleton_service = walking_service
     return application
@@ -222,6 +283,13 @@ def _validate_local_origin(value: str, field: str) -> None:
         or parsed.fragment
     ):
         raise ValueError(f"{field} must be an explicit local http origin")
+
+
+def _validate_canonical_portal_origin(value: str) -> None:
+    if value != CANONICAL_PORTAL_ORIGIN:
+        raise ValueError(
+            "portal_origin must match the deterministic G6 portal origin"
+        )
 
 
 app = create_app()

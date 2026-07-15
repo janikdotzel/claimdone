@@ -86,6 +86,7 @@ interface ActivePortalRunAuthority {
 export class SandboxPortalStore {
   readonly #sessions = new Map<string, PortalSession>();
   readonly #activeRuns = new Map<string, ActivePortalRunAuthority>();
+  readonly #releasedRuns = new Map<string, PortalRunRelease>();
   readonly #usedRunIds = new Set<string>();
 
   constructor(private readonly now: () => Date = () => new Date()) {}
@@ -96,6 +97,10 @@ export class SandboxPortalStore {
 
   setupRun(value: PortalRunSetup): PortalView {
     const setup = parsePortalRunSetup(value);
+    const replay = this.#requireExactUnchangedSetupReplay(setup);
+    if (replay) {
+      return toView(replay);
+    }
     if (
       this.#usedRunIds.has(setup.runId) ||
       this.#sessions.has(setup.caseId) ||
@@ -128,8 +133,53 @@ export class SandboxPortalStore {
     return toView(session);
   }
 
+  #requireExactUnchangedSetupReplay(
+    setup: PortalRunSetup,
+  ): PortalSession | undefined {
+    const session = this.#sessions.get(setup.caseId);
+    const authority = this.#activeRuns.get(setup.caseId);
+    const audit = session?.audit[0];
+    if (
+      !this.#usedRunIds.has(setup.runId) ||
+      !session ||
+      !authority ||
+      authority.runId !== setup.runId ||
+      authority.caseId !== setup.caseId ||
+      authority.variant !== setup.variant ||
+      !portalFieldsEqual(authority.expectedFields, setup.expectedFields) ||
+      authority.authorizedSaveVersion !== undefined ||
+      authority.reviewedVersion !== undefined ||
+      authority.faultField !== undefined ||
+      authority.faultVersion !== undefined ||
+      authority.faultActive !== undefined ||
+      authority.repairedVersion !== undefined ||
+      session.caseId !== setup.caseId ||
+      session.variant !== setup.variant ||
+      session.state !== "draft" ||
+      session.version !== 1 ||
+      !initialRunSetupFieldsEqual(session.fields, setup.expectedFields) ||
+      session.audit.length !== 1 ||
+      audit?.action !== "run_setup" ||
+      audit.actor !== "portal_control" ||
+      audit.sequence !== 1 ||
+      audit.summary.attachmentCount !== setup.expectedFields.attachments.length ||
+      audit.summary.filledFieldCount !== 0 ||
+      audit.summary.variant !== setup.variant
+    ) {
+      return undefined;
+    }
+    return session;
+  }
+
   releaseRun(value: PortalRunRelease): void {
     const release = parsePortalRunRelease(value);
+    const completed = this.#releasedRuns.get(release.runId);
+    if (completed) {
+      if (portalRunReleaseEqual(completed, release)) {
+        return;
+      }
+      throw new PortalRunConflictError();
+    }
     const authority = this.#requireActiveRun(release);
     const session = this.#sessions.get(release.caseId);
     if (
@@ -145,6 +195,7 @@ export class SandboxPortalStore {
       throw new PortalRunConflictError();
     }
     this.#activeRuns.delete(release.caseId);
+    this.#releasedRuns.set(release.runId, { ...release });
   }
 
   abortRun(value: PortalRunRelease): void {
@@ -483,6 +534,38 @@ function portalFieldsEqual(
     actual.attachments.every(
       (attachmentId, index) => attachmentId === expected.attachments[index],
     )
+  );
+}
+
+function initialRunSetupFieldsEqual(
+  actual: PortalDraftFields,
+  expected: PortalRunExpectedFields,
+): boolean {
+  return (
+    actual.incidentDate === "" &&
+    actual.incidentTime === "" &&
+    actual.location === "" &&
+    actual.claimantName === "" &&
+    actual.policyReference === "" &&
+    actual.vehicleRegistration === "" &&
+    actual.counterpartyKnown === "" &&
+    actual.narrative === "" &&
+    actual.attachments.length === expected.attachments.length &&
+    actual.attachments.every(
+      (attachmentId, index) => attachmentId === expected.attachments[index],
+    )
+  );
+}
+
+function portalRunReleaseEqual(
+  left: PortalRunRelease,
+  right: PortalRunRelease,
+): boolean {
+  return (
+    left.contractVersion === right.contractVersion &&
+    left.runId === right.runId &&
+    left.caseId === right.caseId &&
+    left.variant === right.variant
   );
 }
 

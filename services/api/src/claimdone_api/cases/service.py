@@ -10,6 +10,7 @@ from pydantic import JsonValue
 from claimdone_api.audit import redact_metadata
 from claimdone_api.contracts import (
     CaseState,
+    GateDecision,
     TranscriptConfirmationRequest,
     WorkflowSnapshot,
     validate_case_transition,
@@ -19,10 +20,17 @@ from claimdone_api.media import PersistentCaseMediaCleaner
 from claimdone_api.persistence import (
     AnalysisWorkflowCommand,
     AnalysisWorkflowResult,
+    AuthorityCapabilityError,
     CaseRecord,
     CaseRecordNotFoundError,
     CaseRecordVersionConflictError,
     IntakeDisclosureCommand,
+    PersistedDataIntegrityError,
+    PortalRunRecord,
+    PortalRunStartCommand,
+    PortalRunStartResult,
+    PortalWriteFinalizeCommand,
+    PortalWriteFinalizeResult,
     SequencedAuditEvent,
     SequencedGateDecision,
     SequencedWorkflowEvent,
@@ -32,6 +40,8 @@ from claimdone_api.persistence import (
     TranscriptionOutcomeCommand,
     TranscriptStateError,
     TranscriptTransitionResult,
+    VerificationAttemptCommand,
+    VerificationAttemptResult,
     WorkflowAtomicityError,
 )
 
@@ -266,6 +276,137 @@ class CaseService:
         except CaseRecordVersionConflictError as error:
             raise self._version_conflict(error) from error
         except WorkflowAtomicityError as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def start_portal_run(
+        self,
+        command: PortalRunStartCommand,
+    ) -> PortalRunStartResult:
+        """Expose the atomic G6 capability-consumption boundary."""
+
+        try:
+            return self._repository.start_portal_run(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except (
+            AuthorityCapabilityError,
+            PersistedDataIntegrityError,
+            WorkflowAtomicityError,
+        ) as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def preflight_portal_write(
+        self,
+        *,
+        case_id: str,
+        expected_case_version: int,
+        run_id: str,
+        control_digest: bytes,
+        fields_payload: object,
+        decided_at: datetime,
+    ) -> GateDecision:
+        """Expose the read-only G7 preflight before any portal field write."""
+
+        try:
+            return self._repository.preflight_portal_write(
+                case_id=case_id,
+                expected_case_version=expected_case_version,
+                run_id=run_id,
+                control_digest=control_digest,
+                fields_payload=fields_payload,
+                decided_at=decided_at,
+            )
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except (
+            AuthorityCapabilityError,
+            PersistedDataIntegrityError,
+            WorkflowAtomicityError,
+        ) as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def finalize_portal_write(
+        self,
+        command: PortalWriteFinalizeCommand,
+    ) -> PortalWriteFinalizeResult:
+        """Expose the non-retriable atomic G7 finalization boundary."""
+
+        try:
+            return self._repository.finalize_portal_write(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except (
+            AuthorityCapabilityError,
+            PersistedDataIntegrityError,
+            WorkflowAtomicityError,
+        ) as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def record_verification_attempt(
+        self,
+        command: VerificationAttemptCommand,
+    ) -> VerificationAttemptResult:
+        """Expose one bounded G8 verification-attempt transaction."""
+
+        try:
+            return self._repository.record_verification_attempt(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except (
+            AuthorityCapabilityError,
+            PersistedDataIntegrityError,
+            WorkflowAtomicityError,
+        ) as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def resolve_portal_run(
+        self,
+        run_id: str,
+        control_digest: bytes,
+    ) -> PortalRunRecord | None:
+        """Resolve uncertain G6/G7 commits without mutating run authority."""
+
+        try:
+            return self._repository.resolve_portal_run(run_id, control_digest)
+        except (
+            AuthorityCapabilityError,
+            PersistedDataIntegrityError,
+            WorkflowAtomicityError,
+        ) as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def resolve_verification_attempt(
+        self,
+        *,
+        case_id: str,
+        run_id: str,
+        control_digest: bytes,
+        attempt_id: str,
+    ) -> VerificationAttemptResult | None:
+        """Resolve an uncertain verification commit through run authority."""
+
+        try:
+            return self._repository.resolve_verification_attempt(
+                case_id=case_id,
+                run_id=run_id,
+                control_digest=control_digest,
+                attempt_id=attempt_id,
+            )
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(case_id) from error
+        except (
+            AuthorityCapabilityError,
+            PersistedDataIntegrityError,
+            WorkflowAtomicityError,
+        ) as error:
             raise CaseSnapshotValidationError(str(error)) from error
 
     def commit_terminal_provider_failure(

@@ -163,7 +163,7 @@ def test_invalid_portal_composition_is_rejected_before_local_state_is_created(
     assert not data_dir.exists()
 
 
-def test_default_app_exposes_no_legacy_mutation_or_partial_commit(tmp_path: Path) -> None:
+def test_default_app_exposes_int002_without_legacy_partial_commit(tmp_path: Path) -> None:
     app = create_app(
         ApiSettings(
             data_dir=tmp_path / "default-state",
@@ -175,8 +175,9 @@ def test_default_app_exposes_no_legacy_mutation_or_partial_commit(tmp_path: Path
     assert type(repository) is SqliteCaseRepository
     assert "walking_skeleton_service" not in app.state._state
     paths = set(app.openapi()["paths"])
-    assert "/api/cases/{case_id}/intake" not in paths
-    assert "/api/cases/{case_id}/clarifications/{clarification_id}/answer" not in paths
+    assert "/api/cases/{case_id}/intake" in paths
+    assert "/api/cases/{case_id}/clarifications/{clarification_id}/answer" in paths
+    assert "/api/cases/{case_id}/run" in paths
     assert "/api/cases/{case_id}/events" in paths
     assert "/api/cases/{case_id}/events/history" not in paths
     assert "/api/cases/{case_id}/events/stream" not in paths
@@ -198,7 +199,8 @@ def test_default_app_exposes_no_legacy_mutation_or_partial_commit(tmp_path: Path
     assert fetched.status_code == 200
     assert WorkflowSnapshot.model_validate(fetched.json()).case.case_id == case_id
     assert "redactedMetadata" not in cast(dict[str, Any], fetched.json())
-    assert response.status_code == 404
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "REQUEST_VALIDATION_FAILED"
     assert reset.status_code == 404
     assert repository.get_case(case_id) == before
     assert repository.list_audit_events(case_id) == ()
