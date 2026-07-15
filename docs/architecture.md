@@ -2,274 +2,228 @@
 
 ## Document status
 
-This document describes the Welle-1 code and the completed INT-001 composition verified at
-integration anchor `ae2763bff760114a82bfb23620bcf4d01723466e`. The canonical checks, production
-web build, two-service startup, deterministic text and synthetic-WAV walkthroughs, cleanup, reset,
-and restart all passed at that anchor. This status covers only the no-live-AI walking skeleton; it
-does not imply G8 verification, human approval, release readiness, or a measured quality score.
+This document describes the deterministic V1 through INT-002. The acceptance scope is the exact
+fixture `claimdone-int002-main-v1`, Portal A, and a final verified review without human approval or
+receipt. INT-001 remains historical evidence; its former `verifying` boundary is no longer the
+current V1 composition.
 
-## Welle-1 implementation map
+This architecture does not claim live-provider quality, Portal B acceptance, G11 release readiness,
+submission, hosting, or production safety.
 
-```mermaid
-flowchart LR
-    Make["Canonical Make targets"]
-    Contracts["Canonical Pydantic contracts"]
-    Schema["Generated JSON Schema and TypeScript"]
-    Cases["Case service, SQLite, audit primitives"]
-    Media["Media pipeline and G0-G1"]
-    Gates["Deterministic G2-G5"]
-    Product["Next.js disclosure and intake shell"]
-    Portal["Sandbox portal variants A and B"]
-    Dataset["EVAL-001: exactly 12 static cases"]
-    Tests["Python and TypeScript tests"]
-
-    Make --> Tests
-    Contracts --> Schema
-    Contracts --> Cases
-    Contracts --> Media
-    Contracts --> Gates
-    Contracts --> Product
-    Contracts --> Portal
-    Contracts --> Dataset
-    Cases --> Tests
-    Media --> Tests
-    Gates --> Tests
-    Product --> Tests
-    Portal --> Tests
-    Dataset --> Tests
-```
-
-Welle 1 deliberately kept several boundaries independent: the base FastAPI app did not compose
-every case/media route, the product intake did not trust itself to advance backend state, and the
-portal was not yet driven by the backend. INT-001 connected those boundaries without changing the
-canonical contracts ad hoc.
-
-## INT-001 local architecture
-
-INT-001 is a deterministic walking skeleton. It uses a mock extraction path and direct local HTTP
-calls to the sandbox portal; it does not call an OpenAI model, a transcription service, or a browser
-runner.
+## Runtime composition
 
 ```mermaid
 flowchart LR
-    User["User with staged synthetic input"]
+    User["User with exact staged fixture"]
+    Chrome["Visible local Chrome<br/>tester-controlled outer client"]
 
-    subgraph WebProcess["Next.js at 127.0.0.1:3000"]
-        Product["Product intake /claim/new"]
-        PortalAPI["Sandbox portal API"]
-        PortalA["Portal A review UI"]
+    subgraph Web["Next.js · 127.0.0.1:3000"]
+        Product["Disclosure and intake /claim/new"]
+        PortalAPI["Sandbox Portal A API"]
+        PortalUI["Read-only human review surface"]
     end
 
-    subgraph ApiProcess["FastAPI at 127.0.0.1:8000"]
-        Workflow["Walking-skeleton service"]
-        G01["Deterministic G0-G1"]
-        Mock["Trusted deterministic mock adapter"]
-        G25["Deterministic G2-G5"]
-        Clarification["One version-bound clarification"]
-        PortalPort["Local portal port"]
+    subgraph API["FastAPI · 127.0.0.1:8000"]
+        Workflow["INT-002 composition service"]
+        Media["Media authority and G0-G1"]
+        Demo["Deterministic mock analysis"]
+        Gates["G2-G8 authoritative gates"]
+        Authority["Run and field-write capabilities"]
+        Browser["Headless backend Playwright<br/>Portal A adapter"]
+        Snapshot["Canonical snapshot and SSE replay"]
     end
 
     DB[(".local/claimdone/cases.db")]
-    Media[(".local/claimdone/media")]
-    Contracts["Canonical contracts"]
+    Files[(".local/claimdone/media")]
+    Contracts["Canonical Pydantic / generated TS contracts"]
 
-    User --> Product --> Workflow
-    Workflow --> G01
-    G01 --> Media
-    G01 --> Mock --> G25
-    G25 --> Clarification --> Workflow
+    User --> Chrome --> Product --> Workflow
+    Workflow --> Media --> Files
+    Media --> Demo --> Gates
+    Gates --> Authority --> Browser
+    Browser --> PortalAPI
+    PortalAPI --> Browser
+    Product -. review link .-> PortalUI
+    Chrome --> PortalUI --> PortalAPI
     Workflow --> DB
-    Workflow --> PortalPort --> PortalAPI --> PortalA
-    PortalAPI --> PortalPort
+    Workflow --> Snapshot --> Product
     Contracts --> Product
     Contracts --> Workflow
     Contracts --> PortalAPI
 ```
 
-The backend owns case version, phase, gate history, clarification identity, and draft revision. The
-frontend may run local preflight checks for fast feedback, but it advances only from a matching
-server response. The server does not expose its private media storage name as a public case ID or
-audit value.
+FastAPI owns case state and version, immutable gates, clarification identity, provider audit truth,
+run authority, verification attempts, and the final snapshot. The frontend performs local preflight
+only and advances solely from a contract-valid, case-bound server response. The portal is a separate
+server-owned loopback surface; its rendered values are read back rather than trusted from UI flags.
+The visible Chrome window is the tester-controlled outer client for the product flow and optional
+read-only review. It is distinct from the headless Playwright adapter that FastAPI invokes for
+bounded Portal A writes and verification captures.
 
-V1 follows a code-first design workflow. The approved visual direction is implemented through
-frontend tokens, components, explicit states, and accessibility behavior; a Figma artifact is not
-a V1 dependency. Human accessibility review remains a separate later checkpoint.
-
-## Verified INT-001 request flow
-
-The sequence below is the integration contract. It was exercised against both live local services
-before and after repository reset. Each round covered a text statement and a hash-fixed synthetic
-PCM WAV input, including one clarification per path, stale and duplicate conflict paths, exact
-portal-value comparison, cleanup, and restart.
+## Canonical INT-002 sequence
 
 ```mermaid
 sequenceDiagram
     actor U as User
-    participant W as Product UI
-    participant A as FastAPI workflow
+    participant C as Visible local Chrome
+    participant W as Next.js product UI
+    participant A as FastAPI INT-002 service
     participant G as Deterministic gates
-    participant M as Mock extraction
-    participant P as Portal A API/UI
+    participant B as Headless Portal A adapter
+    participant P as Portal A
 
-    U->>W: Disclosure, 3 images, text XOR WAV, consents, EXIF choices
+    U->>C: Disclosure, exact 3 PNGs, retain x3, statement, consents
+    C->>W: Browser events and multipart request
     W->>A: POST /api/cases
-    A-->>W: Created case ID and expected version
-    W->>A: POST /api/cases/{caseId}/intake (multipart)
-    A->>G: G0 then G1
-    alt deterministic intake/privacy failure
-        G-->>A: Immutable failed decision
-        A-->>W: Error; no mock extraction or portal write
-    else G0 and G1 pass
-        A->>M: Approved local model-copy boundary
-        M-->>A: Strict mock extraction with one required fact absent
-        A->>G: G2, G3, G4, then G5
-        G-->>A: One structured clarification
-        A-->>W: Version-bound clarification response
-        U->>W: One answer
-        W->>A: POST /api/cases/{caseId}/clarifications/{clarificationId}/answer
-        A->>G: Rebuild packet and rerun authoritative gates
-        G-->>A: G0-G5 history passes
-        A->>P: Reset/fill/review through local portal port
-        P-->>A: Portal state review and rendered values
-        A-->>W: Case verifying, portal review, verification pending
-        W-->>U: Open /sandbox/A/cases/{caseId}
-    end
+    A-->>W: created v1
+    W->>A: POST /api/cases/{id}/intake, expectedVersion 1
+    A->>G: G0-G5
+    G-->>A: one incident_time clarification
+    A-->>W: awaiting_clarification v4
+    U->>W: 14:30:00
+    W->>A: POST clarification answer, expectedVersion 4
+    A->>G: rebuild and rerun authoritative packet checks
+    A-->>W: ready_to_fill v5
+    W->>A: POST /api/cases/{id}/run, expectedVersion 5
+    A->>G: G6 tool authority
+    A->>G: read-only G7 preflight; no gate or authority mutation
+    G-->>A: proposed fields and attachments authorized
+    A->>B: execute only the preflight-authorized operation
+    B->>P: bounded field and attachment writes; stop at review
+    B->>P: read reviewed portal checkpoint
+    A->>G: atomic G7 finalization binds the reviewed checkpoint
+    G-->>A: G7 pass; case enters verifying
+    A->>B: first fresh verification capture, portal v3
+    B-->>A: intended incident_time mismatch
+    A->>G: G8 remains blocked
+    A->>B: one authorized incident_time repair, portal v3 to v4
+    A->>B: second fresh rendered-value read
+    B-->>A: exact match
+    A->>G: G8 pass
+    A-->>W: review v9, two attempts, no receipt
+    W-->>U: verified Portal A review; human boundary preserved
 ```
 
-The multipart intake sends a positive `expectedVersion`, checked before media/mock work; `images`
-exactly three times; optional `statementText` XOR one PCM WAV `audio`; three consent booleans; and
-`exifDecisions` exactly three times. The answer body is `{expectedVersion, answer}`. Successful
-response envelopes bind a `requestId`, case snapshot, `draftRevision`, authoritative `gateHistory`,
-phase, clarification, and portal result.
+The four browser-observed mutation responses are:
 
-The success boundary is intentionally asymmetric:
+| Mutation | Required state | Required version |
+| --- | --- | ---: |
+| Create | `created` | 1 |
+| Intake | `awaiting_clarification` | 4 |
+| Answer | `ready_to_fill` | 5 |
+| Run | `review` | 9 |
 
-- backend `CaseState`: `verifying`;
-- portal state: `review`; and
-- verification state: `pending`.
+Intermediate server mutations v2, v3, v6, v7, and v8 are internal recovery checkpoints. Public
+mutation responses intentionally expose only the four stable authority boundaries above.
 
-Portal review means the local form is ready to inspect. It does not mean G8 verification, backend
-review, human approval, submission, or receipt. Advancing the backend case to `review` in INT-001
-would falsely claim later-wave authority.
-
-## Component responsibilities and status
-
-| Component | Responsibility | Current status |
-| --- | --- | --- |
-| `apps/web/src/features/intake/` | Disclosure, local preflight, multipart client, clarification UI, stale-response protection | Implemented and integrated with authoritative FastAPI responses |
-| `apps/web/src/features/sandbox/` | Local portal state, variants, validation, rendered values, reset | Implemented; variant A fill/review and delete/reset verified in INT-001 |
-| `services/api/.../cases/` | Case identity, optimistic versioning, state transitions, delete | Implemented, composed, and verified with stale/duplicate conflicts |
-| `services/api/.../media/` | G0/G1, safe local names, EXIF review, deletable case media | Implemented with persistent case-to-media binding and verified cleanup |
-| `services/api/.../gates/` | Authoritative G2-G5 decisions and clarification boundary | GATE-001 implemented |
-| INT-001 workflow package | Mock packet, one clarification, portal port, response snapshots | Implemented and locally verified for text and synthetic-WAV paths |
-| `contracts/` | Only canonical cross-runtime contract artifacts | Implemented |
-| `evals/` | Static datasets, future graders/reports; never production gate authority | EVAL-001 implemented and included in passing Make verification |
-| `scripts/` | Exact runtime setup, canonical verification, safe reset | Implemented; setup idempotence and reset/restart verified |
-| `docs/` | Technical status and reproducible evidence | INT-001 results recorded; later-wave and release checkpoints remain pending |
-
-## Authority and gate ordering
-
-The INT-001 authoritative order is:
+## Gate order and authority
 
 ```text
-disclosure and server-owned case version
+exact fixture and server-owned v1
   -> G0 intake
   -> G1 privacy
-  -> deterministic mock extraction boundary
+  -> deterministic mock extraction event
   -> G2 strict output contract
   -> G3 safety and scope
   -> G4 evidence and provenance
   -> G5 completeness
-  -> one version-bound clarification
-  -> rebuild and rerun authoritative gates
-  -> local portal fill and portal review
-  -> backend verifying with verification pending
+  -> exactly one version-bound clarification
+  -> packet rebuild and ready_to_fill v5
+  -> G6 tool and loopback authority
+  -> read-only G7 preflight of exact fields and attachments
+  -> bounded Portal A writes; stop at portal review
+  -> atomic G7 finalization bound to the reviewed checkpoint
+  -> first fresh verification capture: one incident_time mismatch
+  -> one narrow repair
+  -> second fresh read: exact match
+  -> G8 verification
+  -> review v9; no approval and no receipt
 ```
 
-A deterministic failure stops the flow. Model output, a mock adapter, browser content, portal data,
-client preflight, model graders, and UI flags cannot change a failed gate into a pass. Later models
-may add a block, never remove one.
+Every gate decision is immutable. A model, mock, browser, portal, UI, eval, or human assertion may
+add a block but cannot clear or weaken a deterministic failure.
 
-G6-G8 are not silently simulated by the mock flow. G6 tool authority, G7 portal-write authority,
-and independent G8 rendered-value verification are Welle-2 work. Likewise, G9/G10 human authority
-and receipt redaction and G11 release readiness remain planned.
+## Component status
+
+| Component | V1 responsibility | Status |
+| --- | --- | --- |
+| `apps/web/src/features/intake/` | Disclosure, exact intake, clarification, auto-run, review evidence | Composed |
+| `apps/web/src/features/sandbox/` | Portal A state, controlled writes, rendered values, read-only review | Composed |
+| `services/api/.../int002/` | Exact V1 orchestration and recovery across v1-v9 | Composed |
+| `services/api/.../media/` | G0/G1, safe names, case-bound media, cleanup | Authoritative |
+| `services/api/.../gates/` | G2-G8 deterministic decisions | Authoritative |
+| `services/api/.../authority/` | Agent run capability and human-only approval boundary | Authoritative |
+| `services/api/.../computer_use/` | Closed policy and headless backend Playwright adapter | Portal A V1 path |
+| `services/api/.../workflow/` | Snapshot assembly and redacted SSE replay | Composed |
+| `contracts/` | Only canonical cross-runtime contracts | Authoritative |
+| `evals/` | Deterministic regression evidence; never production authority | EVAL-002 implemented |
+| `docs/` | V1 test guide, evidence, risks, and historical record | Current through INT-002 |
 
 ## Trust boundaries
 
-### User input and media
+### Fixture and media
 
-Only staged synthetic demo data is permitted. G0 checks exact image count, byte limits, MIME and
-magic bytes, statement mode, WAV duration, and consent before persistence. G1 requires an explicit
-EXIF choice for every image and approval for model-ready copies. Media is stored under an opaque,
-server-generated name and mapped persistently to the public case ID. Case deletion, backend demo
-reset, and `make reset` are designed to remove ClaimDone-owned temporary media.
+INT-002 accepts only the three manifest-bound PNGs, the exact normalized statement, all three
+consents, and `retain` for every image. G0/G1 execute before analysis authority. Media is stored
+under opaque server-owned names and removed by case cleanup or `make reset`. Public responses and
+workflow events do not expose storage handles or raw bytes.
 
-### Mock and future model boundary
+### Mock and provider boundary
 
-The INT-001 mock is deterministic and server-controlled, but its output still passes through G2-G5
-instead of bypassing them. Future model responses remain untrusted input to the same strict
-contracts. No model receives authority to submit, approve, or weaken a deterministic decision.
+The V1 analysis is deterministic and provider-free. It persists one redacted `provider_call` event
+with `providerMode=mock` to exercise the same audit contract; the external provider call count is
+zero. No OpenAI key is needed or read by the accepted path. A future live response would remain
+untrusted input to the same strict contracts and gates.
 
-### Portal boundary
+### Browser and portal boundary
 
-INT-001 calls only the loopback Next.js portal origin. Portal state is independently server-owned;
-the backend receives a returned portal snapshot rather than trusting a browser flag. INT-001 stops
-at portal `review`. Isolated adaptive Computer Use, tool allowlists, and independent comparison are
-planned and must not be inferred from this direct local mock path.
+The accepted runtime constructs `PlaywrightSemanticPortalBrowser` for the exact loopback portal
+origin. Policy validates the closed tool, URL, method, state, capability, field, and attachment set.
+Portal content cannot authorize navigation or writes. The local policy is defense in depth, not an
+independent OS/container network sandbox. This headless backend adapter is not the visible Chrome
+window used by the tester: outer-browser interaction submits product requests and may display the
+read-only review, while portal mutation and verification remain server-authorized adapter work.
 
 ### Human approval boundary
 
-Agent/human credential separation, a one-time human action, HTTP `403` for agent approval attempts,
-and receipt withholding are AUTH-001 work. No INT-001 response represents approval or submission.
+The final V1 case is `review`, not `human_approved`. The plan has `agentCanSubmit=false`; the Portal
+A control is disabled for the agent; no receipt row or receipt projection exists. Negative authority
+tests cover wrong role, invalid/reused capability, invalid state, and receipt-before-approval. The
+V1 browser flow deliberately does not execute a human approval.
 
-### Persistence and observability
+### Persistence, recovery, and SSE
 
-The default local state is `.local/claimdone/cases.db` plus `.local/claimdone/media/`. Case APIs use
-optimistic version checks. Audit records are designed to contain stable IDs and safe summaries
-rather than raw image bytes, private media storage names, or full identifying/insurance values. The
-recorded walkthrough observed no private storage handle in API responses and verified case/media
-and portal cleanup.
+SQLite commits every authority-bearing mutation atomically with its audit projection. Optimistic
+versions reject stale requests. Intake, answer, portal run, and verification paths resolve bounded
+uncertain commits without replaying unauthorized writes. SSE replays persisted, redacted workflow
+events by database-owned cursor. After request-body replay, the middleware delegates to the real
+ASGI receive channel so an open stream does not monopolize subsequent requests.
 
 ## Contract flow
-
-Canonical Python definitions live in `services/api/src/claimdone_api/contracts/`:
 
 ```text
 Pydantic contract models
   -> contracts/generated/claimdone.schema.json
   -> contracts/generated/claimdone.ts
-  -> TypeScript consumers
+  -> validated Python and TypeScript consumers
 ```
 
-Unknown fields and coercion are rejected, wire names use camelCase aliases, and validated models
-are immutable. Consumers must import or generate from these artifacts instead of creating local
-lookalikes. Contract changes require an explicit version decision, regenerated artifacts, and the
-full canonical checks.
+Unknown fields and coercion are rejected, validated models are immutable, and cross-runtime
+consumers must not create local lookalike contracts.
 
 ## Eval and release separation
 
-Production gate logic belongs with the workflow, never under `evals/`. EVAL-001 contains exactly
-twelve synthetic expected cases and a deterministic structural validator. The validator is linted,
-typechecked, and tested through `make lint`, `make typecheck`, and `make test`. It does not execute
-the product and produces no measured quality claim.
+`make eval-deterministic` runs the versioned twelve-case regression set without a live model. It
+checks schema, provenance, forbidden facts, required fields, safety blocks, tools, portal values,
+mismatch/repair, approval, and receipt boundaries. Eval code cannot alter production gates.
 
-EVAL-002 and later tasks will add deterministic runners, qualitative model graders, and versioned
-reports. Deterministic graders remain authoritative; model graders may report only additional
-failures. G11 will eventually consume verified artifacts and human checkpoints, but its runtime
-runner does not exist yet.
+Model graders, Portal B reliability, broader security/performance work, human product testing, G11,
+release, video, submission, and production remain outside INT-002. They require explicit user
+feedback and a new goal.
 
-## Implementation status and next sequence
+## Verification sources
 
-1. Foundation, canonical contracts, and Welle-1 modules — complete on the INT-001 base.
-2. Backend/web/quality composition into one no-live-AI walking skeleton — complete.
-3. Root Python lockfile ownership and integration verification — complete at the recorded anchor:
-   `python-multipart==0.0.32` and production `httpx==0.28.1`, setup twice, canonical checks,
-   production web build, live walkthroughs, cleanup, reset, and restart.
-4. AI, Computer Use, verifier, human authority, events, and deterministic eval runners — later-wave
-   work; none is implied by the INT-001 pass.
-5. Security, accessibility, reliability, external product tests, final documentation, and the
-   human-authorized submission path — still required before release.
-
-See [the implementation task list](../CLAIMDONE_IMPLEMENTATION_TASKS.md) for task dependencies and
-worktree ownership. Record only actual integrated commands and results in
-[verification-results.md](verification-results.md).
+- [V1 test handoff](v1-test-handoff.md)
+- [Normalized INT-002 acceptance](evidence/int002-v1-acceptance.json)
+- [Command and historical verification record](verification-results.md)
+- [Computer-use security boundary](computer-use-security.md)

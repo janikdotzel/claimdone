@@ -1,0 +1,238 @@
+{
+  "schemaVersion": 2,
+  "artifactKind": "precommitted-acceptance-contract-and-result-template",
+  "scope": "deterministic-v1-through-int-002",
+  "status": "pending-counted-runs",
+  "commitBinding": {
+    "strategy": "commit-containing-this-artifact",
+    "resolvedCommitSha": null,
+    "note": "A Git commit cannot embed its own SHA. Resolve this symbolically with git rev-parse HEAD and do not change tracked files after counted run 1 starts."
+  },
+  "statusDerivation": {
+    "passedOnlyWhen": [
+      "both counted run slots have distinct identity evidence and status passed",
+      "both observed normalized digests equal expectedNormalizedDigestSha256",
+      "the two observed normalized digests are identical",
+      "the final command results all have status passed on the same resolved commit",
+      "no tracked file changed after counted run 1 started"
+    ],
+    "currentStatusReason": "No post-commit counted-run evidence is embedded yet; this artifact makes no PASS claim."
+  },
+  "fixture": {
+    "fixtureId": "claimdone-int002-main-v1",
+    "manifestSha256": "7764b0a40370acf6ccf8eac1d69d1d7e52e1b92fa038ebbacb896302dac05b93",
+    "normalizedStatementSha256": "d85c66b4989cbff4adbfda59c7f1e78cba967f04fb64063f23aa2e32d7ac1de7",
+    "imageSha256": [
+      "188060aa5b755558c507d3ca0fc6390d03ba63488bf2fba642957a5151755435",
+      "a3a12e69f712373c53bd3962b1ae06715d7c27859e3ac783765a7dd5e67081db",
+      "76d3dc0b43872966e74c87c03e59cdd60e215a3902f7a1ccff1b789d4bab081d"
+    ]
+  },
+  "normalization": {
+    "algorithm": {
+      "name": "claimdone-int002-semantic-json",
+      "version": 1,
+      "steps": [
+        "project the observed run into the exact shape of expectedNormalizedPayload",
+        "remove run identity and the excluded volatile fields before projection",
+        "sort every object key lexicographically while preserving array order",
+        "serialize as compact UTF-8 JSON with JSON string escaping and no trailing newline",
+        "calculate SHA-256 and encode it as lowercase hexadecimal"
+      ]
+    },
+    "excludedVolatileFields": [
+      "caseId",
+      "requestId",
+      "clarificationId",
+      "runId",
+      "invocationId",
+      "attemptId",
+      "eventId",
+      "sourceAuditEventId",
+      "cursor",
+      "timestamps",
+      "durations"
+    ],
+    "retainedSemanticFields": [
+      "reset, fixture-regeneration and service-restart evidence",
+      "case state and version",
+      "clarification lifecycle",
+      "final G0-G8 decisions and deterministic authority flags",
+      "historical failed G5 decision and reason code",
+      "portal variant, state and version",
+      "verification status, expected and actual mismatch values, and affected fields",
+      "repair field and portal versions",
+      "approval and receipt boundary",
+      "providerMode and provider, retry, and failure counts",
+      "SSE concurrency health and snapshot results"
+    ],
+    "expectedNormalizedDigestSha256": "fef06e2ae7ee1809eb5d0b4e21287bd0c68f61a1edff08efb883e2344e50ef54",
+    "digestLockRule": "This digest is calculated from expectedNormalizedPayload. If either changes, create a new commit before both counted runs."
+  },
+  "runIdentityEvidenceModel": {
+    "purpose": "Prove that run 2 is a fresh case after a full reset without adding volatile identity values to the semantic digest.",
+    "requiredPerRun": [
+      "ordinal",
+      "sha256(caseId)",
+      "sha256(first persisted workflow event ID)",
+      "sha256(last persisted workflow event ID)",
+      "first and last SSE cursor",
+      "observed normalized digest"
+    ],
+    "distinctnessRule": "Run 1 and run 2 must have different caseId hashes and different first-event hashes; ordinals must be exactly 1 and 2. Cursor values are recorded as reset evidence but excluded from semantic comparison."
+  },
+  "expectedNormalizedPayload": {
+    "preconditions": {
+      "fullReset": true,
+      "fixtureRegenerated": true,
+      "fixtureCheckPassed": true,
+      "servicesRestarted": true
+    },
+    "mutationSequence": [
+      {"state": "created", "version": 1},
+      {"state": "awaiting_clarification", "version": 4},
+      {"state": "ready_to_fill", "version": 5},
+      {"state": "review", "version": 9}
+    ],
+    "clarificationLifecycle": [
+      {"round": 1, "field": "incident_time", "status": "requested"},
+      {"round": 1, "field": "incident_time", "status": "confirmed"}
+    ],
+    "finalSnapshot": {
+      "caseState": "review",
+      "caseVersion": 9,
+      "gateDecisions": [
+        {"gateId": "G0", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G1", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G2", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G3", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G4", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G5", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G6", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G7", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []},
+        {"gateId": "G8", "passed": true, "deterministic": true, "modelBlocked": false, "reasonCodes": []}
+      ]
+    },
+    "eventHistory": {
+      "retainsInitialClarificationFailure": true,
+      "initialFailedDecision": {
+        "gateId": "G5",
+        "passed": false,
+        "deterministic": true,
+        "modelBlocked": false,
+        "reasonCodes": ["G5_REQUIRED_FIELD_MISSING"]
+      }
+    },
+    "portal": {
+      "variant": "A",
+      "state": "review",
+      "version": 4
+    },
+    "verification": [
+      {
+        "attemptNumber": 1,
+        "status": "mismatch",
+        "final": false,
+        "portalVersion": 3,
+        "deterministicMatch": false,
+        "reviewAllowed": false,
+        "affectedFields": ["incident_time"],
+        "fieldComparison": {
+          "field": "incident_time",
+          "expected": "14:30:00",
+          "actual": "00:00:00"
+        },
+        "repair": {
+          "field": "incident_time",
+          "repairNumber": 1,
+          "fromPortalVersion": 3,
+          "toPortalVersion": 4
+        }
+      },
+      {
+        "attemptNumber": 2,
+        "status": "verified",
+        "final": true,
+        "portalVersion": 4,
+        "deterministicMatch": true,
+        "reviewAllowed": true,
+        "affectedFields": [],
+        "fieldComparison": {
+          "field": "incident_time",
+          "expected": "14:30:00",
+          "actual": "14:30:00"
+        },
+        "repair": null
+      }
+    ],
+    "authority": {
+      "caseState": "review",
+      "agentCanSubmit": false,
+      "agentApprovalExecuted": false,
+      "humanApproved": false,
+      "receipt": null
+    },
+    "provider": {
+      "providerMode": "mock",
+      "externalProviderCalls": 0,
+      "mockProviderEvents": 1,
+      "retryEvents": 0,
+      "operationalFailureEvents": 0
+    },
+    "sseConcurrency": {
+      "streamRemainedOpen": true,
+      "concurrentHealthStatus": 200,
+      "concurrentSnapshotStatus": 200,
+      "snapshotMatchedFinalCase": true
+    }
+  },
+  "countedRuns": [
+    {
+      "ordinal": 1,
+      "status": "pending",
+      "identityEvidence": {
+        "caseIdSha256": null,
+        "firstWorkflowEventIdSha256": null,
+        "lastWorkflowEventIdSha256": null,
+        "firstSseCursor": null,
+        "lastSseCursor": null
+      },
+      "observedNormalizedDigestSha256": null,
+      "observedPayloadMatchedExpected": null
+    },
+    {
+      "ordinal": 2,
+      "status": "pending",
+      "identityEvidence": {
+        "caseIdSha256": null,
+        "firstWorkflowEventIdSha256": null,
+        "lastWorkflowEventIdSha256": null,
+        "firstSseCursor": null,
+        "lastSseCursor": null
+      },
+      "observedNormalizedDigestSha256": null,
+      "observedPayloadMatchedExpected": null
+    }
+  ],
+  "comparison": {
+    "status": "pending",
+    "distinctRunIdentities": null,
+    "sameNormalizedDigest": null,
+    "allowedDifferencesOnly": null
+  },
+  "finalCommands": [
+    {"command": "make check-runtime", "status": "pending"},
+    {"command": "make lint", "status": "pending"},
+    {"command": "make typecheck", "status": "pending"},
+    {"command": "make test", "status": "pending"},
+    {"command": "make eval-deterministic", "status": "pending"}
+  ],
+  "releaseClaims": {
+    "liveProviderVerified": false,
+    "portalBVerified": false,
+    "humanApprovalExecuted": false,
+    "receiptCreated": false,
+    "releaseReady": false,
+    "productionReady": false
+  }
+}

@@ -2,6 +2,8 @@
 
 Dieses Dokument übersetzt den freigegebenen [`CLAIMDONE_BUILD_WEEK_PLAN.md`](CLAIMDONE_BUILD_WEEK_PLAN.md) in einzeln beauftragbare Aufgaben. Es ist die operative Grundlage für Codex-Agenten, menschliche Entscheidungen, parallele Git-Worktrees, Integration und Abnahme.
 
+> **Aktueller Entwicklungsstatus (15. Juli 2026):** Eine kurze, nutzerorientierte Übersicht steht in [`CLAIMDONE_CURRENT_STATUS.md`](CLAIMDONE_CURRENT_STATUS.md). Das lokale deterministische V1 bis INT-002 liegt auf `codex/int002-v1-acceptance` als pausierter Acceptance Candidate vor; zwei gezählte Browserläufe, der normalisierte Vergleich und die finalen Make-Gates stehen noch aus. Menschlicher Test und Fortsetzungs-Goal sind in [`CLAIMDONE_MVP_TEST_AND_RESUME.md`](CLAIMDONE_MVP_TEST_AND_RESUME.md) festgehalten. Merge und Push nach `main`, W3 und alle späteren Aufgaben bleiben bis zur ausdrücklichen Freigabe gesperrt.
+
 ## 1. Arbeitsmodell
 
 ### Rollen
