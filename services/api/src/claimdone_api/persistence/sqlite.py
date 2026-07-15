@@ -53,20 +53,27 @@ from claimdone_api.contracts import (
     GateWorkflowEvent,
     OperationalFailureWorkflowEvent,
     PlanStepWorkflowEvent,
+    PortalDraftFields,
     PortalFillWorkflowEvent,
+    PortalSessionView,
     PortalState,
     PortalVariant,
     ProvenanceRef,
     ProviderCallWorkflowEvent,
     ProviderFailureCategory,
     ProviderModelId,
+    RenderedPortalSnapshot,
     RequiredClaimField,
     RetryWorkflowEvent,
     SandboxReceipt,
     StateWorkflowEvent,
     ToolCallStatus,
     ToolCallWorkflowEvent,
+    ToolInvocation,
     TranscriptConfirmationView,
+    VerificationAttempt,
+    VerificationAttemptSeries,
+    VerificationRepairMetadata,
     VerificationState,
     VerificationWorkflowEvent,
     WorkflowEventEnvelope,
@@ -89,11 +96,15 @@ from claimdone_api.gates import (
     ProvenanceResult,
     RequestedAction,
     SafetyInput,
+    ToolAuthorityContext,
     compute_missing_required_fields,
     evaluate_g2,
     evaluate_g3,
     evaluate_g4,
     evaluate_g5,
+    evaluate_g6,
+    evaluate_g7,
+    evaluate_g8,
     make_gate_decision,
 )
 
@@ -109,6 +120,11 @@ from .models import (
     JsonObject,
     ObservabilityMetricsSnapshot,
     OutputContractAttempt,
+    PortalRunRecord,
+    PortalRunStartCommand,
+    PortalRunStartResult,
+    PortalWriteFinalizeCommand,
+    PortalWriteFinalizeResult,
     ProviderUsageLedgerRecord,
     ProviderWorkflowEmission,
     SandboxReceiptRecord,
@@ -120,13 +136,15 @@ from .models import (
     TranscriptionOutcomeCommand,
     TranscriptRecord,
     TranscriptTransitionResult,
+    VerificationAttemptCommand,
+    VerificationAttemptResult,
     validate_portal_state,
 )
 
 if TYPE_CHECKING:
     from claimdone_api.media import CaseMediaStore
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 MAX_OBSERVABILITY_EVENT_ROWS = 4_096
@@ -135,6 +153,9 @@ LEGACY_AUTHORITY_APPLICATION_ID = 0x43444C31
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 _GATE_DECISIONS_ADAPTER: TypeAdapter[tuple[GateDecision, ...]] = TypeAdapter(
     tuple[GateDecision, ...]
+)
+_VERIFICATION_ATTEMPTS_ADAPTER: TypeAdapter[tuple[VerificationAttempt, ...]] = TypeAdapter(
+    tuple[VerificationAttempt, ...]
 )
 _OBSERVABILITY_LOGGER = logging.getLogger("claimdone.observability")
 
@@ -169,6 +190,7 @@ def _repository_initialization_lock(path: Path) -> Iterator[None]:
             entry.users -= 1
             if entry.users == 0 and _INITIALIZATION_LOCKS.get(key) is entry:
                 del _INITIALIZATION_LOCKS[key]
+
 
 type AppendableWorkflowEvent = (
     ClarificationWorkflowEvent
@@ -332,6 +354,9 @@ _REQUIRED_SCHEMA_TABLES = (
     "case_intake_authority",
     "case_transcript_authority",
     "case_packet_authority",
+    "portal_run_authority",
+    "portal_session_authority",
+    "verification_attempt_authority",
 )
 
 
@@ -746,12 +771,225 @@ _MIGRATION_6 = (
     """,
 )
 
+_MIGRATION_7 = (
+    """
+    CREATE TABLE portal_run_authority (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        case_id TEXT NOT NULL UNIQUE REFERENCES cases(case_id) ON DELETE CASCADE,
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        agent_capability_digest BLOB NOT NULL UNIQUE
+            REFERENCES authority_capabilities(capability_digest) ON DELETE CASCADE
+            CHECK (
+                typeof(agent_capability_digest) = 'blob'
+                AND length(agent_capability_digest) = 32
+            ),
+        control_digest BLOB NOT NULL UNIQUE
+            CHECK (typeof(control_digest) = 'blob' AND length(control_digest) = 32),
+        portal_variant TEXT NOT NULL CHECK (portal_variant IN ('A', 'B')),
+        ready_case_version INTEGER NOT NULL CHECK (ready_case_version >= 1),
+        g6_case_version INTEGER NOT NULL CHECK (g6_case_version = ready_case_version + 1),
+        terminal_case_version INTEGER
+            CHECK (
+                terminal_case_version IS NULL
+                OR terminal_case_version = g6_case_version
+                OR terminal_case_version = g6_case_version + 1
+            ),
+        invocation_json TEXT NOT NULL CHECK (json_valid(invocation_json)),
+        invocation_sha256 TEXT NOT NULL
+            CHECK (
+                length(invocation_sha256) = 64
+                AND invocation_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        g6_context_json TEXT NOT NULL CHECK (json_valid(g6_context_json)),
+        g6_context_sha256 TEXT NOT NULL
+            CHECK (
+                length(g6_context_sha256) = 64
+                AND g6_context_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        prestage_session_json TEXT NOT NULL CHECK (json_valid(prestage_session_json)),
+        prestage_session_sha256 TEXT NOT NULL
+            CHECK (
+                length(prestage_session_sha256) = 64
+                AND prestage_session_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        g6_gate_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        g6_state_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        g7_gate_sequence INTEGER UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        tool_terminal_audit_sequence INTEGER UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        portal_fill_audit_sequence INTEGER UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        g7_state_audit_sequence INTEGER UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        rejected_summary_json TEXT
+            CHECK (rejected_summary_json IS NULL OR json_valid(rejected_summary_json)),
+        rejected_summary_sha256 TEXT
+            CHECK (
+                rejected_summary_sha256 IS NULL
+                OR (
+                    length(rejected_summary_sha256) = 64
+                    AND rejected_summary_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+        status TEXT NOT NULL
+            CHECK (
+                status IN (
+                    'filling', 'blocked_g6', 'verifying', 'blocked_g7',
+                    'review', 'blocked_g8'
+                )
+            ),
+        created_at TEXT NOT NULL,
+        terminal_at TEXT,
+        UNIQUE (case_id, run_id),
+        CHECK (
+            (status IN ('filling', 'blocked_g6') AND g7_gate_sequence IS NULL)
+            OR (status NOT IN ('filling', 'blocked_g6') AND g7_gate_sequence IS NOT NULL)
+        ),
+        CHECK (
+            (status = 'filling' AND terminal_case_version IS NULL AND terminal_at IS NULL)
+            OR (
+                status = 'blocked_g6'
+                AND terminal_case_version = g6_case_version
+                AND terminal_at IS NOT NULL
+            )
+            OR (
+                status NOT IN ('filling', 'blocked_g6')
+                AND terminal_case_version = g6_case_version + 1
+                AND terminal_case_version IS NOT NULL
+                AND terminal_at IS NOT NULL
+            )
+        ),
+        CHECK ((rejected_summary_json IS NULL) = (rejected_summary_sha256 IS NULL)),
+        CHECK (json_extract(invocation_json, '$.invocationId') IS run_id),
+        CHECK (json_extract(prestage_session_json, '$.caseId') IS case_id),
+        CHECK (json_extract(prestage_session_json, '$.variant') IS portal_variant),
+        CHECK (json_extract(prestage_session_json, '$.state') IS 'draft')
+    )
+    """,
+    """
+    CREATE TABLE portal_session_authority (
+        case_id TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
+        checkpoint_number INTEGER NOT NULL CHECK (checkpoint_number IN (1, 2)),
+        run_id TEXT NOT NULL,
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        checkpoint_kind TEXT NOT NULL CHECK (checkpoint_kind IN ('reviewed', 'repair')),
+        portal_version INTEGER NOT NULL CHECK (portal_version >= 1),
+        session_json TEXT NOT NULL CHECK (json_valid(session_json)),
+        session_sha256 TEXT NOT NULL
+            CHECK (
+                length(session_sha256) = 64
+                AND session_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        rendered_snapshot_json TEXT NOT NULL CHECK (json_valid(rendered_snapshot_json)),
+        rendered_snapshot_sha256 TEXT NOT NULL
+            CHECK (
+                length(rendered_snapshot_sha256) = 64
+                AND rendered_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        source_attempt_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (case_id, checkpoint_number),
+        UNIQUE (run_id, checkpoint_number),
+        UNIQUE (case_id, portal_version),
+        FOREIGN KEY (case_id, run_id)
+            REFERENCES portal_run_authority(case_id, run_id)
+            ON DELETE CASCADE,
+        CHECK (
+            (checkpoint_number = 1 AND checkpoint_kind = 'reviewed' AND source_attempt_id IS NULL)
+            OR (
+                checkpoint_number = 2
+                AND checkpoint_kind = 'repair'
+                AND source_attempt_id IS NOT NULL
+            )
+        ),
+        CHECK (json_extract(session_json, '$.caseId') IS case_id),
+        CHECK (json_extract(session_json, '$.version') IS portal_version),
+        CHECK (json_extract(session_json, '$.state') IS 'review'),
+        CHECK (json_extract(rendered_snapshot_json, '$.caseId') IS case_id),
+        CHECK (json_extract(rendered_snapshot_json, '$.version') IS portal_version),
+        CHECK (json_extract(rendered_snapshot_json, '$.state') IS 'review')
+    )
+    """,
+    """
+    CREATE TABLE verification_attempt_authority (
+        attempt_id TEXT PRIMARY KEY NOT NULL,
+        case_id TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        attempt_number INTEGER NOT NULL CHECK (attempt_number IN (1, 2)),
+        bound_case_version INTEGER NOT NULL CHECK (bound_case_version >= 1),
+        portal_checkpoint_number INTEGER NOT NULL CHECK (portal_checkpoint_number IN (1, 2)),
+        attempt_json TEXT NOT NULL CHECK (json_valid(attempt_json)),
+        attempt_sha256 TEXT NOT NULL
+            CHECK (
+                length(attempt_sha256) = 64
+                AND attempt_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        rendered_snapshot_json TEXT NOT NULL CHECK (json_valid(rendered_snapshot_json)),
+        rendered_snapshot_sha256 TEXT NOT NULL
+            CHECK (
+                length(rendered_snapshot_sha256) = 64
+                AND rendered_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        screenshot_sha256 TEXT NOT NULL
+            CHECK (
+                length(screenshot_sha256) = 64
+                AND screenshot_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        snapshot_requested_at TEXT NOT NULL,
+        snapshot_received_at TEXT NOT NULL,
+        final INTEGER NOT NULL CHECK (final IN (0, 1)),
+        g8_gate_sequence INTEGER UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        verification_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        state_audit_sequence INTEGER UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        UNIQUE (case_id, attempt_number),
+        FOREIGN KEY (case_id, run_id)
+            REFERENCES portal_run_authority(case_id, run_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY (case_id, portal_checkpoint_number)
+            REFERENCES portal_session_authority(case_id, checkpoint_number)
+            ON DELETE CASCADE,
+        CHECK ((final = 1) = (g8_gate_sequence IS NOT NULL)),
+        CHECK ((final = 1) = (state_audit_sequence IS NOT NULL)),
+        CHECK (json_extract(attempt_json, '$.attemptId') IS attempt_id),
+        CHECK (json_extract(attempt_json, '$.caseId') IS case_id),
+        CHECK (json_extract(attempt_json, '$.attemptNumber') IS attempt_number),
+        CHECK (json_extract(attempt_json, '$.final') IS final),
+        CHECK (json_extract(rendered_snapshot_json, '$.caseId') IS case_id)
+    )
+    """,
+    """
+    CREATE INDEX verification_attempt_case_number_idx
+    ON verification_attempt_authority(case_id, attempt_number)
+    """,
+)
+
 _MEDIA_STORAGE_NAME = re.compile(r"^case-[a-f0-9]{32}$")
 _AUDIO_LOCAL_REF = re.compile(r"^audio-[a-f0-9]{32}\.wav$")
 _TRANSCRIPT_LOCAL_REF = re.compile(r"^transcript-[a-f0-9]{32}\.txt$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _CAPABILITY_TTL = timedelta(seconds=120)
+_G6_SAFE_ACTIONS = frozenset(
+    {
+        "click",
+        "double_click",
+        "drag",
+        "move",
+        "scroll",
+        "keypress",
+        "type",
+        "wait",
+        "screenshot",
+    }
+)
 
 
 def _transcript_identity_from_summary(
@@ -811,6 +1049,135 @@ def _dump_json_value(value: JsonValue) -> str:
     )
 
 
+def _dump_contract(value: BaseModel) -> str:
+    return _dump_json_value(cast(JsonValue, value.model_dump(mode="json", by_alias=True)))
+
+
+def _authority_sha256(namespace: str, payload: str) -> str:
+    return hashlib.sha256(
+        f"claimdone-{namespace}-v1\0".encode() + payload.encode("utf-8")
+    ).hexdigest()
+
+
+def _verification_authority_sha256(
+    *,
+    attempt_json: str,
+    rendered_json: str,
+    screenshot_sha256: str,
+    requested_at: datetime,
+    received_at: datetime,
+) -> str:
+    payload = "\0".join(
+        (
+            attempt_json,
+            rendered_json,
+            screenshot_sha256,
+            _dump_aware_datetime(requested_at, "snapshot requested_at"),
+            _dump_aware_datetime(received_at, "snapshot received_at"),
+        )
+    )
+    return _authority_sha256("verification-attempt", payload)
+
+
+def _rebind_claim_packet(
+    packet: ClaimPacket,
+    *,
+    state: CaseState,
+    portal_state: PortalState,
+    gates: tuple[GateDecision, ...],
+    verification: BaseModel | JsonObject,
+) -> ClaimPacket:
+    data = packet.model_dump(mode="json", by_alias=True)
+    data.update(
+        {
+            "state": state.value,
+            "portalState": portal_state.value,
+            "gateDecisions": [gate.model_dump(mode="json", by_alias=True) for gate in gates],
+            "verification": (
+                verification.model_dump(mode="json", by_alias=True)
+                if isinstance(verification, BaseModel)
+                else verification
+            ),
+        }
+    )
+    return ClaimPacket.model_validate(data)
+
+
+def _canonical_claim_portal_fields(packet: ClaimPacket) -> PortalDraftFields:
+    claim = packet.claim.model_dump(mode="json", by_alias=True)
+    return PortalDraftFields.model_validate(
+        {
+            "incidentDate": claim["incidentDate"],
+            "incidentTime": claim["incidentTime"],
+            "location": claim["location"],
+            "claimantName": claim["claimantName"],
+            "policyReference": claim["policyReference"],
+            "vehicleRegistration": claim["vehicleRegistration"],
+            "counterpartyKnown": claim["counterpartyKnown"],
+            "narrative": claim["narrative"],
+            "attachments": claim["attachments"],
+        }
+    )
+
+
+def _validate_prestage_session(
+    session: PortalSessionView,
+    *,
+    case_id: str,
+    variant: PortalVariant,
+    attachments: tuple[str, ...],
+) -> None:
+    fields = session.fields
+    if (
+        session.case_id != case_id
+        or session.variant is not variant
+        or session.state is not PortalState.DRAFT
+        or session.version != 1
+        or fields.incident_date != ""
+        or fields.incident_time != ""
+        or fields.location != ""
+        or fields.claimant_name != ""
+        or fields.policy_reference != ""
+        or fields.vehicle_registration != ""
+        or fields.counterparty_known != ""
+        or fields.narrative != ""
+        or fields.attachments != attachments
+    ):
+        raise WorkflowAtomicityError(
+            "Prestage authority requires empty scalars and exact ordered attachments"
+        )
+
+
+def _rejected_g7_summary(payload: object, decision: GateDecision) -> JsonObject:
+    if type(payload) is dict:
+        field_count = len(cast(dict[object, object], payload))
+        recognized = len(
+            set(cast(dict[object, object], payload))
+            & {
+                "incidentDate",
+                "incidentTime",
+                "location",
+                "claimantName",
+                "policyReference",
+                "vehicleRegistration",
+                "counterpartyKnown",
+                "narrative",
+                "attachments",
+            }
+        )
+        payload_type = "object"
+    else:
+        field_count = 0
+        recognized = 0
+        payload_type = "other"
+    return {
+        "payloadType": payload_type,
+        "fieldCount": field_count,
+        "recognizedFieldCount": recognized,
+        "reasonCodes": [reason.value for reason in decision.reason_codes],
+    }
+
+
 def _load_json_object(value: str) -> JsonObject:
     return _JSON_OBJECT_ADAPTER.validate_json(value)
 
@@ -847,14 +1214,10 @@ def _bounded_observability_sum(
     """Sum persisted counters without accepting nulls or oversized aggregates."""
 
     if any(type(value) is not int or value < 0 for value in values):
-        raise PersistedDataIntegrityError(
-            f"Persisted {field} contains an invalid counter"
-        )
+        raise PersistedDataIntegrityError(f"Persisted {field} contains an invalid counter")
     total = sum(cast(int, value) for value in values)
     if total > SQLITE_MAX_INTEGER:
-        raise PersistedDataIntegrityError(
-            f"Persisted {field} exceeds the SQLite integer bound"
-        )
+        raise PersistedDataIntegrityError(f"Persisted {field} exceeds the SQLite integer bound")
     return total
 
 
@@ -875,9 +1238,7 @@ def _validate_provider_metric_sequence(
                 "Persisted provider cursors are not strictly increasing"
             )
         if terminal_cursor is not None:
-            raise PersistedDataIntegrityError(
-                "Persisted provider call follows a terminal failure"
-            )
+            raise PersistedDataIntegrityError("Persisted provider call follows a terminal failure")
         if item.operation is WorkflowOperation.TRANSCRIPTION:
             if operation_phase != 0:
                 raise PersistedDataIntegrityError(
@@ -918,9 +1279,7 @@ def _validate_provider_metric_sequence(
         )
         if len(extraction) == 1:
             if not initial_shape:
-                raise PersistedDataIntegrityError(
-                    "Persisted extraction initial call is invalid"
-                )
+                raise PersistedDataIntegrityError("Persisted extraction initial call is invalid")
         elif len(extraction) == 3:
             retry, final = extraction[1:]
             if (
@@ -932,8 +1291,7 @@ def _validate_provider_metric_sequence(
                 or retry.model_id is not first.model_id
                 or retry.provider_mode != first.provider_mode
                 or retry.duration_ms != first.duration_ms
-                or retry.failure_category
-                is not ProviderFailureCategory.INVALID_RESPONSE
+                or retry.failure_category is not ProviderFailureCategory.INVALID_RESPONSE
                 or retry.source_audit_sequence <= first.source_audit_sequence
                 or final.status not in {"failed", "succeeded"}
                 or final.call_sequence != first.call_sequence + 1
@@ -946,9 +1304,7 @@ def _validate_provider_metric_sequence(
                     "Persisted extraction retry chronology is invalid"
                 )
         else:
-            raise PersistedDataIntegrityError(
-                "Persisted extraction telemetry exceeds one V1 retry"
-            )
+            raise PersistedDataIntegrityError("Persisted extraction telemetry exceeds one V1 retry")
 
     for operation in (
         WorkflowOperation.COMPUTER_USE,
@@ -966,18 +1322,14 @@ def _validate_provider_metric_sequence(
                 or item.status not in {"failed", "succeeded"}
                 or item.model_id is not model_id
                 or item.provider_mode != provider_mode
-                or (
-                    item.status == "failed"
-                    and expected_call_sequence != len(turns)
-                )
+                or (item.status == "failed" and expected_call_sequence != len(turns))
             ):
                 raise PersistedDataIntegrityError(
                     "Persisted multi-turn provider chronology is invalid"
                 )
 
     if any(
-        item.status == "retry_scheduled"
-        and item.operation is not WorkflowOperation.EXTRACTION
+        item.status == "retry_scheduled" and item.operation is not WorkflowOperation.EXTRACTION
         for item in provider
     ):
         raise PersistedDataIntegrityError(
@@ -1000,15 +1352,11 @@ def _completed_tool_metric_events(
         identity = event.invocation_id
         if event.status is ToolCallStatus.STARTED:
             if identity in started or identity in terminal:
-                raise PersistedDataIntegrityError(
-                    "Persisted tool invocation start is duplicated"
-                )
+                raise PersistedDataIntegrityError("Persisted tool invocation start is duplicated")
             started[identity] = (event.sequence, event.tool)
             continue
         if identity in terminal:
-            raise PersistedDataIntegrityError(
-                "Persisted terminal tool invocation is duplicated"
-            )
+            raise PersistedDataIntegrityError("Persisted terminal tool invocation is duplicated")
         origin = started.get(identity)
         if origin is not None and origin != (event.sequence, event.tool):
             raise PersistedDataIntegrityError(
@@ -1076,17 +1424,13 @@ def _gate_decision_from_row(
     label: str,
 ) -> tuple[str, GateDecision]:
     case_id = _require_string(row["case_id"], f"{label} case id")
-    decision = GateDecision.model_validate_json(
-        _require_string(row["decision_json"], label)
-    )
+    decision = GateDecision.model_validate_json(_require_string(row["decision_json"], label))
     if decision.gate_id.value != _require_string(
         row["gate_id"], f"{label} id"
     ) or decision.decided_at != _parse_datetime(
         _require_string(row["decided_at"], f"{label} decided_at")
     ):
-        raise PersistedDataIntegrityError(
-            "Persisted gate columns disagree with canonical JSON"
-        )
+        raise PersistedDataIntegrityError("Persisted gate columns disagree with canonical JSON")
     return case_id, decision
 
 
@@ -1097,17 +1441,14 @@ def _validate_projected_gate_and_state_histories(
     workflows_by_sequence: dict[int, WorkflowEventEnvelope],
 ) -> None:
     ordered_workflows = tuple(
-        workflows_by_sequence[sequence]
-        for sequence in sorted(workflows_by_sequence)
+        workflows_by_sequence[sequence] for sequence in sorted(workflows_by_sequence)
     )
     validate_workflow_event_order(ordered_workflows)
 
     projected_gates_by_case: dict[str, list[GateDecision]] = {}
     for envelope in ordered_workflows:
         if isinstance(envelope.event, GateWorkflowEvent):
-            projected_gates_by_case.setdefault(envelope.case_id, []).append(
-                envelope.event.decision
-            )
+            projected_gates_by_case.setdefault(envelope.case_id, []).append(envelope.event.decision)
     if gate_decisions_by_case != projected_gates_by_case:
         raise PersistedDataIntegrityError(
             "Persisted gate decisions disagree with their workflow projections"
@@ -1120,15 +1461,10 @@ def _validate_projected_gate_and_state_histories(
             continue
         replayed = replayed_states.get(envelope.case_id)
         if replayed is None or event.from_state is not replayed:
-            raise PersistedDataIntegrityError(
-                "Persisted state workflow history is not contiguous"
-            )
+            raise PersistedDataIntegrityError("Persisted state workflow history is not contiguous")
         validate_case_transition(replayed, event.to_state)
         replayed_states[envelope.case_id] = event.to_state
-    if any(
-        replayed_states[case_id] is not state
-        for case_id, state in case_states.items()
-    ):
+    if any(replayed_states[case_id] is not state for case_id, state in case_states.items()):
         raise PersistedDataIntegrityError(
             "Persisted case state disagrees with replayed workflow history"
         )
@@ -1141,9 +1477,7 @@ def _validate_provider_usage_binding(
     event = envelope.event
     if not isinstance(
         event,
-        ProviderCallWorkflowEvent
-        | RetryWorkflowEvent
-        | OperationalFailureWorkflowEvent,
+        ProviderCallWorkflowEvent | RetryWorkflowEvent | OperationalFailureWorkflowEvent,
     ):
         if record is not None:
             raise PersistedDataIntegrityError(
@@ -1151,9 +1485,7 @@ def _validate_provider_usage_binding(
             )
         return
     if record is None:
-        raise PersistedDataIntegrityError(
-            "Provider workflow event is missing usage telemetry"
-        )
+        raise PersistedDataIntegrityError("Provider workflow event is missing usage telemetry")
 
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -1311,10 +1643,7 @@ class SqliteCaseRepository:
         if not self._table_exists(connection, "case_intake_authority"):
             return False
         return (
-            connection.execute(
-                "SELECT 1 FROM case_intake_authority LIMIT 1"
-            ).fetchone()
-            is not None
+            connection.execute("SELECT 1 FROM case_intake_authority LIMIT 1").fetchone() is not None
         )
 
     @property
@@ -1460,10 +1789,7 @@ class SqliteCaseRepository:
                 application_id = int(application_row[0])
                 version = int(version_row[0])
                 if fresh_unmarked:
-                    if (
-                        application_id == expected_application_id
-                        and version == SCHEMA_VERSION
-                    ):
+                    if application_id == expected_application_id and version == SCHEMA_VERSION:
                         # A different process completed the same authority claim
                         # while this opener waited for the exclusive lock.
                         fresh_unmarked = False
@@ -1516,6 +1842,10 @@ class SqliteCaseRepository:
                     self._migrate_v5_to_v6(connection)
                     version = 6
                     connection.execute("PRAGMA user_version = 6")
+                if version == 6:
+                    self._migrate_v6_to_v7(connection)
+                    version = 7
+                    connection.execute("PRAGMA user_version = 7")
                 if version != SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(f"Unsupported database schema: {version}")
                 self._require_no_foreign_key_violations(connection)
@@ -1523,9 +1853,7 @@ class SqliteCaseRepository:
                 if integrity is None or str(integrity[0]).lower() != "ok":
                     raise PersistenceError("SQLite integrity check failed during migration")
                 if fresh_unmarked:
-                    connection.execute(
-                        f"PRAGMA application_id = {expected_application_id}"
-                    )
+                    connection.execute(f"PRAGMA application_id = {expected_application_id}")
                 # Validate the fully migrated view before committing any DDL,
                 # schema version, or fresh authority identity.  A rejected
                 # legacy payload must leave the source database untouched.
@@ -1544,10 +1872,7 @@ class SqliteCaseRepository:
 
         with closing(self._connect()) as connection:
             application_row = connection.execute("PRAGMA application_id").fetchone()
-            if (
-                application_row is None
-                or int(application_row[0]) != expected_application_id
-            ):
+            if application_row is None or int(application_row[0]) != expected_application_id:
                 raise AuthorityModeMismatchError(
                     "Repository authority identity did not survive initialization"
                 )
@@ -1712,9 +2037,9 @@ class SqliteCaseRepository:
                     "SELECT * FROM provider_usage_ledger ORDER BY source_audit_sequence"
                 ):
                     provider_record = self._row_to_provider_usage(row)
-                    provider_usage_by_sequence[
-                        provider_record.source_audit_sequence
-                    ] = provider_record
+                    provider_usage_by_sequence[provider_record.source_audit_sequence] = (
+                        provider_record
+                    )
             if self._table_exists(connection, "authority_capabilities"):
                 for row in connection.execute(
                     "SELECT * FROM authority_capabilities ORDER BY case_id, purpose"
@@ -1766,30 +2091,26 @@ class SqliteCaseRepository:
                             allow_legacy_human_variant=legacy,
                         )
                     )
-                    if (
-                        receipt.case_id != receipt_case_id
-                        or (
-                            self.is_canonical_authority
-                            and (
-                                bound_case is None
-                                or bound_case.state is not CaseState.RECEIPT
-                                or receipt.version != bound_case.version
-                                or receipt_created_at != bound_case.updated_at
-                                or receipt.approved_at < bound_case.created_at
-                                or receipt.rendered_at != receipt_created_at
-                                or consumed_human is None
-                                or consumed_human.bound_case_version
-                                != bound_case.version - 2
-                                or consumed_human.consumed_at is None
-                                or not (
-                                    consumed_human.issued_at
-                                    < consumed_human.consumed_at
-                                    < receipt.approved_at
-                                    < receipt.rendered_at
-                                )
-                                or not receipt.approval_id.startswith(
-                                    f"approval-{receipt.variant.value.lower()}-"
-                                )
+                    if receipt.case_id != receipt_case_id or (
+                        self.is_canonical_authority
+                        and (
+                            bound_case is None
+                            or bound_case.state is not CaseState.RECEIPT
+                            or receipt.version != bound_case.version
+                            or receipt_created_at != bound_case.updated_at
+                            or receipt.approved_at < bound_case.created_at
+                            or receipt.rendered_at != receipt_created_at
+                            or consumed_human is None
+                            or consumed_human.bound_case_version != bound_case.version - 2
+                            or consumed_human.consumed_at is None
+                            or not (
+                                consumed_human.issued_at
+                                < consumed_human.consumed_at
+                                < receipt.approved_at
+                                < receipt.rendered_at
+                            )
+                            or not receipt.approval_id.startswith(
+                                f"approval-{receipt.variant.value.lower()}-"
                             )
                         )
                     ):
@@ -1815,24 +2136,19 @@ class SqliteCaseRepository:
                         provider_usage_by_sequence.get(sequence),
                     )
                 if any(
-                    sequence not in workflows_by_sequence
-                    for sequence in provider_usage_by_sequence
+                    sequence not in workflows_by_sequence for sequence in provider_usage_by_sequence
                 ):
                     raise PersistedDataIntegrityError(
                         "Persisted provider usage has no workflow event"
                     )
 
                 _validate_projected_gate_and_state_histories(
-                    case_states={
-                        case_id: case.state for case_id, case in cases_by_id.items()
-                    },
+                    case_states={case_id: case.state for case_id, case in cases_by_id.items()},
                     gate_decisions_by_case=gate_decisions_by_case,
                     workflows_by_sequence=workflows_by_sequence,
                 )
 
-            transcripts_by_case = {
-                transcript.case_id: transcript for transcript in transcripts
-            }
+            transcripts_by_case = {transcript.case_id: transcript for transcript in transcripts}
             for transcript_record in transcripts:
                 bound_case = cases_by_id.get(transcript_record.case_id)
                 if bound_case is None or bound_case.snapshot.intake_summary is None:
@@ -1864,9 +2180,7 @@ class SqliteCaseRepository:
                 connection,
                 "case_intake_authority",
             )
-            if self.is_canonical_authority and (
-                not legacy or canonical_authority_tables_exist
-            ):
+            if self.is_canonical_authority and (not legacy or canonical_authority_tables_exist):
                 version_origins_by_case: dict[str, dict[int, datetime]] = {}
                 for case in cases_by_id.values():
                     self._validate_canonical_case_snapshot(case)
@@ -1899,23 +2213,17 @@ class SqliteCaseRepository:
                 for capability in capabilities:
                     bound_case = cases_by_id.get(capability.case_id)
                     if bound_case is None:
-                        raise PersistedDataIntegrityError(
-                            "Persisted capability has no bound case"
-                        )
+                        raise PersistedDataIntegrityError("Persisted capability has no bound case")
                     self._validate_capability_case_binding(
                         capability,
                         version_origins=version_origins_by_case[capability.case_id],
                     )
                 authority_case_ids = {
                     _require_string(row["case_id"], "intake authority case id")
-                    for row in connection.execute(
-                        "SELECT case_id FROM case_intake_authority"
-                    )
+                    for row in connection.execute("SELECT case_id FROM case_intake_authority")
                 }
                 handle_created_at_by_case: dict[str, datetime] = {}
-                for row in connection.execute(
-                    "SELECT case_id, created_at FROM case_media_handles"
-                ):
+                for row in connection.execute("SELECT case_id, created_at FROM case_media_handles"):
                     handle_case_id = _require_string(
                         row["case_id"],
                         "media handle case id",
@@ -1939,9 +2247,7 @@ class SqliteCaseRepository:
                     )
                 transcript_authority_case_ids = {
                     _require_string(row["case_id"], "transcript authority case id")
-                    for row in connection.execute(
-                        "SELECT case_id FROM case_transcript_authority"
-                    )
+                    for row in connection.execute("SELECT case_id FROM case_transcript_authority")
                 }
                 if transcript_authority_case_ids != set(transcripts_by_case):
                     raise PersistedDataIntegrityError(
@@ -1950,28 +2256,20 @@ class SqliteCaseRepository:
                 for case_id in sorted(authority_case_ids):
                     bound_case = cases_by_id.get(case_id)
                     if bound_case is None:
-                        raise PersistedDataIntegrityError(
-                            "Intake authority has no bound case"
-                        )
+                        raise PersistedDataIntegrityError("Intake authority has no bound case")
                     manifest, manifest_digest = self._require_intake_authority(
                         connection,
                         bound_case,
                         verify_media=verify_media,
                     )
                     handle_created_at = handle_created_at_by_case[case_id]
-                    if not (
-                        bound_case.created_at
-                        <= handle_created_at
-                        <= bound_case.updated_at
-                    ):
+                    if not (bound_case.created_at <= handle_created_at <= bound_case.updated_at):
                         raise PersistedDataIntegrityError(
                             "Media handle timestamp falls outside its case lifetime"
                         )
                     has_transcript = case_id in transcript_authority_case_ids
                     statement = bound_case.snapshot.intake_summary
-                    statement_value = (
-                        None if statement is None else statement.get("statement")
-                    )
+                    statement_value = None if statement is None else statement.get("statement")
                     if (
                         manifest.get("inputMode") == "audio"
                         and statement_value is not None
@@ -1999,12 +2297,14 @@ class SqliteCaseRepository:
                 if self._table_exists(connection, "case_packet_authority"):
                     for case in cases_by_id.values():
                         self._require_current_packet_authority(connection, case)
-                elif any(
-                    case.snapshot.claim_packet is not None
-                    for case in cases_by_id.values()
-                ):
+                elif any(case.snapshot.claim_packet is not None for case in cases_by_id.values()):
                     raise WorkflowAtomicityError(
                         "Pre-v5 canonical data cannot retain mutable ClaimPackets"
+                    )
+                if self._table_exists(connection, "portal_run_authority"):
+                    self._validate_all_cu_verification_authority(
+                        connection,
+                        cases_by_id=cases_by_id,
                     )
         except (
             PersistedDataIntegrityError,
@@ -2020,6 +2320,616 @@ class SqliteCaseRepository:
             raise PersistedDataIntegrityError(
                 "Persisted canonical JSON does not match the current contracts"
             ) from error
+
+    def _validate_all_cu_verification_authority(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        cases_by_id: dict[str, CaseRecord],
+    ) -> None:
+        """Replay every retained G6-G8 proof and reject missing or forged authority."""
+
+        run_rows = connection.execute(
+            "SELECT * FROM portal_run_authority ORDER BY case_id"
+        ).fetchall()
+        run_case_ids = {_require_string(row["case_id"], "portal run case id") for row in run_rows}
+        g6_case_ids = {
+            _require_string(row["case_id"], "G6 case id")
+            for row in connection.execute(
+                "SELECT case_id FROM gate_decisions WHERE gate_id = ?",
+                (GateId.G6_TOOL_AUTHORITY.value,),
+            )
+        }
+        if run_case_ids != g6_case_ids:
+            raise WorkflowAtomicityError("G6 history and portal run authority disagree")
+        child_case_ids = {
+            _require_string(row["case_id"], "CU child case id")
+            for table in ("portal_session_authority", "verification_attempt_authority")
+            for row in connection.execute(f"SELECT case_id FROM {table}")
+        }
+        if not child_case_ids.issubset(run_case_ids):
+            raise WorkflowAtomicityError("CU child authority has no portal run")
+
+        def packet_at(current: CaseRecord, version: int) -> ClaimPacket:
+            packet_row = connection.execute(
+                """
+                SELECT * FROM case_packet_authority
+                WHERE case_id = ? AND bound_case_version = ?
+                """,
+                (current.case_id, version),
+            ).fetchone()
+            if packet_row is None:
+                raise WorkflowAtomicityError("CU authority lost a packet checkpoint")
+            history = self._read_gate_decisions(connection, case_id=current.case_id)
+            return self._validate_packet_authority_row(
+                packet_row,
+                current=current,
+                history=history,
+            )[2]
+
+        def workflow_at(sequence: int, label: str) -> WorkflowEventEnvelope:
+            workflow_row = connection.execute(
+                """
+                SELECT * FROM workflow_events WHERE source_audit_sequence = ?
+                """,
+                (sequence,),
+            ).fetchone()
+            if workflow_row is None:
+                raise WorkflowAtomicityError(f"{label} lost its workflow projection")
+            return self._workflow_envelope_from_row(workflow_row, label=label)
+
+        for row in run_rows:
+            run = self._row_to_portal_run(connection, row)
+            current = cases_by_id.get(run.case_id)
+            if current is None:
+                raise WorkflowAtomicityError("Portal run has no case")
+            ready_packet = packet_at(current, run.ready_case_version)
+            if (
+                ready_packet.state is not CaseState.READY_TO_FILL
+                or tuple(decision.gate_id for decision in ready_packet.gate_decisions)
+                != _ANALYSIS_GATE_SEQUENCE
+                or any(not decision.passed for decision in ready_packet.gate_decisions)
+            ):
+                raise WorkflowAtomicityError("Portal run has no exact READY packet")
+            _validate_prestage_session(
+                run.prestage_session,
+                case_id=run.case_id,
+                variant=run.portal_variant,
+                attachments=ready_packet.claim.attachments,
+            )
+            ready_packet_row = connection.execute(
+                """
+                SELECT created_at FROM case_packet_authority
+                WHERE case_id = ? AND bound_case_version = ?
+                """,
+                (run.case_id, run.ready_case_version),
+            ).fetchone()
+            capability_row = connection.execute(
+                "SELECT * FROM authority_capabilities WHERE capability_digest = ?",
+                (row["agent_capability_digest"],),
+            ).fetchone()
+            if ready_packet_row is None or capability_row is None:
+                raise WorkflowAtomicityError("Portal run lost its prestage chronology")
+            ready_packet_at = _parse_datetime(
+                _require_string(ready_packet_row["created_at"], "READY packet created_at")
+            )
+            capability = self._row_to_capability(capability_row)
+            if capability.consumed_at is None or not (
+                ready_packet_at
+                <= run.prestage_session.updated_at
+                <= capability.consumed_at
+                < run.created_at
+            ):
+                raise WorkflowAtomicityError("Portal run prestage chronology is invalid")
+            context = _load_json_object(_require_string(row["g6_context_json"], "G6 context"))
+            if set(context) != {
+                "caseId",
+                "portalVariant",
+                "currentUrl",
+                "action",
+                "proposedActionNumber",
+                "elapsedSeconds",
+            }:
+                raise WorkflowAtomicityError("Persisted G6 context shape is invalid")
+            elapsed_seconds = context["elapsedSeconds"]
+            if type(elapsed_seconds) is not float:
+                raise WorkflowAtomicityError("Persisted G6 elapsed time is invalid")
+            filling_input = _rebind_claim_packet(
+                ready_packet,
+                state=CaseState.FILLING,
+                portal_state=PortalState.DRAFT,
+                gates=ready_packet.gate_decisions,
+                verification=ready_packet.verification,
+            )
+            recomputed_g6 = evaluate_g6(
+                run.invocation.model_dump(mode="json", by_alias=True),
+                context=ToolAuthorityContext(
+                    packet=filling_input,
+                    case_state=CaseState.FILLING,
+                    portal_variant=PortalVariant(
+                        _require_string(context["portalVariant"], "G6 variant")
+                    ),
+                    current_url=_require_string(context["currentUrl"], "G6 URL"),
+                    action=_require_string(context["action"], "G6 action"),
+                    proposed_action_number=_require_integer(
+                        context["proposedActionNumber"],
+                        "G6 proposed action number",
+                    ),
+                    elapsed_seconds=elapsed_seconds,
+                ),
+                decided_at=run.g6_decision.decided_at,
+            ).decision
+            if (
+                context["caseId"] != run.case_id
+                or context["portalVariant"] != run.portal_variant.value
+                or recomputed_g6 != run.g6_decision
+                or packet_at(current, run.g6_case_version).gate_decisions[-1] != run.g6_decision
+            ):
+                raise WorkflowAtomicityError("Persisted G6 no longer recomputes")
+
+            session_rows = connection.execute(
+                """
+                SELECT * FROM portal_session_authority
+                WHERE case_id = ? ORDER BY checkpoint_number
+                """,
+                (run.case_id,),
+            ).fetchall()
+            attempt_rows = connection.execute(
+                """
+                SELECT * FROM verification_attempt_authority
+                WHERE case_id = ? ORDER BY attempt_number
+                """,
+                (run.case_id,),
+            ).fetchall()
+            for expected_checkpoint, session_row in enumerate(session_rows, start=1):
+                expected_kind = "reviewed" if expected_checkpoint == 1 else "repair"
+                if (
+                    _require_string(session_row["case_id"], "portal checkpoint case id")
+                    != run.case_id
+                    or _require_string(session_row["run_id"], "portal checkpoint run id")
+                    != run.run_id
+                    or _require_integer(
+                        session_row["checkpoint_number"],
+                        "portal checkpoint number",
+                    )
+                    != expected_checkpoint
+                    or _require_string(
+                        session_row["checkpoint_kind"],
+                        "portal checkpoint kind",
+                    )
+                    != expected_kind
+                ):
+                    raise WorkflowAtomicityError(
+                        "Portal checkpoint is not bound to its run position"
+                    )
+            for expected_attempt, attempt_row in enumerate(attempt_rows, start=1):
+                if (
+                    _require_string(attempt_row["case_id"], "verification case id")
+                    != run.case_id
+                    or _require_string(attempt_row["run_id"], "verification run id")
+                    != run.run_id
+                    or _require_integer(
+                        attempt_row["attempt_number"],
+                        "verification attempt number",
+                    )
+                    != expected_attempt
+                ):
+                    raise WorkflowAtomicityError(
+                        "Verification attempt is not bound to its run position"
+                    )
+            if run.status == "filling":
+                if (
+                    current.state is not CaseState.FILLING
+                    or current.version != run.g6_case_version
+                    or session_rows
+                    or attempt_rows
+                    or any(
+                        row[column] is not None
+                        for column in (
+                            "g7_gate_sequence",
+                            "tool_terminal_audit_sequence",
+                            "portal_fill_audit_sequence",
+                            "g7_state_audit_sequence",
+                            "rejected_summary_json",
+                            "rejected_summary_sha256",
+                        )
+                    )
+                ):
+                    raise WorkflowAtomicityError("Open G6 run authority is invalid")
+                continue
+            if run.status == "blocked_g6":
+                if (
+                    current.state is not CaseState.BLOCKED
+                    or current.version != run.g6_case_version
+                    or run.terminal_case_version != run.g6_case_version
+                    or run.terminal_at != run.created_at
+                    or session_rows
+                    or attempt_rows
+                    or any(
+                        row[column] is not None
+                        for column in (
+                            "g7_gate_sequence",
+                            "tool_terminal_audit_sequence",
+                            "portal_fill_audit_sequence",
+                            "g7_state_audit_sequence",
+                            "rejected_summary_json",
+                            "rejected_summary_sha256",
+                        )
+                    )
+                ):
+                    raise WorkflowAtomicityError("Blocked G6 run authority is invalid")
+                continue
+
+            g7_sequence_raw = row["g7_gate_sequence"]
+            if g7_sequence_raw is None or run.terminal_case_version is None:
+                raise WorkflowAtomicityError("Terminal portal run lost G7")
+            g7_row = connection.execute(
+                "SELECT * FROM gate_decisions WHERE sequence = ?",
+                (_require_integer(g7_sequence_raw, "G7 gate sequence"),),
+            ).fetchone()
+            if g7_row is None:
+                raise WorkflowAtomicityError("Terminal portal run lost G7")
+            g7_case_id, g7 = _gate_decision_from_row(g7_row, label="G7 decision")
+            filling_packet = packet_at(current, run.g6_case_version)
+            tool_sequence = _require_integer(
+                row["tool_terminal_audit_sequence"],
+                "terminal tool sequence",
+            )
+            tool_event = workflow_at(tool_sequence, "terminal tool").event
+            state_sequence = _require_integer(
+                row["g7_state_audit_sequence"],
+                "G7 state sequence",
+            )
+            state_event = workflow_at(state_sequence, "G7 state").event
+            if (
+                g7_case_id != run.case_id
+                or g7.gate_id is not GateId.G7_PORTAL_WRITE
+                or g7.decided_at != run.terminal_at
+                or not isinstance(tool_event, ToolCallWorkflowEvent)
+                or tool_event.invocation_id != run.invocation.invocation_id
+                or tool_event.sequence != run.invocation.sequence
+                or tool_event.tool is not run.invocation.tool
+                or not isinstance(state_event, StateWorkflowEvent)
+                or state_event.from_state is not CaseState.FILLING
+                or state_event.to_state
+                is not (CaseState.VERIFYING if g7.passed else CaseState.BLOCKED)
+                or packet_at(current, run.terminal_case_version).gate_decisions[-1] != g7
+            ):
+                raise WorkflowAtomicityError("Persisted G7 event binding is invalid")
+
+            if g7.passed:
+                if (
+                    run.status not in {"verifying", "review", "blocked_g8"}
+                    or tool_event.status is not ToolCallStatus.SUCCEEDED
+                    or len(session_rows) not in {1, 2}
+                    or row["rejected_summary_json"] is not None
+                    or row["rejected_summary_sha256"] is not None
+                    or row["portal_fill_audit_sequence"] is None
+                ):
+                    raise WorkflowAtomicityError("Passed G7 authority is incomplete")
+                reviewed_session, reviewed_rendered = self._portal_session_from_row(
+                    session_rows[0]
+                )
+                reviewed_checkpoint_at = _parse_datetime(
+                    _require_string(
+                        session_rows[0]["created_at"],
+                        "reviewed checkpoint created_at",
+                    )
+                )
+                portal_event = workflow_at(
+                    _require_integer(
+                        row["portal_fill_audit_sequence"],
+                        "portal fill sequence",
+                    ),
+                    "portal fill",
+                ).event
+                recomputed_g7 = evaluate_g7(
+                    reviewed_session.fields.model_dump(mode="json", by_alias=True),
+                    packet=filling_packet,
+                    case_state=CaseState.FILLING,
+                    portal_state=PortalState.DRAFT,
+                    decided_at=g7.decided_at,
+                ).decision
+                if (
+                    recomputed_g7 != g7
+                    or reviewed_session.variant is not run.portal_variant
+                    or reviewed_session.version != run.prestage_session.version + 2
+                    or _require_integer(
+                        session_rows[0]["portal_version"],
+                        "reviewed checkpoint portal version",
+                    )
+                    != reviewed_session.version
+                    or session_rows[0]["source_attempt_id"] is not None
+                    or run.terminal_at is None
+                    or reviewed_checkpoint_at != run.terminal_at
+                    or not (
+                        run.created_at
+                        <= reviewed_session.updated_at
+                        <= reviewed_rendered.rendered_at
+                        <= reviewed_checkpoint_at
+                    )
+                    or not isinstance(portal_event, PortalFillWorkflowEvent)
+                    or portal_event.variant is not run.portal_variant
+                    or portal_event.portal_version != reviewed_session.version
+                    or portal_event.written_fields != tuple(RequiredClaimField)
+                ):
+                    raise WorkflowAtomicityError("Passed G7 no longer recomputes")
+            else:
+                summary_json = row["rejected_summary_json"]
+                summary_hash = row["rejected_summary_sha256"]
+                if (
+                    run.status != "blocked_g7"
+                    or tool_event.status is not ToolCallStatus.BLOCKED
+                    or session_rows
+                    or attempt_rows
+                    or row["portal_fill_audit_sequence"] is not None
+                    or not isinstance(summary_json, str)
+                    or not isinstance(summary_hash, str)
+                ):
+                    raise WorkflowAtomicityError("Rejected G7 authority is invalid")
+                summary = _load_json_object(summary_json)
+                if (
+                    set(summary)
+                    != {
+                        "payloadType",
+                        "fieldCount",
+                        "recognizedFieldCount",
+                        "reasonCodes",
+                    }
+                    or summary.get("payloadType") not in {"object", "other"}
+                    or type(summary.get("fieldCount")) is not int
+                    or type(summary.get("recognizedFieldCount")) is not int
+                    or summary.get("reasonCodes") != [reason.value for reason in g7.reason_codes]
+                    or _authority_sha256("g7-rejected-summary", summary_json) != summary_hash
+                ):
+                    raise WorkflowAtomicityError("Rejected G7 summary is invalid")
+                continue
+
+            attempts = tuple(
+                self._verification_attempt_from_row(attempt_row) for attempt_row in attempt_rows
+            )
+            if not attempts and len(session_rows) != 1:
+                raise WorkflowAtomicityError(
+                    "G7 checkpoint cannot introduce an unverified repair"
+                )
+            if attempts:
+                if tuple(attempt.attempt_number for attempt in attempts) != tuple(
+                    range(1, len(attempts) + 1)
+                ):
+                    raise WorkflowAtomicityError("Verification attempts are not contiguous")
+                for attempt_row, attempt in zip(attempt_rows, attempts, strict=True):
+                    bound_version = _require_integer(
+                        attempt_row["bound_case_version"],
+                        "attempt bound case version",
+                    )
+                    if (
+                        bound_version
+                        != run.terminal_case_version + attempt.attempt_number
+                        or _require_integer(
+                            attempt_row["portal_checkpoint_number"],
+                            "attempt portal checkpoint number",
+                        )
+                        != attempt.attempt_number
+                    ):
+                        raise WorkflowAtomicityError(
+                            "Verification attempt cursor binding is invalid"
+                        )
+                    input_packet = packet_at(current, bound_version - 1)
+                    rendered = RenderedPortalSnapshot.model_validate_json(
+                        _require_string(
+                            attempt_row["rendered_snapshot_json"],
+                            "verification rendered snapshot",
+                        )
+                    )
+                    requested_at = _parse_datetime(
+                        _require_string(
+                            attempt_row["snapshot_requested_at"],
+                            "snapshot requested_at",
+                        )
+                    )
+                    received_at = _parse_datetime(
+                        _require_string(
+                            attempt_row["snapshot_received_at"],
+                            "snapshot received_at",
+                        )
+                    )
+                    created_at = _parse_datetime(
+                        _require_string(attempt_row["created_at"], "attempt created_at")
+                    )
+                    recomputed = evaluate_g8(
+                        input_packet,
+                        rendered,
+                        expected_variant=run.portal_variant,
+                        expected_portal_version=attempt.portal_version,
+                        snapshot_requested_at=requested_at,
+                        snapshot_received_at=received_at,
+                        model_reported_mismatch=attempt.report.model_reported_mismatch,
+                        verified_at=cast(datetime, attempt.report.verified_at),
+                        decided_at=(
+                            cast(GateDecision, attempt.gate_decision).decided_at
+                            if attempt.final
+                            else created_at
+                        ),
+                    )
+                    verification_event = workflow_at(
+                        _require_integer(
+                            attempt_row["verification_audit_sequence"],
+                            "verification event sequence",
+                        ),
+                        "verification attempt",
+                    ).event
+                    if (
+                        recomputed.report != attempt.report
+                        or (attempt.final and recomputed.decision != attempt.gate_decision)
+                        or not isinstance(verification_event, VerificationWorkflowEvent)
+                        or verification_event.attempt_number != attempt.attempt_number
+                        or verification_event.status is not attempt.report.status
+                        or verification_event.deterministic_match
+                        is not attempt.report.deterministic_match
+                        or verification_event.model_reported_mismatch
+                        is not attempt.report.model_reported_mismatch
+                        or verification_event.repair_used is not (attempt.attempt_number == 2)
+                        or verification_event.final is not attempt.final
+                    ):
+                        raise WorkflowAtomicityError("Verification attempt no longer recomputes")
+                    if attempt.final:
+                        gate_row = connection.execute(
+                            "SELECT * FROM gate_decisions WHERE sequence = ?",
+                            (
+                                _require_integer(
+                                    attempt_row["g8_gate_sequence"],
+                                    "G8 gate sequence",
+                                ),
+                            ),
+                        ).fetchone()
+                        if gate_row is None or _gate_decision_from_row(
+                            gate_row, label="G8 decision"
+                        ) != (run.case_id, attempt.gate_decision):
+                            raise WorkflowAtomicityError("Final attempt lost G8")
+                        final_state = workflow_at(
+                            _require_integer(
+                                attempt_row["state_audit_sequence"],
+                                "G8 state sequence",
+                            ),
+                            "G8 state",
+                        ).event
+                        if (
+                            not isinstance(final_state, StateWorkflowEvent)
+                            or final_state.from_state is not CaseState.VERIFYING
+                            or final_state.to_state
+                            is not (
+                                CaseState.REVIEW
+                                if cast(GateDecision, attempt.gate_decision).passed
+                                else CaseState.BLOCKED
+                            )
+                        ):
+                            raise WorkflowAtomicityError("Final G8 state is invalid")
+                expected_session_count = 2 if len(attempts) == 2 else 1
+                if len(session_rows) != expected_session_count:
+                    raise WorkflowAtomicityError(
+                        "Verification attempts disagree with portal checkpoints"
+                    )
+                if len(attempts) == 2:
+                    first_attempt, second_attempt = attempts
+                    repair = first_attempt.repair
+                    if repair is None:
+                        raise WorkflowAtomicityError(
+                            "Second checkpoint lost its repair authorization"
+                        )
+                    repaired_session, repaired_rendered = self._portal_session_from_row(
+                        session_rows[1]
+                    )
+                    second_rendered = RenderedPortalSnapshot.model_validate_json(
+                        _require_string(
+                            attempt_rows[1]["rendered_snapshot_json"],
+                            "second verification rendered snapshot",
+                        )
+                    )
+                    second_requested_at = _parse_datetime(
+                        _require_string(
+                            attempt_rows[1]["snapshot_requested_at"],
+                            "second snapshot requested_at",
+                        )
+                    )
+                    first_created_at = _parse_datetime(
+                        _require_string(
+                            attempt_rows[0]["created_at"],
+                            "first attempt created_at",
+                        )
+                    )
+                    second_created_at = _parse_datetime(
+                        _require_string(
+                            attempt_rows[1]["created_at"],
+                            "second attempt created_at",
+                        )
+                    )
+                    repair_checkpoint_at = _parse_datetime(
+                        _require_string(
+                            session_rows[1]["created_at"],
+                            "repair checkpoint created_at",
+                        )
+                    )
+                    base_values = reviewed_session.fields.model_dump(
+                        mode="json",
+                        by_alias=False,
+                    )
+                    repaired_values = repaired_session.fields.model_dump(
+                        mode="json",
+                        by_alias=False,
+                    )
+                    expected_values = _canonical_claim_portal_fields(
+                        filling_packet
+                    ).model_dump(mode="json", by_alias=False)
+                    for field_name, base_value in base_values.items():
+                        if field_name == repair.field.value:
+                            if repaired_values[field_name] != expected_values[field_name]:
+                                raise WorkflowAtomicityError(
+                                    "Repair checkpoint target is not canonical"
+                                )
+                        elif repaired_values[field_name] != base_value:
+                            raise WorkflowAtomicityError(
+                                "Repair checkpoint changed a non-target value"
+                            )
+                    if (
+                        _require_string(
+                            session_rows[1]["source_attempt_id"],
+                            "repair source attempt id",
+                        )
+                        != first_attempt.attempt_id
+                        or repaired_session.variant is not run.portal_variant
+                        or repaired_session.version != reviewed_session.version + 1
+                        or repaired_session.version != repair.to_portal_version
+                        or second_attempt.portal_version != repaired_session.version
+                        or repaired_rendered != second_rendered
+                        or repair_checkpoint_at != second_created_at
+                        or repaired_session.updated_at < first_created_at
+                        or repaired_session.updated_at > second_requested_at
+                    ):
+                        raise WorkflowAtomicityError(
+                            "Repair checkpoint authority binding is invalid"
+                        )
+                if attempts[-1].final:
+                    VerificationAttemptSeries.model_validate(
+                        {
+                            "contractVersion": CONTRACT_VERSION,
+                            "caseId": run.case_id,
+                            "attempts": attempts,
+                        }
+                    )
+                    expected_status = (
+                        "review"
+                        if cast(GateDecision, attempts[-1].gate_decision).passed
+                        else "blocked_g8"
+                    )
+                    if run.status != expected_status:
+                        raise WorkflowAtomicityError("Final G8 did not close the run")
+                elif len(attempts) != 1 or run.status != "verifying":
+                    raise WorkflowAtomicityError("Repairable attempt chain is invalid")
+            elif run.status != "verifying":
+                raise WorkflowAtomicityError("G7 run status has no verification authority")
+
+            expected_states = {
+                "verifying": {CaseState.VERIFYING},
+                "review": {
+                    CaseState.REVIEW,
+                    CaseState.HUMAN_APPROVED,
+                    CaseState.RECEIPT,
+                },
+                "blocked_g8": {CaseState.BLOCKED},
+            }
+            if current.state not in expected_states[run.status]:
+                raise WorkflowAtomicityError("Case state disagrees with CU run status")
+            assert run.terminal_case_version is not None
+            verification_terminal_version = run.terminal_case_version + len(attempts)
+            authority_version_offset = {
+                CaseState.VERIFYING: 0,
+                CaseState.BLOCKED: 0,
+                CaseState.REVIEW: 0,
+                CaseState.HUMAN_APPROVED: 1,
+                CaseState.RECEIPT: 2,
+            }[current.state]
+            if current.version != verification_terminal_version + authority_version_offset:
+                raise WorkflowAtomicityError("Case version disagrees with CU authority cursor")
 
     def _migrate_v2_to_v3(self, connection: sqlite3.Connection) -> None:
         """Rebuild the parent table, then create and backfill v3 projections."""
@@ -2069,8 +2979,7 @@ class SqliteCaseRepository:
                 "sandbox_receipts",
             )
             populated_child = any(
-                connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
-                is not None
+                connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
                 for table in authority_child_tables
             )
             if unsafe_case is not None or populated_child:
@@ -2132,6 +3041,45 @@ class SqliteCaseRepository:
         if unsafe_human_authority is not None:
             raise IncompatiblePersistedContractError()
         for statement in _MIGRATION_6:
+            connection.execute(statement)
+
+    def _migrate_v6_to_v7(self, connection: sqlite3.Connection) -> None:
+        """Add CU authority only when no historical CU intent must be guessed."""
+
+        unsafe_cu_authority = connection.execute(
+            """
+            SELECT 1
+            FROM cases
+            WHERE state IN (?, ?, ?, ?, ?)
+            UNION ALL
+            SELECT 1
+            FROM gate_decisions
+            WHERE gate_id IN (?, ?, ?, ?, ?)
+            UNION ALL
+            SELECT 1
+            FROM workflow_events
+            WHERE event_kind IN (?, ?, ?)
+            LIMIT 1
+            """,
+            (
+                CaseState.FILLING.value,
+                CaseState.VERIFYING.value,
+                CaseState.REVIEW.value,
+                CaseState.HUMAN_APPROVED.value,
+                CaseState.RECEIPT.value,
+                GateId.G6_TOOL_AUTHORITY.value,
+                GateId.G7_PORTAL_WRITE.value,
+                GateId.G8_VERIFICATION.value,
+                GateId.G9_HUMAN_APPROVAL.value,
+                GateId.G10_RECEIPT_REDACTION.value,
+                WorkflowEventKind.TOOL_CALL.value,
+                WorkflowEventKind.PORTAL_FILL.value,
+                WorkflowEventKind.VERIFICATION.value,
+            ),
+        ).fetchone()
+        if self.is_canonical_authority and unsafe_cu_authority is not None:
+            raise IncompatiblePersistedContractError()
+        for statement in _MIGRATION_7:
             connection.execute(statement)
 
     def _backfill_v3_workflow_events(self, connection: sqlite3.Connection) -> None:
@@ -2249,9 +3197,7 @@ class SqliteCaseRepository:
         """Legacy-only split writer; canonical intake binds ownership atomically."""
 
         if self.is_canonical_authority:
-            raise WorkflowAtomicityError(
-                "Canonical media handles require commit_intake_disclosure"
-            )
+            raise WorkflowAtomicityError("Canonical media handles require commit_intake_disclosure")
         if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
             raise ValueError("Media storage name is not an owned canonical handle")
         timestamp = _dump_aware_datetime(created_at, "media handle created_at")
@@ -2366,6 +3312,1497 @@ class SqliteCaseRepository:
             ).fetchone()
         return None if row is None else self._row_to_case(row)
 
+    def resolve_portal_run(
+        self,
+        run_id: str,
+        control_digest: bytes,
+    ) -> PortalRunRecord | None:
+        """Resolve an uncertain commit without reopening or mutating authority."""
+
+        self._require_canonical_authority_mode()
+        if type(run_id) is not str or _IDENTIFIER.fullmatch(run_id) is None:
+            raise ValueError("run_id must be a canonical identifier")
+        self._validate_digest(control_digest)
+        with self._read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM portal_run_authority
+                WHERE run_id = ? OR control_digest = ?
+                """,
+                (run_id, control_digest),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                _require_string(row["run_id"], "portal run id") != run_id
+                or row["control_digest"] != control_digest
+            ):
+                raise AuthorityCapabilityError("Portal run recovery identity is invalid")
+            return self._row_to_portal_run(connection, row)
+
+    def resolve_verification_attempt(
+        self,
+        *,
+        case_id: str,
+        run_id: str,
+        control_digest: bytes,
+        attempt_id: str,
+    ) -> VerificationAttemptResult | None:
+        """Resolve an uncertain G8 commit through server-internal run authority."""
+
+        self._require_canonical_authority_mode()
+        for identifier, label in (
+            (case_id, "case_id"),
+            (run_id, "run_id"),
+            (attempt_id, "attempt_id"),
+        ):
+            if type(identifier) is not str or _IDENTIFIER.fullmatch(identifier) is None:
+                raise ValueError(f"{label} must be a canonical identifier")
+        self._validate_digest(control_digest)
+        with self._read_connection() as connection:
+            run_row = connection.execute(
+                """
+                SELECT * FROM portal_run_authority
+                WHERE run_id = ? OR control_digest = ?
+                """,
+                (run_id, control_digest),
+            ).fetchone()
+            if run_row is None:
+                return None
+            if (
+                _require_string(run_row["run_id"], "verification run id") != run_id
+                or run_row["control_digest"] != control_digest
+                or _require_string(run_row["case_id"], "verification run case id")
+                != case_id
+            ):
+                raise AuthorityCapabilityError(
+                    "Verification recovery identity is invalid"
+                )
+            self._row_to_portal_run(connection, run_row)
+            attempt_row = connection.execute(
+                "SELECT * FROM verification_attempt_authority WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt_row is None:
+                return None
+            if (
+                _require_string(attempt_row["case_id"], "verification case id")
+                != case_id
+                or _require_string(attempt_row["run_id"], "verification attempt run id")
+                != run_id
+            ):
+                raise AuthorityCapabilityError(
+                    "Verification recovery identity is invalid"
+                )
+            current_row = connection.execute(
+                "SELECT * FROM cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+            if current_row is None:
+                raise CaseRecordNotFoundError(case_id)
+            current = self._row_to_case(current_row)
+            bound_version = _require_integer(
+                attempt_row["bound_case_version"],
+                "verification bound case version",
+            )
+            if bound_version > current.version:
+                raise WorkflowAtomicityError(
+                    "Verification recovery is ahead of its case cursor"
+                )
+            return VerificationAttemptResult(
+                case=current,
+                attempt=self._verification_attempt_from_row(attempt_row),
+            )
+
+    def start_portal_run(
+        self,
+        command: PortalRunStartCommand,
+    ) -> PortalRunStartResult:
+        """Consume one READY capability and persist G6 plus its state atomically."""
+
+        self._require_canonical_authority_mode()
+        if type(command) is not PortalRunStartCommand:
+            raise TypeError("command must be a PortalRunStartCommand")
+        self._require_expected_version(
+            command.expected_case_version,
+            "Portal run expected_case_version",
+        )
+        for identifier, label in (
+            (command.case_id, "case_id"),
+            (command.run_id, "run_id"),
+        ):
+            if type(identifier) is not str or _IDENTIFIER.fullmatch(identifier) is None:
+                raise ValueError(f"{label} must be a canonical identifier")
+        self._validate_digest(command.capability_digest)
+        self._validate_digest(command.control_digest)
+        if not isinstance(command.portal_variant, PortalVariant):
+            raise ValueError("portal_variant must be canonical")
+        invocation = ToolInvocation.model_validate(command.invocation_payload)
+        if invocation.invocation_id != command.run_id:
+            raise WorkflowAtomicityError("Portal run identity must equal invocation identity")
+        if (
+            type(command.current_url) is not str
+            or type(command.action) is not str
+            or type(command.proposed_action_number) is not int
+            or type(command.elapsed_seconds) is not float
+        ):
+            raise TypeError("Portal run G6 inputs must use exact scalar types")
+        consumed_at = _parse_datetime(
+            _dump_aware_datetime(command.consumed_at, "capability consumed_at")
+        )
+        updated_at = _parse_datetime(
+            _dump_aware_datetime(command.updated_at, "portal run updated_at")
+        )
+        if consumed_at >= updated_at:
+            raise ValueError("Portal run update must strictly follow capability consumption")
+
+        invocation_json = _dump_contract(invocation)
+        expected_url = (
+            f"http://127.0.0.1:3000/sandbox/{command.portal_variant.value}/cases/{command.case_id}"
+        )
+        context_payload: JsonObject = {
+            "caseId": command.case_id,
+            "portalVariant": command.portal_variant.value,
+            "currentUrl": expected_url if command.current_url == expected_url else "",
+            "action": command.action if command.action in _G6_SAFE_ACTIONS else "",
+            "proposedActionNumber": command.proposed_action_number,
+            "elapsedSeconds": command.elapsed_seconds,
+        }
+        context_json = _dump_json_object(context_payload)
+        prestage_json = _dump_contract(command.prestage_session)
+        expected_hashes = (
+            _authority_sha256("portal-invocation", invocation_json),
+            _authority_sha256("g6-context", context_json),
+            _authority_sha256("portal-prestage", prestage_json),
+        )
+
+        with self._write_connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM portal_run_authority
+                WHERE run_id = ? OR control_digest = ?
+                """,
+                (command.run_id, command.control_digest),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    _require_string(existing["run_id"], "portal run id") != command.run_id
+                    or existing["control_digest"] != command.control_digest
+                    or existing["agent_capability_digest"] != command.capability_digest
+                    or _require_string(existing["case_id"], "portal run case id") != command.case_id
+                    or _require_string(existing["portal_variant"], "portal run variant")
+                    != command.portal_variant.value
+                    or (
+                        _require_string(existing["invocation_sha256"], "invocation digest"),
+                        _require_string(existing["g6_context_sha256"], "G6 context digest"),
+                        _require_string(existing["prestage_session_sha256"], "prestage digest"),
+                    )
+                    != expected_hashes
+                ):
+                    raise AuthorityCapabilityError("Portal run recovery identity is invalid")
+                existing_run = self._row_to_portal_run(connection, existing)
+                capability_row = connection.execute(
+                    "SELECT * FROM authority_capabilities WHERE capability_digest = ?",
+                    (command.capability_digest,),
+                ).fetchone()
+                if capability_row is None:
+                    raise AuthorityCapabilityError("Portal run recovery identity is invalid")
+                capability = self._row_to_capability(capability_row)
+                if (
+                    existing_run.ready_case_version != command.expected_case_version
+                    or existing_run.created_at != updated_at
+                    or capability.consumed_at != consumed_at
+                ):
+                    raise AuthorityCapabilityError("Portal run recovery identity is invalid")
+                current_row = connection.execute(
+                    "SELECT * FROM cases WHERE case_id = ?",
+                    (command.case_id,),
+                ).fetchone()
+                if current_row is None:
+                    raise CaseRecordNotFoundError(command.case_id)
+                current = self._row_to_case(current_row)
+                return PortalRunStartResult(
+                    case=current,
+                    run=existing_run,
+                )
+
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_case_version,
+            )
+            self._require_current_packet_authority(connection, current)
+            packet = current.snapshot.claim_packet
+            if (
+                current.state is not CaseState.READY_TO_FILL
+                or packet is None
+                or packet.state is not CaseState.READY_TO_FILL
+                or packet.portal_state is not PortalState.DRAFT
+                or tuple(decision.gate_id for decision in packet.gate_decisions)
+                != _ANALYSIS_GATE_SEQUENCE
+                or any(not decision.passed for decision in packet.gate_decisions)
+                or packet.claim.missing_required_fields
+            ):
+                raise WorkflowAtomicityError("G6 requires one complete READY packet")
+            _validate_prestage_session(
+                command.prestage_session,
+                case_id=current.case_id,
+                variant=command.portal_variant,
+                attachments=packet.claim.attachments,
+            )
+            if not (
+                current.updated_at
+                <= command.prestage_session.updated_at
+                <= consumed_at
+                < updated_at
+            ):
+                raise WorkflowAtomicityError("Prestage chronology is invalid")
+
+            capability_row = connection.execute(
+                """
+                SELECT * FROM authority_capabilities
+                WHERE capability_digest = ?
+                """,
+                (command.capability_digest,),
+            ).fetchone()
+            if capability_row is None:
+                raise AuthorityCapabilityError("Portal capability is invalid")
+            capability = self._row_to_capability(capability_row)
+            if (
+                capability.role != "agent"
+                or capability.purpose != "portal_run"
+                or capability.portal_variant is not None
+                or capability.case_id != current.case_id
+                or capability.bound_case_version != current.version
+                or capability.consumed_at is not None
+                or capability.revoked_at is not None
+                or consumed_at < capability.issued_at
+                or consumed_at >= capability.expires_at
+            ):
+                raise AuthorityCapabilityError("Portal capability is invalid")
+            consumed = connection.execute(
+                """
+                UPDATE authority_capabilities
+                SET consumed_at = ?
+                WHERE capability_digest = ?
+                  AND consumed_at IS NULL AND revoked_at IS NULL
+                """,
+                (
+                    _dump_aware_datetime(consumed_at, "capability consumed_at"),
+                    command.capability_digest,
+                ),
+            )
+            if consumed.rowcount != 1:
+                raise AuthorityCapabilityError("Portal capability is invalid")
+
+            filling_packet = _rebind_claim_packet(
+                packet,
+                state=CaseState.FILLING,
+                portal_state=PortalState.DRAFT,
+                gates=packet.gate_decisions,
+                verification=packet.verification,
+            )
+            g6 = evaluate_g6(
+                command.invocation_payload,
+                context=ToolAuthorityContext(
+                    packet=filling_packet,
+                    case_state=CaseState.FILLING,
+                    portal_variant=command.portal_variant,
+                    current_url=command.current_url,
+                    action=command.action,
+                    proposed_action_number=command.proposed_action_number,
+                    elapsed_seconds=command.elapsed_seconds,
+                ),
+                decided_at=updated_at,
+            ).decision
+            target = CaseState.FILLING if g6.passed else CaseState.BLOCKED
+            target_packet = _rebind_claim_packet(
+                filling_packet,
+                state=target,
+                portal_state=PortalState.DRAFT,
+                gates=(*packet.gate_decisions, g6),
+                verification=packet.verification,
+            )
+            target_snapshot = replace(
+                current.snapshot,
+                portal_state=PortalState.DRAFT,
+                claim_packet=target_packet,
+                active_clarification=None,
+            )
+            _validate_snapshot(current.case_id, target, target_snapshot)
+            validate_case_transition(current.state, target)
+            self._update_case_row(
+                connection,
+                current=current,
+                state=target,
+                snapshot=target_snapshot,
+                updated_at=updated_at,
+            )
+            g6_sequence = self._insert_authority_gate(
+                connection,
+                case_id=current.case_id,
+                decision=g6,
+            )
+            self._insert_packet_authority(
+                connection,
+                case_id=current.case_id,
+                bound_case_version=current.version + 1,
+                packet=target_packet,
+                created_at=updated_at,
+            )
+            state_audit = build_state_change_event(
+                case_id=current.case_id,
+                current=current.state,
+                target=target,
+                actor=ActorType.AGENT if g6.passed else ActorType.SYSTEM,
+                occurred_at=updated_at,
+            )
+            state_sequence = self._insert_audit_event(connection, state_audit)
+            self._insert_workflow_projection(
+                connection,
+                audit_sequence=state_sequence,
+                audit=state_audit,
+                event=StateWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.STATE,
+                        "actor": state_audit.actor,
+                        "fromState": current.state,
+                        "toState": target,
+                    }
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO portal_run_authority (
+                    run_id, case_id, authority_version, agent_capability_digest,
+                    control_digest, portal_variant, ready_case_version,
+                    g6_case_version, terminal_case_version,
+                    invocation_json, invocation_sha256,
+                    g6_context_json, g6_context_sha256,
+                    prestage_session_json, prestage_session_sha256,
+                    g6_gate_sequence, g6_state_audit_sequence,
+                    status, created_at, terminal_at
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    command.run_id,
+                    current.case_id,
+                    command.capability_digest,
+                    command.control_digest,
+                    command.portal_variant.value,
+                    current.version,
+                    current.version + 1,
+                    None if g6.passed else current.version + 1,
+                    invocation_json,
+                    expected_hashes[0],
+                    context_json,
+                    expected_hashes[1],
+                    prestage_json,
+                    expected_hashes[2],
+                    g6_sequence,
+                    state_sequence,
+                    "filling" if g6.passed else "blocked_g6",
+                    _dump_aware_datetime(updated_at, "portal run created_at"),
+                    None
+                    if g6.passed
+                    else _dump_aware_datetime(updated_at, "portal run terminal_at"),
+                ),
+            )
+            final_case = self._require_current(
+                connection,
+                current.case_id,
+                current.version + 1,
+            )
+            row = connection.execute(
+                "SELECT * FROM portal_run_authority WHERE run_id = ?",
+                (command.run_id,),
+            ).fetchone()
+            if row is None:
+                raise WorkflowAtomicityError("Atomic G6 lost its run authority")
+            return PortalRunStartResult(
+                case=final_case,
+                run=self._row_to_portal_run(connection, row),
+            )
+
+    def preflight_portal_write(
+        self,
+        *,
+        case_id: str,
+        expected_case_version: int,
+        run_id: str,
+        control_digest: bytes,
+        fields_payload: object,
+        decided_at: datetime,
+    ) -> GateDecision:
+        """Recompute G7 without allocating a gate or mutating any authority."""
+
+        self._require_canonical_authority_mode()
+        self._validate_digest(control_digest)
+        _dump_aware_datetime(decided_at, "G7 preflight decided_at")
+        with self._read_connection() as connection:
+            current = self._require_current(
+                connection,
+                case_id,
+                expected_case_version,
+            )
+            row = connection.execute(
+                "SELECT * FROM portal_run_authority WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None or row["control_digest"] != control_digest:
+                raise AuthorityCapabilityError("Portal run authority is invalid")
+            run = self._row_to_portal_run(connection, row)
+            self._require_open_portal_run(current, run)
+            self._require_current_packet_authority(connection, current)
+            packet = current.snapshot.claim_packet
+            if packet is None:
+                raise WorkflowAtomicityError("Portal run lost its ClaimPacket")
+            return evaluate_g7(
+                fields_payload,
+                packet=packet,
+                case_state=current.state,
+                portal_state=current.snapshot.portal_state,
+                decided_at=decided_at,
+            ).decision
+
+    def finalize_portal_write(
+        self,
+        command: PortalWriteFinalizeCommand,
+    ) -> PortalWriteFinalizeResult:
+        """Close one full write with terminal tool, G7, session, and state authority.
+
+        This mutation is intentionally not retried after an uncertain commit.
+        Recover with ``resolve_portal_run(run_id, control_digest)`` instead.
+        """
+
+        self._require_canonical_authority_mode()
+        if type(command) is not PortalWriteFinalizeCommand:
+            raise TypeError("command must be a PortalWriteFinalizeCommand")
+        self._require_expected_version(
+            command.expected_case_version,
+            "Portal write expected_case_version",
+        )
+        self._validate_digest(command.control_digest)
+        if (
+            type(command.duration_ms) is not int
+            or command.duration_ms < 0
+            or type(command.run_id) is not str
+            or _IDENTIFIER.fullmatch(command.run_id) is None
+        ):
+            raise ValueError("Portal write metadata is invalid")
+        completed_at = _parse_datetime(
+            _dump_aware_datetime(command.completed_at, "portal write completed_at")
+        )
+
+        with self._write_connection() as connection:
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_case_version,
+            )
+            row = connection.execute(
+                "SELECT * FROM portal_run_authority WHERE run_id = ?",
+                (command.run_id,),
+            ).fetchone()
+            if row is None or row["control_digest"] != command.control_digest:
+                raise AuthorityCapabilityError("Portal run authority is invalid")
+            run = self._row_to_portal_run(connection, row)
+            self._require_open_portal_run(current, run)
+            self._require_current_packet_authority(connection, current)
+            packet = current.snapshot.claim_packet
+            if packet is None:
+                raise WorkflowAtomicityError("Portal run lost its ClaimPacket")
+            if completed_at <= current.updated_at:
+                raise WorkflowAtomicityError("G7 must strictly follow the G6 mutation")
+
+            result = evaluate_g7(
+                command.fields_payload,
+                packet=packet,
+                case_state=current.state,
+                portal_state=current.snapshot.portal_state,
+                decided_at=completed_at,
+            )
+            decision = result.decision
+            target = CaseState.VERIFYING if decision.passed else CaseState.BLOCKED
+            target_portal_state = PortalState.REVIEW if decision.passed else PortalState.DRAFT
+            rejected_json: str | None = None
+            rejected_hash: str | None = None
+            portal_checkpoint_values: tuple[str, str, str, str] | None = None
+            if decision.passed:
+                portal_session = command.portal_session
+                rendered_snapshot = command.rendered_snapshot
+                prestage = run.prestage_session
+                if (
+                    portal_session is None
+                    or rendered_snapshot is None
+                    or result.fields is None
+                    or portal_session.case_id != current.case_id
+                    or portal_session.variant is not run.portal_variant
+                    or portal_session.state is not PortalState.REVIEW
+                    or portal_session.version != prestage.version + 2
+                    or portal_session.fields != result.fields
+                    or rendered_snapshot.case_id != current.case_id
+                    or rendered_snapshot.variant is not run.portal_variant
+                    or rendered_snapshot.state is not PortalState.REVIEW
+                    or rendered_snapshot.version != portal_session.version
+                    or not (
+                        current.updated_at
+                        <= portal_session.updated_at
+                        <= rendered_snapshot.rendered_at
+                        <= completed_at
+                    )
+                ):
+                    raise WorkflowAtomicityError(
+                        "Reviewed portal checkpoint is not bound to the G7 result"
+                    )
+                session_json = _dump_contract(portal_session)
+                rendered_json = _dump_contract(rendered_snapshot)
+                portal_checkpoint_values = (
+                    session_json,
+                    _authority_sha256("portal-session", session_json),
+                    rendered_json,
+                    _authority_sha256("portal-rendered", rendered_json),
+                )
+            else:
+                if command.portal_session is not None or command.rendered_snapshot is not None:
+                    raise WorkflowAtomicityError(
+                        "A rejected G7 candidate cannot persist portal values"
+                    )
+                rejected_json = _dump_json_object(
+                    _rejected_g7_summary(command.fields_payload, decision)
+                )
+                rejected_hash = _authority_sha256("g7-rejected-summary", rejected_json)
+
+            target_packet = _rebind_claim_packet(
+                packet,
+                state=target,
+                portal_state=target_portal_state,
+                gates=(*packet.gate_decisions, decision),
+                verification=packet.verification,
+            )
+            target_snapshot = replace(
+                current.snapshot,
+                portal_state=target_portal_state,
+                claim_packet=target_packet,
+                active_clarification=None,
+            )
+            _validate_snapshot(current.case_id, target, target_snapshot)
+            validate_case_transition(current.state, target)
+            self._update_case_row(
+                connection,
+                current=current,
+                state=target,
+                snapshot=target_snapshot,
+                updated_at=completed_at,
+            )
+            g7_sequence = self._insert_authority_gate(
+                connection,
+                case_id=current.case_id,
+                decision=decision,
+            )
+            terminal_tool = ToolCallWorkflowEvent.model_validate(
+                {
+                    "kind": WorkflowEventKind.TOOL_CALL,
+                    "invocationId": run.invocation.invocation_id,
+                    "sequence": run.invocation.sequence,
+                    "tool": run.invocation.tool,
+                    "status": (
+                        ToolCallStatus.SUCCEEDED if decision.passed else ToolCallStatus.BLOCKED
+                    ),
+                    "durationMs": command.duration_ms,
+                }
+            )
+            terminal_envelope = self._insert_redacted_workflow_event(
+                connection,
+                case_id=current.case_id,
+                event=terminal_tool,
+                actor=ActorType.AGENT,
+                occurred_at=completed_at,
+            )
+            portal_fill_sequence: int | None = None
+            if decision.passed:
+                assert command.portal_session is not None
+                portal_envelope = self._insert_redacted_workflow_event(
+                    connection,
+                    case_id=current.case_id,
+                    event=PortalFillWorkflowEvent.model_validate(
+                        {
+                            "kind": WorkflowEventKind.PORTAL_FILL,
+                            "variant": run.portal_variant,
+                            "portalVersion": command.portal_session.version,
+                            "writtenFields": tuple(RequiredClaimField),
+                        }
+                    ),
+                    actor=ActorType.AGENT,
+                    occurred_at=completed_at,
+                )
+                portal_fill_sequence = portal_envelope.source_audit_sequence
+            self._insert_packet_authority(
+                connection,
+                case_id=current.case_id,
+                bound_case_version=current.version + 1,
+                packet=target_packet,
+                created_at=completed_at,
+            )
+            state_actor = ActorType.AGENT if decision.passed else ActorType.SYSTEM
+            state_audit = build_state_change_event(
+                case_id=current.case_id,
+                current=current.state,
+                target=target,
+                actor=state_actor,
+                occurred_at=completed_at,
+            )
+            state_sequence = self._insert_audit_event(connection, state_audit)
+            self._insert_workflow_projection(
+                connection,
+                audit_sequence=state_sequence,
+                audit=state_audit,
+                event=StateWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.STATE,
+                        "actor": state_actor,
+                        "fromState": current.state,
+                        "toState": target,
+                    }
+                ),
+            )
+            if portal_checkpoint_values is not None:
+                assert command.portal_session is not None
+                connection.execute(
+                    """
+                    INSERT INTO portal_session_authority (
+                        case_id, checkpoint_number, run_id, authority_version,
+                        checkpoint_kind, portal_version,
+                        session_json, session_sha256,
+                        rendered_snapshot_json, rendered_snapshot_sha256,
+                        source_attempt_id, created_at
+                    ) VALUES (?, 1, ?, 1, 'reviewed', ?, ?, ?, ?, ?, NULL, ?)
+                    """,
+                    (
+                        current.case_id,
+                        run.run_id,
+                        command.portal_session.version,
+                        *portal_checkpoint_values,
+                        _dump_aware_datetime(completed_at, "portal checkpoint created_at"),
+                    ),
+                )
+            updated = connection.execute(
+                """
+                UPDATE portal_run_authority
+                SET terminal_case_version = ?, g7_gate_sequence = ?,
+                    tool_terminal_audit_sequence = ?, portal_fill_audit_sequence = ?,
+                    g7_state_audit_sequence = ?, rejected_summary_json = ?,
+                    rejected_summary_sha256 = ?, status = ?, terminal_at = ?
+                WHERE run_id = ? AND status = 'filling'
+                """,
+                (
+                    current.version + 1,
+                    g7_sequence,
+                    terminal_envelope.source_audit_sequence,
+                    portal_fill_sequence,
+                    state_sequence,
+                    rejected_json,
+                    rejected_hash,
+                    "verifying" if decision.passed else "blocked_g7",
+                    _dump_aware_datetime(completed_at, "portal run terminal_at"),
+                    run.run_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise WorkflowAtomicityError("Portal run was already terminal")
+            final_case = self._require_current(
+                connection,
+                current.case_id,
+                current.version + 1,
+            )
+            final_row = connection.execute(
+                "SELECT * FROM portal_run_authority WHERE run_id = ?",
+                (run.run_id,),
+            ).fetchone()
+            if final_row is None:
+                raise WorkflowAtomicityError("Atomic G7 lost its run authority")
+            return PortalWriteFinalizeResult(
+                case=final_case,
+                run=self._row_to_portal_run(connection, final_row),
+            )
+
+    def record_verification_attempt(
+        self,
+        command: VerificationAttemptCommand,
+    ) -> VerificationAttemptResult:
+        """Persist one bounded attempt; only a final attempt allocates immutable G8."""
+
+        self._require_canonical_authority_mode()
+        if type(command) is not VerificationAttemptCommand:
+            raise TypeError("command must be a VerificationAttemptCommand")
+        self._require_expected_version(
+            command.expected_case_version,
+            "Verification expected_case_version",
+        )
+        self._validate_digest(command.control_digest)
+        for identifier, label in (
+            (command.case_id, "case_id"),
+            (command.run_id, "run_id"),
+            (command.attempt_id, "attempt_id"),
+        ):
+            if type(identifier) is not str or _IDENTIFIER.fullmatch(identifier) is None:
+                raise ValueError(f"{label} must be a canonical identifier")
+        if (
+            type(command.screenshot_sha256) is not str
+            or _SHA256.fullmatch(command.screenshot_sha256) is None
+            or type(command.model_reported_mismatch) is not bool
+            or type(command.final) is not bool
+            or not isinstance(command.rendered_snapshot, RenderedPortalSnapshot)
+            or (
+                command.repaired_session is not None
+                and not isinstance(command.repaired_session, PortalSessionView)
+            )
+        ):
+            raise ValueError("Verification metadata is invalid")
+        requested_at = _parse_datetime(
+            _dump_aware_datetime(
+                command.snapshot_requested_at,
+                "snapshot_requested_at",
+            )
+        )
+        received_at = _parse_datetime(
+            _dump_aware_datetime(
+                command.snapshot_received_at,
+                "snapshot_received_at",
+            )
+        )
+        verified_at = _parse_datetime(_dump_aware_datetime(command.verified_at, "verified_at"))
+        decided_at = _parse_datetime(_dump_aware_datetime(command.decided_at, "G8 decided_at"))
+
+        with self._write_connection() as connection:
+            existing_attempt_row = connection.execute(
+                "SELECT * FROM verification_attempt_authority WHERE attempt_id = ?",
+                (command.attempt_id,),
+            ).fetchone()
+            if existing_attempt_row is not None:
+                run_row = connection.execute(
+                    "SELECT * FROM portal_run_authority WHERE run_id = ?",
+                    (command.run_id,),
+                ).fetchone()
+                if run_row is None or run_row["control_digest"] != command.control_digest:
+                    raise AuthorityCapabilityError(
+                        "Verification recovery identity is invalid"
+                    )
+                run = self._row_to_portal_run(connection, run_row)
+                attempt = self._verification_attempt_from_row(existing_attempt_row)
+                checkpoint_number = _require_integer(
+                    existing_attempt_row["portal_checkpoint_number"],
+                    "verification checkpoint number",
+                )
+                persisted_repair_json: str | None = None
+                if checkpoint_number == 2:
+                    checkpoint_row = connection.execute(
+                        """
+                        SELECT * FROM portal_session_authority
+                        WHERE case_id = ? AND checkpoint_number = 2
+                        """,
+                        (command.case_id,),
+                    ).fetchone()
+                    if checkpoint_row is None:
+                        raise WorkflowAtomicityError(
+                            "Verification retry lost its repair checkpoint"
+                        )
+                    self._portal_session_from_row(checkpoint_row)
+                    persisted_repair_json = _require_string(
+                        checkpoint_row["session_json"],
+                        "verification repair session",
+                    )
+                expected_repair_json = (
+                    None
+                    if command.repaired_session is None
+                    else _dump_contract(command.repaired_session)
+                )
+                if (
+                    run.case_id != command.case_id
+                    or _require_string(
+                        existing_attempt_row["case_id"],
+                        "verification retry case id",
+                    )
+                    != command.case_id
+                    or _require_string(
+                        existing_attempt_row["run_id"],
+                        "verification retry run id",
+                    )
+                    != command.run_id
+                    or _require_integer(
+                        existing_attempt_row["bound_case_version"],
+                        "verification retry bound version",
+                    )
+                    != command.expected_case_version + 1
+                    or checkpoint_number != attempt.attempt_number
+                    or _require_string(
+                        existing_attempt_row["rendered_snapshot_json"],
+                        "verification retry rendered snapshot",
+                    )
+                    != _dump_contract(command.rendered_snapshot)
+                    or _require_string(
+                        existing_attempt_row["screenshot_sha256"],
+                        "verification retry screenshot digest",
+                    )
+                    != command.screenshot_sha256
+                    or _parse_datetime(
+                        _require_string(
+                            existing_attempt_row["snapshot_requested_at"],
+                            "verification retry requested_at",
+                        )
+                    )
+                    != requested_at
+                    or _parse_datetime(
+                        _require_string(
+                            existing_attempt_row["snapshot_received_at"],
+                            "verification retry received_at",
+                        )
+                    )
+                    != received_at
+                    or attempt.report.model_reported_mismatch
+                    is not command.model_reported_mismatch
+                    or attempt.report.verified_at != verified_at
+                    or _parse_datetime(
+                        _require_string(
+                            existing_attempt_row["created_at"],
+                            "verification retry decided_at",
+                        )
+                    )
+                    != decided_at
+                    or attempt.final is not command.final
+                    or persisted_repair_json != expected_repair_json
+                ):
+                    raise AuthorityCapabilityError(
+                        "Verification retry does not match the committed attempt"
+                    )
+                current_row = connection.execute(
+                    "SELECT * FROM cases WHERE case_id = ?",
+                    (command.case_id,),
+                ).fetchone()
+                if current_row is None:
+                    raise CaseRecordNotFoundError(command.case_id)
+                current = self._row_to_case(current_row)
+                if current.version < command.expected_case_version + 1:
+                    raise WorkflowAtomicityError(
+                        "Verification retry is ahead of its case cursor"
+                    )
+                return VerificationAttemptResult(case=current, attempt=attempt)
+
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_case_version,
+            )
+            run_row = connection.execute(
+                "SELECT * FROM portal_run_authority WHERE run_id = ?",
+                (command.run_id,),
+            ).fetchone()
+            if run_row is None or run_row["control_digest"] != command.control_digest:
+                raise AuthorityCapabilityError("Verification run authority is invalid")
+            run = self._row_to_portal_run(connection, run_row)
+            if (
+                current.state is not CaseState.VERIFYING
+                or run.case_id != current.case_id
+                or run.status != "verifying"
+                or decided_at <= current.updated_at
+                or requested_at < current.updated_at
+            ):
+                raise WorkflowAtomicityError("Verification run is not open")
+            self._require_current_packet_authority(connection, current)
+            packet = current.snapshot.claim_packet
+            if (
+                packet is None
+                or packet.state is not CaseState.VERIFYING
+                or packet.portal_state is not PortalState.REVIEW
+                or tuple(decision.gate_id for decision in packet.gate_decisions)[-2:]
+                != (GateId.G6_TOOL_AUTHORITY, GateId.G7_PORTAL_WRITE)
+                or any(not decision.passed for decision in packet.gate_decisions)
+            ):
+                raise WorkflowAtomicityError("Verification packet authority is invalid")
+
+            prior_rows = connection.execute(
+                """
+                SELECT * FROM verification_attempt_authority
+                WHERE case_id = ? ORDER BY attempt_number
+                """,
+                (current.case_id,),
+            ).fetchall()
+            prior_attempts = tuple(self._verification_attempt_from_row(row) for row in prior_rows)
+            attempt_number = len(prior_attempts) + 1
+            if attempt_number not in {1, 2}:
+                raise WorkflowAtomicityError("Verification attempt limit is closed")
+            if any(attempt.final for attempt in prior_attempts):
+                raise WorkflowAtomicityError("Final verification cannot be reopened")
+
+            checkpoint_number = 1
+            session_row = connection.execute(
+                """
+                SELECT * FROM portal_session_authority
+                WHERE case_id = ? AND checkpoint_number = 1
+                """,
+                (current.case_id,),
+            ).fetchone()
+            if session_row is None:
+                raise WorkflowAtomicityError("Verification lost its reviewed portal session")
+            base_session, _base_rendered = self._portal_session_from_row(session_row)
+            expected_version = base_session.version
+            repaired_from_attempt_id: str | None = None
+
+            if attempt_number == 1:
+                if command.repaired_session is not None:
+                    raise WorkflowAtomicityError(
+                        "The first attempt cannot introduce a repaired session"
+                    )
+            else:
+                first = prior_attempts[0]
+                repair = first.repair
+                repaired = command.repaired_session
+                if (
+                    not command.final
+                    or repair is None
+                    or repaired is None
+                    or repaired.case_id != current.case_id
+                    or repaired.variant is not run.portal_variant
+                    or repaired.state is not PortalState.REVIEW
+                    or repaired.version != repair.to_portal_version
+                    or repaired.updated_at < current.updated_at
+                    or repaired.updated_at > requested_at
+                ):
+                    raise WorkflowAtomicityError("Second attempt has no exact repair authority")
+                base_values = base_session.fields.model_dump(mode="json", by_alias=False)
+                repaired_values = repaired.fields.model_dump(mode="json", by_alias=False)
+                expected_values = _canonical_claim_portal_fields(packet).model_dump(
+                    mode="json",
+                    by_alias=False,
+                )
+                for field_name, value in base_values.items():
+                    if field_name == repair.field.value:
+                        if repaired_values[field_name] != expected_values[field_name]:
+                            raise WorkflowAtomicityError(
+                                "Repair target is not the canonical packet value"
+                            )
+                    elif repaired_values[field_name] != value:
+                        raise WorkflowAtomicityError("Repair changed a non-target portal value")
+                first_rendered = RenderedPortalSnapshot.model_validate_json(
+                    _require_string(
+                        prior_rows[0]["rendered_snapshot_json"],
+                        "first rendered snapshot",
+                    )
+                )
+                old_rendered_values = first_rendered.fields.model_dump(
+                    mode="json", by_alias=False
+                )
+                new_rendered_values = command.rendered_snapshot.fields.model_dump(
+                    mode="json", by_alias=False
+                )
+                for field_name, value in old_rendered_values.items():
+                    if (
+                        field_name != repair.field.value
+                        and new_rendered_values[field_name] != value
+                    ):
+                        raise WorkflowAtomicityError("Repair changed a non-target rendered value")
+                session_json = _dump_contract(repaired)
+                rendered_checkpoint_json = _dump_contract(command.rendered_snapshot)
+                connection.execute(
+                    """
+                    INSERT INTO portal_session_authority (
+                        case_id, checkpoint_number, run_id, authority_version,
+                        checkpoint_kind, portal_version,
+                        session_json, session_sha256,
+                        rendered_snapshot_json, rendered_snapshot_sha256,
+                        source_attempt_id, created_at
+                    ) VALUES (?, 2, ?, 1, 'repair', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        current.case_id,
+                        run.run_id,
+                        repaired.version,
+                        session_json,
+                        _authority_sha256("portal-session", session_json),
+                        rendered_checkpoint_json,
+                        _authority_sha256(
+                            "portal-rendered",
+                            rendered_checkpoint_json,
+                        ),
+                        first.attempt_id,
+                        _dump_aware_datetime(decided_at, "repair checkpoint created_at"),
+                    ),
+                )
+                checkpoint_number = 2
+                expected_version = repaired.version
+                repaired_from_attempt_id = first.attempt_id
+
+            rendered = command.rendered_snapshot
+            if (
+                rendered.case_id != current.case_id
+                or rendered.variant is not run.portal_variant
+                or rendered.state is not PortalState.REVIEW
+                or rendered.version != expected_version
+            ):
+                raise WorkflowAtomicityError("Rendered snapshot identity is invalid")
+            verification = evaluate_g8(
+                packet,
+                rendered,
+                expected_variant=run.portal_variant,
+                expected_portal_version=expected_version,
+                snapshot_requested_at=requested_at,
+                snapshot_received_at=received_at,
+                model_reported_mismatch=command.model_reported_mismatch,
+                verified_at=verified_at,
+                decided_at=decided_at,
+            )
+
+            repair_metadata: VerificationRepairMetadata | None = None
+            gate: GateDecision | None = verification.decision if command.final else None
+            if not command.final:
+                report = verification.report
+                non_matching = tuple(
+                    item for item in report.field_results if item.status.value != "match"
+                )
+                if (
+                    attempt_number != 1
+                    or report.deterministic_match is not False
+                    or report.model_reported_mismatch
+                    or report.actual_attachment_ids != report.expected_attachment_ids
+                    or len(non_matching) != 1
+                ):
+                    raise WorkflowAtomicityError(
+                        "Only one deterministic scalar mismatch is repairable"
+                    )
+                mismatch = non_matching[0]
+                repair_metadata = VerificationRepairMetadata.model_validate(
+                    {
+                        "repairNumber": 1,
+                        "field": mismatch.field,
+                        "sourceRefs": mismatch.source_refs,
+                        "fromPortalVersion": expected_version,
+                        "toPortalVersion": expected_version + 1,
+                    }
+                )
+
+            attempt = VerificationAttempt.model_validate(
+                {
+                    "contractVersion": CONTRACT_VERSION,
+                    "attemptId": command.attempt_id,
+                    "caseId": current.case_id,
+                    "attemptNumber": attempt_number,
+                    "caseState": CaseState.VERIFYING,
+                    "portalVersion": expected_version,
+                    "report": verification.report,
+                    "final": command.final,
+                    "repair": repair_metadata,
+                    "repairedFromAttemptId": repaired_from_attempt_id,
+                    "gateDecision": gate,
+                }
+            )
+            if attempt_number == 2:
+                VerificationAttemptSeries.model_validate(
+                    {
+                        "contractVersion": CONTRACT_VERSION,
+                        "caseId": current.case_id,
+                        "attempts": (*prior_attempts, attempt),
+                    }
+                )
+
+            if command.final:
+                target = CaseState.REVIEW if verification.decision.passed else CaseState.BLOCKED
+                target_packet = _rebind_claim_packet(
+                    packet,
+                    state=target,
+                    portal_state=PortalState.REVIEW,
+                    gates=(*packet.gate_decisions, verification.decision),
+                    verification=verification.report,
+                )
+            else:
+                target = CaseState.VERIFYING
+                target_packet = packet
+            target_snapshot = replace(
+                current.snapshot,
+                portal_state=PortalState.REVIEW,
+                claim_packet=target_packet,
+                active_clarification=None,
+            )
+            _validate_snapshot(current.case_id, target, target_snapshot)
+            if command.final:
+                validate_case_transition(current.state, target)
+            self._update_case_row(
+                connection,
+                current=current,
+                state=target,
+                snapshot=target_snapshot,
+                updated_at=decided_at,
+            )
+            g8_sequence: int | None = None
+            if command.final:
+                g8_sequence = self._insert_authority_gate(
+                    connection,
+                    case_id=current.case_id,
+                    decision=verification.decision,
+                )
+            verification_envelope = self._insert_redacted_workflow_event(
+                connection,
+                case_id=current.case_id,
+                event=VerificationWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.VERIFICATION,
+                        "attemptNumber": attempt_number,
+                        "status": verification.report.status,
+                        "deterministicMatch": verification.report.deterministic_match,
+                        "modelReportedMismatch": verification.report.model_reported_mismatch,
+                        "repairUsed": attempt_number == 2,
+                        "final": command.final,
+                    }
+                ),
+                actor=ActorType.SYSTEM,
+                occurred_at=decided_at,
+            )
+            self._insert_packet_authority(
+                connection,
+                case_id=current.case_id,
+                bound_case_version=current.version + 1,
+                packet=target_packet,
+                created_at=decided_at,
+            )
+            state_sequence: int | None = None
+            if command.final:
+                state_audit = build_state_change_event(
+                    case_id=current.case_id,
+                    current=current.state,
+                    target=target,
+                    actor=ActorType.SYSTEM,
+                    occurred_at=decided_at,
+                )
+                state_sequence = self._insert_audit_event(connection, state_audit)
+                self._insert_workflow_projection(
+                    connection,
+                    audit_sequence=state_sequence,
+                    audit=state_audit,
+                    event=StateWorkflowEvent.model_validate(
+                        {
+                            "kind": WorkflowEventKind.STATE,
+                            "actor": ActorType.SYSTEM,
+                            "fromState": current.state,
+                            "toState": target,
+                        }
+                    ),
+                )
+
+            attempt_json = _dump_contract(attempt)
+            rendered_json = _dump_contract(rendered)
+            connection.execute(
+                """
+                INSERT INTO verification_attempt_authority (
+                    attempt_id, case_id, run_id, authority_version,
+                    attempt_number, bound_case_version, portal_checkpoint_number,
+                    attempt_json, attempt_sha256,
+                    rendered_snapshot_json, rendered_snapshot_sha256,
+                    screenshot_sha256, snapshot_requested_at, snapshot_received_at,
+                    final, g8_gate_sequence, verification_audit_sequence,
+                    state_audit_sequence, created_at
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt.attempt_id,
+                    current.case_id,
+                    run.run_id,
+                    attempt_number,
+                    current.version + 1,
+                    checkpoint_number,
+                    attempt_json,
+                    _verification_authority_sha256(
+                        attempt_json=attempt_json,
+                        rendered_json=rendered_json,
+                        screenshot_sha256=command.screenshot_sha256,
+                        requested_at=requested_at,
+                        received_at=received_at,
+                    ),
+                    rendered_json,
+                    _authority_sha256("verification-rendered", rendered_json),
+                    command.screenshot_sha256,
+                    _dump_aware_datetime(requested_at, "snapshot requested_at"),
+                    _dump_aware_datetime(received_at, "snapshot received_at"),
+                    int(command.final),
+                    g8_sequence,
+                    verification_envelope.source_audit_sequence,
+                    state_sequence,
+                    _dump_aware_datetime(decided_at, "verification created_at"),
+                ),
+            )
+            if command.final:
+                updated = connection.execute(
+                    """
+                    UPDATE portal_run_authority
+                    SET status = ?
+                    WHERE run_id = ? AND status = 'verifying'
+                    """,
+                    (
+                        "review" if verification.decision.passed else "blocked_g8",
+                        run.run_id,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise WorkflowAtomicityError("Verification run was already terminal")
+            final_case = self._require_current(
+                connection,
+                current.case_id,
+                current.version + 1,
+            )
+            return VerificationAttemptResult(case=final_case, attempt=attempt)
+
+    @classmethod
+    def _row_to_portal_run(
+        cls,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> PortalRunRecord:
+        run_id = _require_string(row["run_id"], "portal run id")
+        case_id = _require_string(row["case_id"], "portal run case id")
+        invocation_json = _require_string(row["invocation_json"], "portal invocation")
+        context_json = _require_string(row["g6_context_json"], "G6 context")
+        prestage_json = _require_string(row["prestage_session_json"], "prestage session")
+        invocation = ToolInvocation.model_validate_json(invocation_json)
+        prestage = PortalSessionView.model_validate_json(prestage_json)
+        variant = PortalVariant(_require_string(row["portal_variant"], "portal variant"))
+        ready_version = _require_integer(row["ready_case_version"], "ready case version")
+        g6_version = _require_integer(row["g6_case_version"], "G6 case version")
+        terminal_raw = row["terminal_case_version"]
+        terminal_version = (
+            None
+            if terminal_raw is None
+            else _require_integer(terminal_raw, "terminal case version")
+        )
+        created_at = _parse_datetime(_require_string(row["created_at"], "run created_at"))
+        terminal_at_raw = row["terminal_at"]
+        terminal_at = (
+            None
+            if terminal_at_raw is None
+            else _parse_datetime(_require_string(terminal_at_raw, "run terminal_at"))
+        )
+        status = _require_string(row["status"], "portal run status")
+        control_digest = row["control_digest"]
+        capability_digest = row["agent_capability_digest"]
+        if (
+            _require_integer(row["authority_version"], "portal run authority version") != 1
+            or type(control_digest) is not bytes
+            or len(control_digest) != 32
+            or type(capability_digest) is not bytes
+            or len(capability_digest) != 32
+            or invocation.invocation_id != run_id
+            or prestage.case_id != case_id
+            or prestage.variant is not variant
+            or prestage.state is not PortalState.DRAFT
+            or invocation_json != _dump_contract(invocation)
+            or prestage_json != _dump_contract(prestage)
+            or context_json != _dump_json_object(_load_json_object(context_json))
+            or _authority_sha256("portal-invocation", invocation_json)
+            != _require_string(row["invocation_sha256"], "invocation digest")
+            or _authority_sha256("g6-context", context_json)
+            != _require_string(row["g6_context_sha256"], "G6 context digest")
+            or _authority_sha256("portal-prestage", prestage_json)
+            != _require_string(row["prestage_session_sha256"], "prestage digest")
+            or g6_version != ready_version + 1
+            or (terminal_version is None) is not (terminal_at is None)
+            or (terminal_at is not None and terminal_at < created_at)
+        ):
+            raise WorkflowAtomicityError("Persisted portal run authority is invalid")
+
+        gate_row = connection.execute(
+            "SELECT * FROM gate_decisions WHERE sequence = ?",
+            (_require_integer(row["g6_gate_sequence"], "G6 gate sequence"),),
+        ).fetchone()
+        if gate_row is None:
+            raise WorkflowAtomicityError("Portal run lost its G6 gate")
+        gate_case_id, g6 = _gate_decision_from_row(gate_row, label="G6 decision")
+        capability_row = connection.execute(
+            "SELECT * FROM authority_capabilities WHERE capability_digest = ?",
+            (capability_digest,),
+        ).fetchone()
+        if capability_row is None:
+            raise WorkflowAtomicityError("Portal run lost its agent capability")
+        capability = cls._row_to_capability(capability_row)
+        state_row = connection.execute(
+            "SELECT * FROM audit_events WHERE sequence = ?",
+            (_require_integer(row["g6_state_audit_sequence"], "G6 state sequence"),),
+        ).fetchone()
+        if state_row is None:
+            raise WorkflowAtomicityError("Portal run lost its G6 state event")
+        state_audit = AuditEvent.model_validate_json(
+            _require_string(state_row["event_json"], "G6 state audit")
+        )
+        expected_target = CaseState.FILLING if g6.passed else CaseState.BLOCKED
+        if (
+            gate_case_id != case_id
+            or g6.gate_id is not GateId.G6_TOOL_AUTHORITY
+            or g6.decided_at != created_at
+            or capability.case_id != case_id
+            or capability.role != "agent"
+            or capability.purpose != "portal_run"
+            or capability.portal_variant is not None
+            or capability.bound_case_version != ready_version
+            or capability.consumed_at is None
+            or capability.revoked_at is not None
+            or not capability.issued_at <= capability.consumed_at < created_at
+            or state_audit.case_id != case_id
+            or state_audit.event_type is not AuditEventType.CASE_STATE_CHANGED
+            or state_audit.from_state is not CaseState.READY_TO_FILL
+            or state_audit.to_state is not expected_target
+            or state_audit.occurred_at != created_at
+            or (status == "blocked_g6") is not (not g6.passed)
+            or (status == "filling") is not (g6.passed and terminal_version is None)
+        ):
+            raise WorkflowAtomicityError("Persisted G6 authority binding is invalid")
+        return PortalRunRecord(
+            run_id=run_id,
+            case_id=case_id,
+            portal_variant=variant,
+            ready_case_version=ready_version,
+            g6_case_version=g6_version,
+            terminal_case_version=terminal_version,
+            status=status,
+            invocation=invocation,
+            g6_decision=g6,
+            prestage_session=prestage,
+            created_at=created_at,
+            terminal_at=terminal_at,
+        )
+
+    @staticmethod
+    def _require_open_portal_run(
+        current: CaseRecord,
+        run: PortalRunRecord,
+    ) -> None:
+        if (
+            run.case_id != current.case_id
+            or run.status != "filling"
+            or run.g6_case_version != current.version
+            or current.state is not CaseState.FILLING
+            or not run.g6_decision.passed
+        ):
+            raise WorkflowAtomicityError("Portal run is not open")
+
+    @staticmethod
+    def _portal_session_from_row(
+        row: sqlite3.Row,
+    ) -> tuple[PortalSessionView, RenderedPortalSnapshot]:
+        session_json = _require_string(row["session_json"], "portal session")
+        rendered_json = _require_string(
+            row["rendered_snapshot_json"],
+            "portal rendered snapshot",
+        )
+        session = PortalSessionView.model_validate_json(session_json)
+        rendered = RenderedPortalSnapshot.model_validate_json(rendered_json)
+        case_id = _require_string(row["case_id"], "portal session case id")
+        portal_version = _require_integer(row["portal_version"], "portal version")
+        if (
+            _require_integer(row["authority_version"], "portal session authority version") != 1
+            or session_json != _dump_contract(session)
+            or rendered_json != _dump_contract(rendered)
+            or _authority_sha256("portal-session", session_json)
+            != _require_string(row["session_sha256"], "portal session digest")
+            or _authority_sha256("portal-rendered", rendered_json)
+            != _require_string(row["rendered_snapshot_sha256"], "rendered digest")
+            or session.case_id != case_id
+            or rendered.case_id != case_id
+            or session.state is not PortalState.REVIEW
+            or rendered.state is not PortalState.REVIEW
+            or session.variant is not rendered.variant
+            or session.version != portal_version
+            or rendered.version != portal_version
+        ):
+            raise WorkflowAtomicityError("Persisted portal checkpoint is invalid")
+        return session, rendered
+
+    @staticmethod
+    def _verification_attempt_from_row(row: sqlite3.Row) -> VerificationAttempt:
+        attempt_json = _require_string(row["attempt_json"], "verification attempt")
+        rendered_json = _require_string(
+            row["rendered_snapshot_json"],
+            "verification rendered snapshot",
+        )
+        attempt = VerificationAttempt.model_validate_json(attempt_json)
+        rendered = RenderedPortalSnapshot.model_validate_json(rendered_json)
+        requested_at = _parse_datetime(
+            _require_string(row["snapshot_requested_at"], "snapshot requested_at")
+        )
+        received_at = _parse_datetime(
+            _require_string(row["snapshot_received_at"], "snapshot received_at")
+        )
+        created_at = _parse_datetime(_require_string(row["created_at"], "verification created_at"))
+        screenshot_sha256 = _require_string(
+            row["screenshot_sha256"],
+            "verification screenshot digest",
+        )
+        if (
+            _require_integer(row["authority_version"], "attempt authority version") != 1
+            or attempt_json != _dump_contract(attempt)
+            or rendered_json != _dump_contract(rendered)
+            or _verification_authority_sha256(
+                attempt_json=attempt_json,
+                rendered_json=rendered_json,
+                screenshot_sha256=screenshot_sha256,
+                requested_at=requested_at,
+                received_at=received_at,
+            )
+            != _require_string(row["attempt_sha256"], "attempt digest")
+            or _authority_sha256("verification-rendered", rendered_json)
+            != _require_string(row["rendered_snapshot_sha256"], "verification rendered digest")
+            or _SHA256.fullmatch(screenshot_sha256) is None
+            or attempt.attempt_id != _require_string(row["attempt_id"], "attempt id")
+            or attempt.case_id != _require_string(row["case_id"], "attempt case id")
+            or attempt.attempt_number != _require_integer(row["attempt_number"], "attempt number")
+            or attempt.portal_version != rendered.version
+            or attempt.case_id != rendered.case_id
+            or attempt.final is not bool(_require_integer(row["final"], "attempt final"))
+            or not requested_at <= rendered.rendered_at <= received_at <= created_at
+        ):
+            raise WorkflowAtomicityError("Persisted verification attempt is invalid")
+        return attempt
+
+    def _snapshot_cu_components(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+    ) -> tuple[PortalSessionView | None, VerificationAttemptSeries | None]:
+        if current.state in {CaseState.RECEIPT, CaseState.HUMAN_APPROVED}:
+            return None, None
+        run_row = connection.execute(
+            "SELECT * FROM portal_run_authority WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if run_row is None:
+            return None, None
+        run = self._row_to_portal_run(connection, run_row)
+        session_row = connection.execute(
+            """
+            SELECT * FROM portal_session_authority
+            WHERE case_id = ? ORDER BY checkpoint_number DESC LIMIT 1
+            """,
+            (current.case_id,),
+        ).fetchone()
+        portal_session = (
+            run.prestage_session
+            if session_row is None
+            else self._portal_session_from_row(session_row)[0]
+        )
+        attempt_rows = connection.execute(
+            """
+            SELECT * FROM verification_attempt_authority
+            WHERE case_id = ? ORDER BY attempt_number
+            """,
+            (current.case_id,),
+        ).fetchall()
+        attempts = tuple(self._verification_attempt_from_row(row) for row in attempt_rows)
+        series = None
+        if attempts and attempts[-1].final:
+            series = VerificationAttemptSeries.model_validate(
+                {
+                    "contractVersion": CONTRACT_VERSION,
+                    "caseId": current.case_id,
+                    "attempts": attempts,
+                }
+            )
+        return portal_session, series
+
     def get_workflow_snapshot(
         self,
         case_id: str,
@@ -2393,6 +4830,10 @@ class SqliteCaseRepository:
                 connection,
                 case_id,
             )
+            portal_session, verification_attempts = self._snapshot_cu_components(
+                connection,
+                current,
+            )
             return WorkflowSnapshot.model_validate(
                 {
                     "contractVersion": CONTRACT_VERSION,
@@ -2408,8 +4849,8 @@ class SqliteCaseRepository:
                     "claimPacket": current.snapshot.claim_packet,
                     "transcriptConfirmation": transcript,
                     "clarification": current.snapshot.active_clarification,
-                    "portalSession": None,
-                    "verificationAttempts": None,
+                    "portalSession": portal_session,
+                    "verificationAttempts": verification_attempts,
                     "receipt": None if receipt_record is None else receipt_record.receipt,
                 }
             )
@@ -2430,10 +4871,7 @@ class SqliteCaseRepository:
 
         if type(command) is not IntakeDisclosureCommand:
             raise TypeError("command must be an IntakeDisclosureCommand")
-        if (
-            type(command.case_id) is not str
-            or _IDENTIFIER.fullmatch(command.case_id) is None
-        ):
+        if type(command.case_id) is not str or _IDENTIFIER.fullmatch(command.case_id) is None:
             raise TypeError("Intake case_id must be an exact canonical identifier")
         if type(command.expected_version) is not int or command.expected_version < 1:
             raise TypeError("Intake expected_version must be an exact positive integer")
@@ -2460,9 +4898,7 @@ class SqliteCaseRepository:
                 command.expected_version,
             )
             if preliminary.state is not CaseState.CREATED:
-                raise WorkflowAtomicityError(
-                    "Canonical intake requires a pristine CREATED case"
-                )
+                raise WorkflowAtomicityError("Canonical intake requires a pristine CREATED case")
             if command.g0_decided_at < preliminary.updated_at:
                 raise WorkflowAtomicityError(
                     "G0 cannot be decided before the current case version exists"
@@ -2558,9 +4994,7 @@ class SqliteCaseRepository:
                 ).fetchone()
                 is not None
             ):
-                raise WorkflowAtomicityError(
-                    "Canonical intake requires a pristine CREATED case"
-                )
+                raise WorkflowAtomicityError("Canonical intake requires a pristine CREATED case")
 
             recomputed_g0 = validate_g0(
                 command.request,
@@ -2727,9 +5161,7 @@ class SqliteCaseRepository:
         ):
             raise WorkflowAtomicityError("Staged media shape is invalid")
 
-        choice_by_id = {
-            choice.input_id: choice.decision for choice in review.exif_choices
-        }
+        choice_by_id = {choice.input_id: choice.decision for choice in review.exif_choices}
 
         def asset_json(asset: StoredAssetRef) -> dict[str, str]:
             return {
@@ -2826,8 +5258,7 @@ class SqliteCaseRepository:
                 or prepared.audio.local_ref != session.audio.file_id
                 or prepared.audio.media_type != session.audio.media_type
                 or prepared.audio.sha256 != session.audio.sha256
-                or self.__media_store.path_for(session.handle, session.audio)
-                != prepared.audio.path
+                or self.__media_store.path_for(session.handle, session.audio) != prepared.audio.path
             ):
                 raise WorkflowAtomicityError("Stored audio changed after G0/G1")
             audio_json = asset_json(session.audio)
@@ -2897,19 +5328,11 @@ class SqliteCaseRepository:
 
         if type(command) is not TranscriptionOutcomeCommand:
             raise TypeError("command must be a TranscriptionOutcomeCommand")
-        if (
-            type(command.case_id) is not str
-            or _IDENTIFIER.fullmatch(command.case_id) is None
-        ):
+        if type(command.case_id) is not str or _IDENTIFIER.fullmatch(command.case_id) is None:
             raise TypeError("Transcription case_id must be an exact canonical identifier")
         if type(command.expected_version) is not int or command.expected_version < 1:
-            raise TypeError(
-                "Transcription expected_version must be an exact positive integer"
-            )
-        if (
-            type(command.occurred_at) is not datetime
-            or type(command.updated_at) is not datetime
-        ):
+            raise TypeError("Transcription expected_version must be an exact positive integer")
+        if type(command.occurred_at) is not datetime or type(command.updated_at) is not datetime:
             raise TypeError("Transcription timestamps must use exact datetime values")
         if type(command.outcome) is not TranscriptionSuccess:
             raise TypeError("Transcription outcome must use the exact canonical type")
@@ -2921,11 +5344,7 @@ class SqliteCaseRepository:
             " ",
             unicodedata.normalize("NFC", transcript_text),
         ).strip()
-        if (
-            not normalized
-            or normalized != transcript_text
-            or len(normalized) > 4_000
-        ):
+        if not normalized or normalized != transcript_text or len(normalized) > 4_000:
             raise WorkflowAtomicityError("Transcript output is not canonically normalized")
         event = command.outcome.telemetry.to_success_event()
         self._require_canonical_contract(event, "ProviderCallWorkflowEvent")
@@ -2996,9 +5415,8 @@ class SqliteCaseRepository:
                     raise WorkflowAtomicityError(
                         "Transcription authority is stale or already consumed"
                     )
-                if (
-                    self.__media_store.read_bytes(handle, transcript_ref)
-                    != normalized.encode("utf-8")
+                if self.__media_store.read_bytes(handle, transcript_ref) != normalized.encode(
+                    "utf-8"
                 ):
                     raise WorkflowAtomicityError("Stored transcript bytes changed")
                 summary = current.snapshot.intake_summary
@@ -3546,10 +5964,13 @@ class SqliteCaseRepository:
         self._validate_page(after, limit)
         try:
             with self._read_connection() as connection:
-                if connection.execute(
-                    "SELECT 1 FROM cases WHERE case_id = ?",
-                    (case_id,),
-                ).fetchone() is None:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM cases WHERE case_id = ?",
+                        (case_id,),
+                    ).fetchone()
+                    is None
+                ):
                     raise CaseRecordNotFoundError(case_id)
                 if self.is_canonical_authority:
                     self._validate_all_receipt_authority(
@@ -3616,12 +6037,8 @@ class SqliteCaseRepository:
             (case_id,),
         ).fetchone()
         if case_row is None:
-            raise PersistedDataIntegrityError(
-                "Persisted workflow case state is missing"
-            )
-        case_state = CaseState(
-            _require_string(case_row["state"], "workflow case state")
-        )
+            raise PersistedDataIntegrityError("Persisted workflow case state is missing")
+        case_state = CaseState(_require_string(case_row["state"], "workflow case state"))
 
         audits_by_sequence: dict[int, AuditEvent] = {}
         for row in connection.execute(
@@ -3633,10 +6050,8 @@ class SqliteCaseRepository:
                 _require_string(row["event_json"], "workflow source audit")
             )
             if (
-                audit.event_id
-                != _require_string(row["event_id"], "workflow source audit id")
-                or audit.case_id
-                != _require_string(row["case_id"], "workflow source audit case id")
+                audit.event_id != _require_string(row["event_id"], "workflow source audit id")
+                or audit.case_id != _require_string(row["case_id"], "workflow source audit case id")
                 or audit.case_id != case_id
                 or audit.occurred_at
                 != _parse_datetime(
@@ -3663,13 +6078,10 @@ class SqliteCaseRepository:
             )
             sequence = envelope.source_audit_sequence
             source = audits_by_sequence.get(sequence)
-            if (
-                source is None
-                or source.event_type not in _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE
-            ):
+            if source is None or source.event_type not in _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE:
                 raise PersistedDataIntegrityError(
                     "Persisted workflow projection lost its source audit"
-            )
+                )
             _validate_audit_projection_binding(source, envelope)
             projected_sequences.add(sequence)
             workflows_by_sequence[sequence] = envelope
@@ -3793,8 +6205,7 @@ class SqliteCaseRepository:
             )
             validate_workflow_event_order(tuple(item.envelope for item in workflow))
             if any(
-                item.sequence != item.envelope.cursor
-                or item.envelope.case_id != case_id
+                item.sequence != item.envelope.cursor or item.envelope.case_id != case_id
                 for item in workflow
             ) or len({item.envelope.event_id for item in workflow}) != len(workflow):
                 raise PersistedDataIntegrityError(
@@ -3803,9 +6214,7 @@ class SqliteCaseRepository:
 
             provider = tuple(self._row_to_provider_usage(row) for row in provider_rows)
             _validate_provider_metric_sequence(provider)
-            provider_by_sequence = {
-                item.source_audit_sequence: item for item in provider
-            }
+            provider_by_sequence = {item.source_audit_sequence: item for item in provider}
             if len(provider_by_sequence) != len(provider):
                 raise PersistedDataIntegrityError(
                     "Persisted provider usage contains duplicate cursors"
@@ -3816,26 +6225,13 @@ class SqliteCaseRepository:
                     provider_by_sequence.get(item.sequence),
                 )
             workflow_sequences = {item.sequence for item in workflow}
-            if any(
-                sequence not in workflow_sequences
-                for sequence in provider_by_sequence
-            ):
-                raise PersistedDataIntegrityError(
-                    "Persisted provider usage has no workflow event"
-                )
+            if any(sequence not in workflow_sequences for sequence in provider_by_sequence):
+                raise PersistedDataIntegrityError("Persisted provider usage has no workflow event")
 
-            requests = tuple(
-                item for item in provider if item.status in {"failed", "succeeded"}
-            )
-            retries = tuple(
-                item for item in provider if item.status == "retry_scheduled"
-            )
-            usage_reported = tuple(
-                item for item in requests if item.total_tokens is not None
-            )
-            costed = tuple(
-                item for item in requests if item.estimated_cost_micros is not None
-            )
+            requests = tuple(item for item in provider if item.status in {"failed", "succeeded"})
+            retries = tuple(item for item in provider if item.status == "retry_scheduled")
+            usage_reported = tuple(item for item in requests if item.total_tokens is not None)
+            costed = tuple(item for item in requests if item.estimated_cost_micros is not None)
             terminal_tools = _completed_tool_metric_events(workflow)
             model_ids = tuple(dict.fromkeys(item.model_id for item in requests))
             estimated_cost = (
@@ -3847,9 +6243,7 @@ class SqliteCaseRepository:
                 )
             )
             pricing_snapshot_ids = tuple(
-                dict.fromkeys(
-                    cast(str, item.pricing_snapshot_id) for item in costed
-                )
+                dict.fromkeys(cast(str, item.pricing_snapshot_id) for item in costed)
             )
             return ObservabilityMetricsSnapshot(
                 case_id=case_id,
@@ -3904,10 +6298,13 @@ class SqliteCaseRepository:
         """Read both ledgers from one WAL snapshot before deriving metrics."""
 
         with self._read_connection() as connection:
-            if connection.execute(
-                "SELECT 1 FROM cases WHERE case_id = ?",
-                (case_id,),
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM cases WHERE case_id = ?",
+                    (case_id,),
+                ).fetchone()
+                is None
+            ):
                 raise CaseRecordNotFoundError(case_id)
             self._validate_all_receipt_authority(
                 connection,
@@ -4156,9 +6553,7 @@ class SqliteCaseRepository:
                 expected_case_version,
             )
             if issued_at < bound_case.updated_at:
-                raise ValueError(
-                    "Capability issued_at cannot predate its bound case version"
-                )
+                raise ValueError("Capability issued_at cannot predate its bound case version")
             for row in connection.execute(
                 """
                 SELECT * FROM authority_capabilities
@@ -4255,23 +6650,17 @@ class SqliteCaseRepository:
         ):
             if type(identifier) is not str or _IDENTIFIER.fullmatch(identifier) is None:
                 raise ValueError(f"{label} must be a canonical identifier")
-        if not command.approval_id.startswith(
-            f"approval-{command.portal_variant.value.lower()}-"
-        ):
+        if not command.approval_id.startswith(f"approval-{command.portal_variant.value.lower()}-"):
             raise ValueError("approval_id must bind the trusted portal variant")
         consumed_at = _parse_datetime(
             _dump_aware_datetime(command.consumed_at, "capability consumed_at")
         )
-        approved_at = _parse_datetime(
-            _dump_aware_datetime(command.approved_at, "approved_at")
-        )
-        rendered_at = _parse_datetime(
-            _dump_aware_datetime(command.rendered_at, "rendered_at")
-        )
+        approved_at = _parse_datetime(_dump_aware_datetime(command.approved_at, "approved_at"))
+        rendered_at = _parse_datetime(_dump_aware_datetime(command.rendered_at, "rendered_at"))
         if not consumed_at < approved_at < rendered_at:
             raise ValueError(
                 "Approval timestamps must be strictly ordered: consume, approve, receipt"
-        )
+            )
 
         with self._write_connection() as connection:
             capability_row = connection.execute(
@@ -4312,6 +6701,29 @@ class SqliteCaseRepository:
                 raise AuthorityCapabilityError("Approval requires the review state")
             if current.snapshot.portal_state is not PortalState.REVIEW:
                 raise WorkflowAtomicityError("Review case lost its portal review state")
+            run_row = connection.execute(
+                "SELECT * FROM portal_run_authority WHERE case_id = ?",
+                (current.case_id,),
+            ).fetchone()
+            if run_row is None:
+                raise WorkflowAtomicityError("Review case lost its portal run authority")
+            run = self._row_to_portal_run(connection, run_row)
+            session_row = connection.execute(
+                """
+                SELECT * FROM portal_session_authority
+                WHERE case_id = ? ORDER BY checkpoint_number DESC LIMIT 1
+                """,
+                (current.case_id,),
+            ).fetchone()
+            if session_row is None:
+                raise WorkflowAtomicityError("Review case lost its portal session authority")
+            portal_session, _rendered = self._portal_session_from_row(session_row)
+            if (
+                run.status != "review"
+                or run.portal_variant is not command.portal_variant
+                or portal_session.variant is not command.portal_variant
+            ):
+                raise AuthorityCapabilityError("Approval portal variant is invalid")
             self._validate_canonical_case_snapshot(current)
             self._require_current_packet_authority(connection, current)
             packet = current.snapshot.claim_packet
@@ -4657,9 +7069,7 @@ class SqliteCaseRepository:
             receipt_query += " WHERE case_id = ?"
             authority_query += " WHERE case_id = ?"
             final_case_query += " AND case_id = ?"
-            intermediate_query = (
-                "SELECT 1 FROM cases WHERE state = ? AND case_id = ? LIMIT 1"
-            )
+            intermediate_query = "SELECT 1 FROM cases WHERE state = ? AND case_id = ? LIMIT 1"
             scope_parameters = (selected_case_id,)
         authority_query += " ORDER BY case_id"
         receipt_case_ids = {
@@ -4671,8 +7081,7 @@ class SqliteCaseRepository:
             scope_parameters,
         ).fetchall()
         authority_case_ids = {
-            _require_string(row["case_id"], "receipt authority case id")
-            for row in authority_rows
+            _require_string(row["case_id"], "receipt authority case id") for row in authority_rows
         }
         final_case_ids = {
             _require_string(row["case_id"], "final receipt case id")
@@ -4690,9 +7099,7 @@ class SqliteCaseRepository:
             or receipt_case_ids != authority_case_ids
             or receipt_case_ids != final_case_ids
         ):
-            raise PersistedDataIntegrityError(
-                "Persisted final cases lost their receipt authority"
-            )
+            raise PersistedDataIntegrityError("Persisted final cases lost their receipt authority")
 
         expected_gate_rows: set[tuple[int, str, str]] = set()
         expected_human_audits: set[tuple[int, str]] = set()
@@ -4769,10 +7176,7 @@ class SqliteCaseRepository:
             self._validate_digest(digest)
             expected_consumptions.add((digest, authority_case_id))
 
-        gate_query = (
-            "SELECT sequence, case_id, gate_id FROM gate_decisions "
-            "WHERE gate_id IN (?, ?)"
-        )
+        gate_query = "SELECT sequence, case_id, gate_id FROM gate_decisions WHERE gate_id IN (?, ?)"
         gate_parameters: tuple[str, ...] = (
             GateId.G9_HUMAN_APPROVAL.value,
             GateId.G10_RECEIPT_REDACTION.value,
@@ -4894,17 +7298,14 @@ class SqliteCaseRepository:
             if (
                 receipt_json != authority_json
                 or receipt != authority_receipt
-                or receipt_digest
-                != hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+                or receipt_digest != hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
                 or receipt.case_id != case_id
                 or receipt.variant is not variant
                 or receipt.approval_id
                 != _require_string(authority_row["approval_id"], "authority approval id")
                 or receipt.receipt_id
                 != _require_string(authority_row["receipt_id"], "authority receipt id")
-                or not receipt.approval_id.startswith(
-                    f"approval-{variant.value.lower()}-"
-                )
+                or not receipt.approval_id.startswith(f"approval-{variant.value.lower()}-")
                 or current.state is not CaseState.RECEIPT
                 or current.snapshot.portal_state is not PortalState.RECEIPT
                 or receipt.version != current.version
@@ -5103,9 +7504,7 @@ class SqliteCaseRepository:
         if (
             _require_string(row["case_id"], "receipt gate case id") != case_id
             or _require_string(row["gate_id"], "receipt gate id") != gate_id.value
-            or _parse_datetime(
-                _require_string(row["decided_at"], "receipt gate decided_at")
-            )
+            or _parse_datetime(_require_string(row["decided_at"], "receipt gate decided_at"))
             != occurred_at
             or decision.gate_id is not gate_id
             or decision.decided_at != occurred_at
@@ -5143,9 +7542,7 @@ class SqliteCaseRepository:
             audit.event_id != _require_string(row["event_id"], "receipt audit id")
             or audit.case_id != _require_string(row["case_id"], "receipt audit case id")
             or audit.occurred_at
-            != _parse_datetime(
-                _require_string(row["occurred_at"], "receipt audit occurred_at")
-            )
+            != _parse_datetime(_require_string(row["occurred_at"], "receipt audit occurred_at"))
             or audit.case_id != case_id
             or audit.event_type is not event_type
             or audit.actor is not actor
@@ -5205,11 +7602,12 @@ class SqliteCaseRepository:
                 row,
                 label="receipt gate projection",
             )
-            if (
-                isinstance(envelope.event, GateWorkflowEvent)
-                and envelope.event.decision.gate_id
-                in {GateId.G9_HUMAN_APPROVAL, GateId.G10_RECEIPT_REDACTION}
-            ):
+            if isinstance(
+                envelope.event, GateWorkflowEvent
+            ) and envelope.event.decision.gate_id in {
+                GateId.G9_HUMAN_APPROVAL,
+                GateId.G10_RECEIPT_REDACTION,
+            }:
                 source_audit = SqliteCaseRepository._require_receipt_audit(
                     connection,
                     sequence=envelope.source_audit_sequence,
@@ -5306,9 +7704,7 @@ class SqliteCaseRepository:
         """Delete cases without resetting AUTOINCREMENT history cursors."""
 
         if self.is_canonical_authority:
-            raise AuthorityModeMismatchError(
-                "Canonical reset cannot bypass exact media cleanup"
-            )
+            raise AuthorityModeMismatchError("Canonical reset cannot bypass exact media cleanup")
         with self._write_connection() as connection:
             count_row = connection.execute("SELECT COUNT(*) FROM cases").fetchone()
             count = int(count_row[0]) if count_row is not None else 0
@@ -5339,14 +7735,10 @@ class SqliteCaseRepository:
     @staticmethod
     def _require_expected_version(value: object, label: str) -> int:
         if type(value) is not int:
-            raise TypeError(
-                f"{label} must be an exact positive SQLite int64 integer"
-            )
+            raise TypeError(f"{label} must be an exact positive SQLite int64 integer")
         exact = value
         if exact < 1 or exact > SQLITE_MAX_INTEGER:
-            raise TypeError(
-                f"{label} must be an exact positive SQLite int64 integer"
-            )
+            raise TypeError(f"{label} must be an exact positive SQLite int64 integer")
         return exact
 
     @staticmethod
@@ -5360,24 +7752,15 @@ class SqliteCaseRepository:
                     "A created canonical case cannot expose persisted intake"
                 )
         elif snapshot.intake_summary is None:
-            raise WorkflowAtomicityError(
-                "A non-created canonical case requires persisted intake"
-            )
+            raise WorkflowAtomicityError("A non-created canonical case requires persisted intake")
 
-        if (
-            current.state in _CANONICAL_PACKET_REQUIRED_STATES
-            and snapshot.claim_packet is None
-        ):
-            raise WorkflowAtomicityError(
-                f"{current.state.value} requires a canonical ClaimPacket"
-            )
+        if current.state in _CANONICAL_PACKET_REQUIRED_STATES and snapshot.claim_packet is None:
+            raise WorkflowAtomicityError(f"{current.state.value} requires a canonical ClaimPacket")
         if (
             current.state in _CANONICAL_PACKET_FORBIDDEN_STATES
             and snapshot.claim_packet is not None
         ):
-            raise WorkflowAtomicityError(
-                f"{current.state.value} cannot retain a ClaimPacket"
-            )
+            raise WorkflowAtomicityError(f"{current.state.value} cannot retain a ClaimPacket")
 
         active_payload = snapshot.active_clarification
         if current.state is not CaseState.AWAITING_CLARIFICATION:
@@ -5387,9 +7770,7 @@ class SqliteCaseRepository:
                 )
             return
         if active_payload is None:
-            raise WorkflowAtomicityError(
-                "awaiting_clarification requires an active clarification"
-            )
+            raise WorkflowAtomicityError("awaiting_clarification requires an active clarification")
         try:
             active = ClarificationView.model_validate(active_payload)
         except (ValidationError, ValueError, TypeError) as error:
@@ -5432,9 +7813,7 @@ class SqliteCaseRepository:
         pending_clarification_at: datetime | None = None
         pending_provider: list[
             tuple[
-                ProviderCallWorkflowEvent
-                | RetryWorkflowEvent
-                | OperationalFailureWorkflowEvent,
+                ProviderCallWorkflowEvent | RetryWorkflowEvent | OperationalFailureWorkflowEvent,
                 datetime,
             ]
         ] = []
@@ -5465,9 +7844,7 @@ class SqliteCaseRepository:
             event = envelope.event
             audit = audits_by_sequence.get(envelope.source_audit_sequence)
             if audit is None:
-                raise WorkflowAtomicityError(
-                    "Workflow replay lost its source audit authority"
-                )
+                raise WorkflowAtomicityError("Workflow replay lost its source audit authority")
             self._validate_replay_actor(event, audit.actor)
             if isinstance(event, GateWorkflowEvent):
                 gate_states = {
@@ -5485,13 +7862,11 @@ class SqliteCaseRepository:
                     GateId.G5_COMPLETENESS: frozenset(
                         {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
                     ),
-                    GateId.G6_TOOL_AUTHORITY: frozenset({CaseState.FILLING}),
+                    GateId.G6_TOOL_AUTHORITY: frozenset({CaseState.READY_TO_FILL}),
                     GateId.G7_PORTAL_WRITE: frozenset({CaseState.FILLING}),
                     GateId.G8_VERIFICATION: frozenset({CaseState.VERIFYING}),
                     GateId.G9_HUMAN_APPROVAL: frozenset({CaseState.REVIEW}),
-                    GateId.G10_RECEIPT_REDACTION: frozenset(
-                        {CaseState.HUMAN_APPROVED}
-                    ),
+                    GateId.G10_RECEIPT_REDACTION: frozenset({CaseState.HUMAN_APPROVED}),
                 }
                 allowed_state = replayed_state in gate_states[event.decision.gate_id]
                 if not allowed_state:
@@ -5509,9 +7884,7 @@ class SqliteCaseRepository:
 
             if isinstance(
                 event,
-                ProviderCallWorkflowEvent
-                | RetryWorkflowEvent
-                | OperationalFailureWorkflowEvent,
+                ProviderCallWorkflowEvent | RetryWorkflowEvent | OperationalFailureWorkflowEvent,
             ):
                 required_state = {
                     WorkflowOperation.TRANSCRIPTION: CaseState.DISCLOSED,
@@ -5529,9 +7902,7 @@ class SqliteCaseRepository:
                     )
                 pending_provider.append((event, occurred_at))
                 if isinstance(event, OperationalFailureWorkflowEvent):
-                    next_envelope = (
-                        None if index + 1 == len(workflows) else workflows[index + 1]
-                    )
+                    next_envelope = None if index + 1 == len(workflows) else workflows[index + 1]
                     if (
                         next_envelope is None
                         or next_envelope.occurred_at != occurred_at
@@ -5545,15 +7916,52 @@ class SqliteCaseRepository:
                     boundary_stage = 4
                 continue
 
-            if isinstance(
-                event,
-                ToolCallWorkflowEvent
-                | PortalFillWorkflowEvent
-                | VerificationWorkflowEvent,
-            ):
-                raise WorkflowAtomicityError(
-                    "Workflow event has no canonical atomic writer"
+            if isinstance(event, ToolCallWorkflowEvent):
+                if (
+                    replayed_state is not CaseState.FILLING
+                    or boundary_stage != 1
+                    or event.status is ToolCallStatus.STARTED
+                ):
+                    raise WorkflowAtomicityError("Tool event has no terminal G7 writer boundary")
+                boundary_stage = 2
+                continue
+
+            if isinstance(event, PortalFillWorkflowEvent):
+                if replayed_state is not CaseState.FILLING or boundary_stage != 2:
+                    raise WorkflowAtomicityError("Portal fill has no successful G7 writer boundary")
+                boundary_stage = 3
+                continue
+
+            if isinstance(event, VerificationWorkflowEvent):
+                if replayed_state is not CaseState.VERIFYING:
+                    raise WorkflowAtomicityError("Verification event has no VERIFYING authority")
+                if event.final:
+                    if boundary_stage != 1:
+                        raise WorkflowAtomicityError("Final verification requires its G8 gate")
+                    boundary_stage = 2
+                    continue
+                if (
+                    boundary_stage != 0
+                    or event.attempt_number != 1
+                    or last_plan_events is None
+                    or last_safe_plan is None
+                ):
+                    raise WorkflowAtomicityError(
+                        "Repairable verification is not one closed attempt"
+                    )
+                replayed_version += 1
+                version_origins[replayed_version] = occurred_at
+                last_mutation_at = occurred_at
+                expected_packet_authorities.append(
+                    _ExpectedPacketAuthority(
+                        bound_version=replayed_version,
+                        created_at=occurred_at,
+                        state=CaseState.VERIFYING,
+                        plan_events=last_plan_events,
+                        safe_plan=last_safe_plan,
+                    )
                 )
+                continue
 
             if isinstance(event, PlanStepWorkflowEvent):
                 if replayed_state not in {
@@ -5564,19 +7972,11 @@ class SqliteCaseRepository:
                         "Plan event was not authorized by the replayed case state"
                     )
                 if boundary_stage not in {1, 2}:
-                    raise WorkflowAtomicityError(
-                        "Plan events require the completed gate stage"
-                    )
-                if (
-                    event.sequence != len(pending_plan) + 1
-                    or (
-                        pending_plan_at is not None
-                        and occurred_at != pending_plan_at
-                    )
+                    raise WorkflowAtomicityError("Plan events require the completed gate stage")
+                if event.sequence != len(pending_plan) + 1 or (
+                    pending_plan_at is not None and occurred_at != pending_plan_at
                 ):
-                    raise WorkflowAtomicityError(
-                        "Plan events are not one exact atomic sequence"
-                    )
+                    raise WorkflowAtomicityError("Plan events are not one exact atomic sequence")
                 pending_plan.append(event)
                 pending_plan_at = occurred_at
                 boundary_stage = 2
@@ -5594,10 +7994,7 @@ class SqliteCaseRepository:
                     raise WorkflowAtomicityError(
                         "Clarification events require the completed plan stage"
                     )
-                if (
-                    pending_clarification_at is not None
-                    and occurred_at != pending_clarification_at
-                ):
+                if pending_clarification_at is not None and occurred_at != pending_clarification_at:
                     raise WorkflowAtomicityError(
                         "Clarification lifecycle events are not one atomic timestamp"
                     )
@@ -5612,17 +8009,11 @@ class SqliteCaseRepository:
                         pending_clarification is not None
                         or event.round != last_clarification_round + 1
                     ):
-                        raise WorkflowAtomicityError(
-                            "Clarification requests are not contiguous"
-                        )
+                        raise WorkflowAtomicityError("Clarification requests are not contiguous")
                     pending_clarification = event
                     pending_requested_at = occurred_at
                     last_clarification_round = event.round
-                    next_event = (
-                        None
-                        if index + 1 == len(workflows)
-                        else workflows[index + 1].event
-                    )
+                    next_event = None if index + 1 == len(workflows) else workflows[index + 1].event
                     initial_transition = (
                         isinstance(next_event, StateWorkflowEvent)
                         and next_event.from_state is replayed_state
@@ -5692,10 +8083,7 @@ class SqliteCaseRepository:
                     raise WorkflowAtomicityError(
                         "State history is not contiguous during version replay"
                     )
-                if (
-                    event.from_state is CaseState.CREATED
-                    and event.to_state is CaseState.DISCLOSED
-                ):
+                if event.from_state is CaseState.CREATED and event.to_state is CaseState.DISCLOSED:
                     self._validate_replayed_intake_gate_boundary(
                         connection,
                         current=current,
@@ -5717,10 +8105,7 @@ class SqliteCaseRepository:
                     raise WorkflowAtomicityError(
                         "Plan events do not share their packet mutation timestamp"
                     )
-                if (
-                    pending_clarification_at is not None
-                    and pending_clarification_at != occurred_at
-                ):
+                if pending_clarification_at is not None and pending_clarification_at != occurred_at:
                     raise WorkflowAtomicityError(
                         "Clarification events do not share their state mutation timestamp"
                     )
@@ -5728,8 +8113,7 @@ class SqliteCaseRepository:
                 version_origins[replayed_version] = occurred_at
                 last_mutation_at = occurred_at
                 creates_analysis_packet = bool(pending_plan) and (
-                    event.from_state
-                    in {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                    event.from_state in {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
                     and event.to_state in analysis_targets
                 )
                 if creates_analysis_packet:
@@ -5763,8 +8147,11 @@ class SqliteCaseRepository:
                     )
                 elif (event.from_state, event.to_state) in {
                     (CaseState.READY_TO_FILL, CaseState.FILLING),
+                    (CaseState.READY_TO_FILL, CaseState.BLOCKED),
                     (CaseState.FILLING, CaseState.VERIFYING),
+                    (CaseState.FILLING, CaseState.BLOCKED),
                     (CaseState.VERIFYING, CaseState.REVIEW),
+                    (CaseState.VERIFYING, CaseState.BLOCKED),
                     (CaseState.REVIEW, CaseState.HUMAN_APPROVED),
                 }:
                     if last_plan_events is None or last_safe_plan is None:
@@ -5951,11 +8338,10 @@ class SqliteCaseRepository:
         current: CaseRecord,
         decisions: tuple[GateDecision, ...],
     ) -> None:
-        if (
-            tuple(decision.gate_id for decision in decisions)
-            != (GateId.G0_INTAKE, GateId.G1_PRIVACY)
-            or any(not decision.passed for decision in decisions)
-        ):
+        if tuple(decision.gate_id for decision in decisions) != (
+            GateId.G0_INTAKE,
+            GateId.G1_PRIVACY,
+        ) or any(not decision.passed for decision in decisions):
             raise WorkflowAtomicityError(
                 "CREATED to DISCLOSED requires exactly the passed G0/G1 pair"
             )
@@ -5968,9 +8354,7 @@ class SqliteCaseRepository:
             (current.case_id,),
         ).fetchone()
         if authority is None:
-            raise WorkflowAtomicityError(
-                "Intake gate replay has no immutable intake authority"
-            )
+            raise WorkflowAtomicityError("Intake gate replay has no immutable intake authority")
         sequences = (
             _require_integer(authority["g0_gate_sequence"], "G0 sequence"),
             _require_integer(authority["g1_gate_sequence"], "G1 sequence"),
@@ -5991,10 +8375,7 @@ class SqliteCaseRepository:
             for row in rows
         )
         if (
-            tuple(
-                _require_integer(row["sequence"], "intake gate sequence")
-                for row in rows
-            )
+            tuple(_require_integer(row["sequence"], "intake gate sequence") for row in rows)
             != sequences
             or referenced != decisions
         ):
@@ -6014,17 +8395,11 @@ class SqliteCaseRepository:
         if row is None:
             if current.state is CaseState.CREATED:
                 return None
-            raise WorkflowAtomicityError(
-                "Canonical workflow replay has no bound intake authority"
-            )
-        manifest = _load_json_object(
-            _require_string(row["manifest_json"], "intake manifest")
-        )
+            raise WorkflowAtomicityError("Canonical workflow replay has no bound intake authority")
+        manifest = _load_json_object(_require_string(row["manifest_json"], "intake manifest"))
         mode = manifest.get("inputMode")
         if mode not in {"text", "audio"}:
-            raise WorkflowAtomicityError(
-                "Canonical workflow replay has an invalid intake mode"
-            )
+            raise WorkflowAtomicityError("Canonical workflow replay has an invalid intake mode")
         return cast(str, mode)
 
     @staticmethod
@@ -6107,15 +8482,27 @@ class SqliteCaseRepository:
             ),
             (CaseState.READY_TO_FILL, CaseState.FILLING): (
                 ActorType.AGENT,
-                frozenset({0}),
+                frozenset({1}),
+            ),
+            (CaseState.READY_TO_FILL, CaseState.BLOCKED): (
+                system,
+                frozenset({1}),
             ),
             (CaseState.FILLING, CaseState.VERIFYING): (
                 ActorType.AGENT,
-                frozenset({1}),
+                frozenset({3}),
+            ),
+            (CaseState.FILLING, CaseState.BLOCKED): (
+                system,
+                frozenset({2}),
             ),
             (CaseState.VERIFYING, CaseState.REVIEW): (
                 system,
-                frozenset({1}),
+                frozenset({2}),
+            ),
+            (CaseState.VERIFYING, CaseState.BLOCKED): (
+                system,
+                frozenset({2}),
             ),
             (CaseState.FILLING, CaseState.FAILED): (system, frozenset({4})),
             (CaseState.VERIFYING, CaseState.FAILED): (system, frozenset({4})),
@@ -6137,10 +8524,7 @@ class SqliteCaseRepository:
             or (
                 event.from_state is CaseState.DISCLOSED
                 and (
-                    (
-                        intake_mode == "text"
-                        and event.to_state is not CaseState.ANALYZING
-                    )
+                    (intake_mode == "text" and event.to_state is not CaseState.ANALYZING)
                     or (
                         intake_mode == "audio"
                         and event.to_state
@@ -6153,9 +8537,7 @@ class SqliteCaseRepository:
                 )
             )
         ):
-            raise WorkflowAtomicityError(
-                "State transition has no exact canonical writer boundary"
-            )
+            raise WorkflowAtomicityError("State transition has no exact canonical writer boundary")
 
     @staticmethod
     def _consume_replayed_plan(
@@ -6173,13 +8555,10 @@ class SqliteCaseRepository:
             CaseState.EMERGENCY_STOPPED: _BLOCKED_PLAN,
         }.get(target)
         if safe_plan is None:
-            raise WorkflowAtomicityError(
-                "Packet plan has no authorized replay target"
-            )
+            raise WorkflowAtomicityError("Packet plan has no authorized replay target")
         plan_events = tuple((event.sequence, event.tool) for event in pending_plan)
         expected_events = tuple(
-            (index, tool)
-            for index, (tool, _reason) in enumerate(safe_plan, start=1)
+            (index, tool) for index, (tool, _reason) in enumerate(safe_plan, start=1)
         )
         if plan_events != expected_events:
             raise WorkflowAtomicityError(
@@ -6193,9 +8572,7 @@ class SqliteCaseRepository:
         to_state: CaseState,
         events: tuple[
             tuple[
-                ProviderCallWorkflowEvent
-                | RetryWorkflowEvent
-                | OperationalFailureWorkflowEvent,
+                ProviderCallWorkflowEvent | RetryWorkflowEvent | OperationalFailureWorkflowEvent,
                 datetime,
             ],
             ...,
@@ -6205,9 +8582,8 @@ class SqliteCaseRepository:
     ) -> None:
         event_values = tuple(event for event, _occurred_at in events)
         event_times = tuple(occurred_at for _event, occurred_at in events)
-        if (
-            tuple(sorted(event_times)) != event_times
-            or any(occurred_at > mutation_at for occurred_at in event_times)
+        if tuple(sorted(event_times)) != event_times or any(
+            occurred_at > mutation_at for occurred_at in event_times
         ):
             raise WorkflowAtomicityError(
                 "Provider telemetry timestamps escape their atomic boundary"
@@ -6233,8 +8609,7 @@ class SqliteCaseRepository:
                 and first.call_sequence == 1
                 and first.retry_attempt == 0
                 and retry.call_sequence == first.call_sequence
-                and retry.failure.category
-                is ProviderFailureCategory.INVALID_RESPONSE
+                and retry.failure.category is ProviderFailureCategory.INVALID_RESPONSE
                 and retry.model_id is first.model_id
                 and retry.provider_mode == first.provider_mode
                 and retry.duration_ms == first.duration_ms
@@ -6265,8 +8640,7 @@ class SqliteCaseRepository:
                 and first.call_sequence == 1
                 and first.retry_attempt == 0
                 and retry.call_sequence == first.call_sequence
-                and retry.failure.category
-                is ProviderFailureCategory.INVALID_RESPONSE
+                and retry.failure.category is ProviderFailureCategory.INVALID_RESPONSE
                 and retry.model_id is first.model_id
                 and retry.provider_mode == first.provider_mode
                 and retry.duration_ms == first.duration_ms
@@ -6334,15 +8708,11 @@ class SqliteCaseRepository:
         if (
             origin is None
             or capability.issued_at < origin
-            or (
-                next_origin is not None
-                and capability.issued_at >= next_origin
-            )
+            or (next_origin is not None and capability.issued_at >= next_origin)
             or (
                 consumed_at is not None
                 and (
-                    consumed_at < origin
-                    or (next_origin is not None and consumed_at >= next_origin)
+                    consumed_at < origin or (next_origin is not None and consumed_at >= next_origin)
                 )
             )
         ):
@@ -6388,19 +8758,13 @@ class SqliteCaseRepository:
     def _effective_packet_gates(
         history: tuple[GateDecision, ...],
     ) -> tuple[GateDecision, ...]:
-        if (
-            len(history) < 4
-            or tuple(item.gate_id for item in history[:4])
-            != (
-                GateId.G0_INTAKE,
-                GateId.G1_PRIVACY,
-                GateId.G2_OUTPUT_CONTRACT,
-                GateId.G3_SAFETY_SCOPE,
-            )
+        if len(history) < 4 or tuple(item.gate_id for item in history[:4]) != (
+            GateId.G0_INTAKE,
+            GateId.G1_PRIVACY,
+            GateId.G2_OUTPUT_CONTRACT,
+            GateId.G3_SAFETY_SCOPE,
         ):
-            raise WorkflowAtomicityError(
-                "Packet authority requires the canonical G0-G3 prefix"
-            )
+            raise WorkflowAtomicityError("Packet authority requires the canonical G0-G3 prefix")
         tail = history[4:]
         authority_start = next(
             (
@@ -6424,9 +8788,7 @@ class SqliteCaseRepository:
             is not (GateId.G4_PROVENANCE if index % 2 == 0 else GateId.G5_COMPLETENESS)
             for index, decision in enumerate(analysis_tail)
         ):
-            raise WorkflowAtomicityError(
-                "Packet authority requires canonical G4/G5 history pairs"
-            )
+            raise WorkflowAtomicityError("Packet authority requires canonical G4/G5 history pairs")
         expected_authority = (
             GateId.G6_TOOL_AUTHORITY,
             GateId.G7_PORTAL_WRITE,
@@ -6434,12 +8796,11 @@ class SqliteCaseRepository:
             GateId.G9_HUMAN_APPROVAL,
             GateId.G10_RECEIPT_REDACTION,
         )
-        if tuple(decision.gate_id for decision in authority_tail) != expected_authority[
-            : len(authority_tail)
-        ]:
-            raise WorkflowAtomicityError(
-                "Packet authority requires the canonical G6-G10 suffix"
-            )
+        if (
+            tuple(decision.gate_id for decision in authority_tail)
+            != expected_authority[: len(authority_tail)]
+        ):
+            raise WorkflowAtomicityError("Packet authority requires the canonical G6-G10 suffix")
         if authority_tail and (
             len(analysis_tail) < 2
             or analysis_tail[-2].gate_id is not GateId.G4_PROVENANCE
@@ -6481,10 +8842,7 @@ class SqliteCaseRepository:
         g5 = effective[5]
         completed_rounds = max(
             0,
-            sum(
-                decision.gate_id is GateId.G5_COMPLETENESS for decision in history
-            )
-            - 1,
+            sum(decision.gate_id is GateId.G5_COMPLETENESS for decision in history) - 1,
         )
         completeness = cls._derive_completeness(
             provenance,
@@ -6518,10 +8876,7 @@ class SqliteCaseRepository:
         gates_json = _dump_json_value(
             cast(
                 JsonValue,
-                [
-                    decision.model_dump(mode="json", by_alias=True)
-                    for decision in effective
-                ],
+                [decision.model_dump(mode="json", by_alias=True) for decision in effective],
             )
         )
         packet_digest = hashlib.sha256(
@@ -6576,10 +8931,7 @@ class SqliteCaseRepository:
         canonical_gates_json = _dump_json_value(
             cast(
                 JsonValue,
-                [
-                    decision.model_dump(mode="json", by_alias=True)
-                    for decision in effective
-                ],
+                [decision.model_dump(mode="json", by_alias=True) for decision in effective],
             )
         )
         bound_version = _require_integer(row["bound_case_version"], "packet bound version")
@@ -6588,8 +8940,7 @@ class SqliteCaseRepository:
         )
         if (
             _require_integer(row["authority_version"], "packet authority version") != 1
-            or _require_string(row["case_id"], "packet authority case id")
-            != current.case_id
+            or _require_string(row["case_id"], "packet authority case id") != current.case_id
             or bound_version < 2
             or bound_version > current.version
             or created_at < current.created_at
@@ -6618,9 +8969,7 @@ class SqliteCaseRepository:
             and self._effective_packet_gates(prefix) == effective
         )
         if not matching_history:
-            raise WorkflowAtomicityError(
-                "Packet authority gates have no bound persisted history"
-            )
+            raise WorkflowAtomicityError("Packet authority gates have no bound persisted history")
         recomputation_error: WorkflowAtomicityError | None = None
         for prefix in matching_history:
             try:
@@ -6657,12 +9006,10 @@ class SqliteCaseRepository:
         prior_version = 1
         prior_created_at = current.created_at
         for row in rows:
-            bound_version, created_at, _packet, _effective = (
-                self._validate_packet_authority_row(
-                    row,
-                    current=current,
-                    history=history,
-                )
+            bound_version, created_at, _packet, _effective = self._validate_packet_authority_row(
+                row,
+                current=current,
+                history=history,
             )
             if bound_version <= prior_version or created_at < prior_created_at:
                 raise WorkflowAtomicityError(
@@ -6694,12 +9041,10 @@ class SqliteCaseRepository:
         if row is None:
             raise WorkflowAtomicityError("Current ClaimPacket has no immutable authority")
         history = self._read_gate_decisions(connection, case_id=current.case_id)
-        bound_version, _created_at, stored_packet, effective = (
-            self._validate_packet_authority_row(
-                row,
-                current=current,
-                history=history,
-            )
+        bound_version, _created_at, stored_packet, effective = self._validate_packet_authority_row(
+            row,
+            current=current,
+            history=history,
         )
         if (
             bound_version != current.version
@@ -6787,11 +9132,8 @@ class SqliteCaseRepository:
         ).fetchone()
         if (
             handle_row is None
-            or _require_string(handle_row["storage_name"], "media handle")
-            != storage_name
-            or _parse_datetime(
-                _require_string(handle_row["created_at"], "media handle created_at")
-            )
+            or _require_string(handle_row["storage_name"], "media handle") != storage_name
+            or _parse_datetime(_require_string(handle_row["created_at"], "media handle created_at"))
             != authority_created_at
         ):
             raise WorkflowAtomicityError("Intake authority lost its owned media handle")
@@ -6914,9 +9256,7 @@ class SqliteCaseRepository:
                         "Authority source image no longer satisfies G1"
                     ) from error
                 if read_owned(model_ref) != expected:
-                    raise WorkflowAtomicityError(
-                        "Authority model bytes no longer satisfy G1"
-                    )
+                    raise WorkflowAtomicityError("Authority model bytes no longer satisfy G1")
             observed_order.append(input_id)
         if input_order != observed_order:
             raise WorkflowAtomicityError("Authority input order changed")
@@ -7001,8 +9341,7 @@ class SqliteCaseRepository:
             "transcription provider sequence",
         )
         if (
-            _require_integer(row["authority_version"], "transcript authority version")
-            != 1
+            _require_integer(row["authority_version"], "transcript authority version") != 1
             or bound_version != 3
             or bound_version > current.version
             or authority_created_at
@@ -7069,19 +9408,13 @@ class SqliteCaseRepository:
                 ValueError,
                 TypeError,
             ) as error:
-                raise TranscriptStateError(
-                    "Transcript authority bytes are invalid"
-                ) from error
+                raise TranscriptStateError("Transcript authority bytes are invalid") from error
             normalized = re.sub(
                 r"\s+",
                 " ",
                 unicodedata.normalize("NFC", transcript_text),
             ).strip()
-            if (
-                normalized != transcript_text
-                or not transcript_text
-                or len(transcript_text) > 4_000
-            ):
+            if normalized != transcript_text or not transcript_text or len(transcript_text) > 4_000:
                 raise TranscriptStateError("Transcript authority text is not normalized")
         workflow_row = connection.execute(
             """
@@ -7400,12 +9733,8 @@ class SqliteCaseRepository:
                 command.clarification_answer,
                 "ClarificationAnswerRequest",
             )
-        SqliteCaseRepository._validate_approved_evidence_shape(
-            command.approved_evidence
-        )
-        SqliteCaseRepository._validate_output_contract_attempt_shape(
-            command.g2_attempts
-        )
+        SqliteCaseRepository._validate_approved_evidence_shape(command.approved_evidence)
+        SqliteCaseRepository._validate_output_contract_attempt_shape(command.g2_attempts)
         if command.safety_input is not None:
             SqliteCaseRepository._validate_safety_input(command.safety_input)
 
@@ -7451,12 +9780,8 @@ class SqliteCaseRepository:
                 command.claim_packet,
                 "ClaimPacket",
             )
-        SqliteCaseRepository._validate_approved_evidence_shape(
-            command.approved_evidence
-        )
-        SqliteCaseRepository._validate_output_contract_attempt_shape(
-            command.g2_attempts
-        )
+        SqliteCaseRepository._validate_approved_evidence_shape(command.approved_evidence)
+        SqliteCaseRepository._validate_output_contract_attempt_shape(command.g2_attempts)
 
     @staticmethod
     def _validate_approved_evidence_shape(
@@ -8243,11 +10568,7 @@ class SqliteCaseRepository:
         current: CaseRecord,
         command: AnalysisWorkflowCommand,
     ) -> _AnalysisAuthority:
-        if (
-            command.g2_attempts
-            or command.approved_evidence
-            or command.safety_input is not None
-        ):
+        if command.g2_attempts or command.approved_evidence or command.safety_input is not None:
             raise WorkflowAtomicityError(
                 "Clarification continuation cannot rerun G2/G3 or a provider"
             )
@@ -8756,10 +11077,7 @@ class SqliteCaseRepository:
                 raise WorkflowAtomicityError(
                     "A first-call terminal failure must use callSequence one and retryAttempt zero"
                 )
-            if (
-                command.event.operation is WorkflowOperation.EXTRACTION
-                and g2_run.attempts
-            ):
+            if command.event.operation is WorkflowOperation.EXTRACTION and g2_run.attempts:
                 raise WorkflowAtomicityError(
                     "A first-call extraction failure requires an empty canonical G2 run"
                 )
@@ -8784,9 +11102,7 @@ class SqliteCaseRepository:
                 or retry_emission.occurred_at < first_emission.occurred_at
                 or retry_emission.occurred_at > command.occurred_at
             ):
-                raise WorkflowAtomicityError(
-                    "Terminal retry prefix timestamps must be monotonic"
-                )
+                raise WorkflowAtomicityError("Terminal retry prefix timestamps must be monotonic")
             if (
                 first.operation is not WorkflowOperation.EXTRACTION
                 or first.call_sequence != 1
@@ -8831,9 +11147,7 @@ class SqliteCaseRepository:
         current_packet = current.snapshot.claim_packet
         target_packet = command.claim_packet
         if (current_packet is None) is not (target_packet is None):
-            raise WorkflowAtomicityError(
-                "Provider failure must preserve ClaimPacket presence"
-            )
+            raise WorkflowAtomicityError("Provider failure must preserve ClaimPacket presence")
         if current_packet is not None and target_packet is not None:
             current_json = current_packet.model_dump(mode="json", by_alias=True)
             target_json = target_packet.model_dump(mode="json", by_alias=True)
@@ -8915,9 +11229,7 @@ class SqliteCaseRepository:
                 for row in rows
             )
         except (ValidationError, ValueError, TypeError) as error:
-            raise PersistedDataIntegrityError(
-                "Persisted gate history is invalid"
-            ) from error
+            raise PersistedDataIntegrityError("Persisted gate history is invalid") from error
 
     def _insert_redacted_workflow_event(
         self,
@@ -9194,8 +11506,7 @@ class SqliteCaseRepository:
         ):
             capability = cls._row_to_capability(row)
             if capability.issued_at >= next_origin or (
-                capability.consumed_at is not None
-                and capability.consumed_at >= next_origin
+                capability.consumed_at is not None and capability.consumed_at >= next_origin
             ):
                 raise WorkflowAtomicityError(
                     "Case mutation must strictly follow every current-version "
@@ -9503,9 +11814,10 @@ class SqliteCaseRepository:
             record.currency is not None and record.currency != "USD"
         ):
             raise PersistedDataIntegrityError("Persisted provider cost metadata is invalid")
-        if record.pricing_snapshot_id is not None and _IDENTIFIER.fullmatch(
-            record.pricing_snapshot_id
-        ) is None:
+        if (
+            record.pricing_snapshot_id is not None
+            and _IDENTIFIER.fullmatch(record.pricing_snapshot_id) is None
+        ):
             raise PersistedDataIntegrityError("Persisted provider pricing snapshot is invalid")
 
         if record.status == "succeeded":
@@ -9538,9 +11850,7 @@ class SqliteCaseRepository:
                     "Transcription usage requires the transcription model"
                 )
         elif record.model_id is not ProviderModelId.SOL:
-            raise PersistedDataIntegrityError(
-                "Live non-transcription usage requires gpt-5.6-sol"
-            )
+            raise PersistedDataIntegrityError("Live non-transcription usage requires gpt-5.6-sol")
         return record
 
     @staticmethod
@@ -9583,9 +11893,7 @@ class SqliteCaseRepository:
         created_at = _parse_datetime(_require_string(row["created_at"], "created_at"))
         updated_at = _parse_datetime(_require_string(row["updated_at"], "updated_at"))
         if created_at > updated_at:
-            raise PersistedDataIntegrityError(
-                "Persisted case created_at cannot follow updated_at"
-            )
+            raise PersistedDataIntegrityError("Persisted case created_at cannot follow updated_at")
         return CaseRecord(
             case_id=case_id,
             version=_require_integer(row["version"], "version"),

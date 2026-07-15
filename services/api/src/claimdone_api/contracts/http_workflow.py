@@ -26,6 +26,7 @@ from .base import (
 from .enums import (
     CaseState,
     ClarificationStatus,
+    GateId,
     PortalState,
     RequiredClaimField,
     VerificationState,
@@ -483,11 +484,59 @@ class WorkflowSnapshot(ContractModel):
                     "Final verification portalVersion must match portal session version"
                 )
             if (
-                final_attempt.report.actual_attachment_ids
+                state is not CaseState.BLOCKED
+                and final_attempt.report.actual_attachment_ids
                 != self.portal_session.fields.attachments
             ):
                 raise ValueError(
                     "Final verification actualAttachmentIds must match rendered portal attachments"
+                )
+
+        if state is CaseState.BLOCKED and self.verification_attempts is not None:
+            if self.claim_packet is None or self.portal_session is None:
+                raise ValueError(
+                    "blocked G8 requires a packet and raw portal review checkpoint"
+                )
+            gate_history = self.claim_packet.gate_decisions
+            expected_gate_ids = tuple(GateId(f"G{index}") for index in range(9))
+            if (
+                tuple(decision.gate_id for decision in gate_history) != expected_gate_ids
+                or any(
+                    not decision.deterministic_passed
+                    or decision.model_blocked
+                    or not decision.passed
+                    or decision.reason_codes
+                    for decision in gate_history[:-1]
+                )
+            ):
+                raise ValueError("blocked G8 requires an exact passed G0-G7 gate prefix")
+            final_attempt = self.verification_attempts.attempts[-1]
+            final_gate = final_attempt.gate_decision
+            packet_g8 = gate_history[-1]
+            canonical_claim_fields = self.claim_packet.claim.model_dump(
+                mode="json",
+                by_alias=False,
+                include=set(_PORTAL_CLAIM_FIELD_NAMES),
+            )
+            raw_portal_fields = self.portal_session.fields.model_dump(
+                mode="json",
+                by_alias=False,
+            )
+            if (
+                self.claim_packet.portal_state is not PortalState.REVIEW
+                or self.portal_session.state is not PortalState.REVIEW
+                or raw_portal_fields != canonical_claim_fields
+                or not final_attempt.final
+                or final_attempt.report.review_allowed
+                or final_gate is None
+                or final_gate.gate_id is not GateId.G8_VERIFICATION
+                or final_gate.passed
+                or final_attempt.report != self.claim_packet.verification
+                or final_gate != packet_g8
+            ):
+                raise ValueError(
+                    "blocked G8 requires canonical raw portal values and exact final "
+                    "failed G8 authority"
                 )
 
         if state is CaseState.REVIEW:

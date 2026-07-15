@@ -15,10 +15,12 @@ class IssuedCapability:
     """A plaintext capability returned exactly once to its trusted caller."""
 
     token: str = field(repr=False)
+    digest: bytes = field(repr=False)
     case_id: str
     bound_case_version: int
     role: AuthorityRole
     purpose: AuthorityPurpose
+    issued_at: datetime
     expires_at: datetime
 
 

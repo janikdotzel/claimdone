@@ -192,6 +192,37 @@ def failed_verification_series_data() -> dict[str, Any]:
     return series
 
 
+def blocked_attachment_snapshot_data() -> dict[str, Any]:
+    data = snapshot_data("blocked")
+    packet = happy_packet_data()
+    packet["state"] = "blocked"
+    packet["portalState"] = "review"
+    report = deepcopy(packet["verification"])
+    report["status"] = "mismatch"
+    report["deterministicMatch"] = False
+    report["actualAttachmentIds"] = [
+        "alternate-ref-1",
+        "alternate-ref-2",
+        "alternate-ref-3",
+    ]
+    report["actualAttachmentCount"] = 3
+    report["reviewAllowed"] = False
+    gate = make_gate_decision(
+        GateId.G8_VERIFICATION,
+        deterministic_reasons=(GateReasonCode.G8_ATTACHMENT_MISMATCH,),
+        decided_at=datetime(2026, 7, 14, 12, 0, 8, tzinfo=UTC),
+    ).model_dump(mode="json", by_alias=True)
+    packet["verification"] = deepcopy(report)
+    packet["gateDecisions"][-1] = deepcopy(gate)
+    series = verification_series_data()
+    series["attempts"][0]["report"] = deepcopy(report)
+    series["attempts"][0]["gateDecision"] = deepcopy(gate)
+    data["claimPacket"] = packet
+    data["portalSession"] = portal_data()
+    data["verificationAttempts"] = series
+    return data
+
+
 def review_snapshot_data() -> dict[str, Any]:
     data = snapshot_data("review")
     data["claimPacket"] = happy_packet_data()
@@ -415,6 +446,65 @@ def test_verification_attempt_attachment_ids_bind_to_packet_and_rendered_portal(
 
     with pytest.raises(ValidationError, match="actualAttachmentIds must match"):
         WorkflowSnapshot.model_validate(wrong_actual)
+
+
+def test_blocked_g8_allows_reported_rendered_attachment_divergence_only() -> None:
+    valid = WorkflowSnapshot.model_validate(blocked_attachment_snapshot_data())
+    assert valid.case.state == "blocked"
+    assert valid.portal_session is not None
+    assert valid.verification_attempts is not None
+    final = valid.verification_attempts.attempts[-1]
+    assert final.report.actual_attachment_ids != valid.portal_session.fields.attachments
+    assert final.gate_decision is not None
+    assert final.gate_decision.reason_codes == (
+        GateReasonCode.G8_ATTACHMENT_MISMATCH,
+    )
+
+    noncanonical_raw_portal = blocked_attachment_snapshot_data()
+    noncanonical_raw_portal["portalSession"]["fields"]["location"] = "Forged raw portal"
+    with pytest.raises(ValidationError, match="canonical raw portal values"):
+        WorkflowSnapshot.model_validate(noncanonical_raw_portal)
+
+    detached_attempt = blocked_attachment_snapshot_data()
+    detached_attempt["claimPacket"]["verification"]["actualAttachmentIds"] = [
+        "packet-only-ref-1",
+        "packet-only-ref-2",
+        "packet-only-ref-3",
+    ]
+    with pytest.raises(ValidationError, match="exact final failed G8 authority"):
+        WorkflowSnapshot.model_validate(detached_attempt)
+
+    wrong_reason = blocked_attachment_snapshot_data()
+    inconsistent_gate = make_gate_decision(
+        GateId.G8_VERIFICATION,
+        deterministic_reasons=(GateReasonCode.G8_FIELD_MISMATCH,),
+        decided_at=datetime(2026, 7, 14, 12, 0, 8, tzinfo=UTC),
+    ).model_dump(mode="json", by_alias=True)
+    wrong_reason["claimPacket"]["gateDecisions"][-1] = deepcopy(inconsistent_gate)
+    wrong_reason["verificationAttempts"]["attempts"][-1]["gateDecision"] = deepcopy(
+        inconsistent_gate
+    )
+    with pytest.raises(ValidationError, match="reasons must be derived"):
+        WorkflowSnapshot.model_validate(wrong_reason)
+
+
+def test_blocked_g8_requires_complete_clean_passed_gate_prefix() -> None:
+    only_g8 = blocked_attachment_snapshot_data()
+    only_g8["claimPacket"]["gateDecisions"] = [
+        deepcopy(only_g8["claimPacket"]["gateDecisions"][-1])
+    ]
+    with pytest.raises(ValidationError, match="exact passed G0-G7 gate prefix"):
+        WorkflowSnapshot.model_validate(only_g8)
+
+    defective_prefix = blocked_attachment_snapshot_data()
+    defective_prefix["claimPacket"]["gateDecisions"][3] = make_gate_decision(
+        GateId.G3_SAFETY_SCOPE,
+        deterministic_reasons=(GateReasonCode.G3_REAL_PORTAL,),
+        model_blocked=True,
+        decided_at=datetime(2026, 7, 14, 12, 0, 3, tzinfo=UTC),
+    ).model_dump(mode="json", by_alias=True)
+    with pytest.raises(ValidationError, match="exact passed G0-G7 gate prefix"):
+        WorkflowSnapshot.model_validate(defective_prefix)
 
 
 def test_review_requires_bound_packet_portal_and_final_successful_g8() -> None:

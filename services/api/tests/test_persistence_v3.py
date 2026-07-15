@@ -429,9 +429,9 @@ def test_persisted_v2_contract_root_is_rejected_unchanged_with_reset_guidance(
     _create_literal_v2_database(database_path, audit_contract_version="2.0.0")
     with sqlite3.connect(database_path) as connection:
         root_before = str(
-            connection.execute(
-                "SELECT event_json FROM audit_events WHERE sequence = 7"
-            ).fetchone()[0]
+            connection.execute("SELECT event_json FROM audit_events WHERE sequence = 7").fetchone()[
+                0
+            ]
         )
         schema_before = connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
@@ -452,10 +452,13 @@ def test_persisted_v2_contract_root_is_rejected_unchanged_with_reset_guidance(
             )
             == root_before
         )
-        assert connection.execute(
-            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
-            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
-        ).fetchall() == schema_before
+        assert (
+            connection.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+            == schema_before
+        )
 
 
 def test_current_schema_rejects_v3_claim_packet_without_relabel_or_mutation(
@@ -502,7 +505,7 @@ def test_current_schema_rejects_v3_claim_packet_without_relabel_or_mutation(
         )
         version_before = connection.execute("PRAGMA user_version").fetchone()
         dump_before = tuple(connection.iterdump())
-    assert version_before == (6,)
+    assert version_before == (7,)
 
     with pytest.raises(
         PersistedDataIntegrityError,
@@ -563,8 +566,7 @@ def test_migration_late_ddl_fault_rolls_back_parent_rebuild_and_index(
         # This collides only after cases has been copied, dropped, and renamed,
         # and after the new audit source index has been attempted.
         connection.execute(
-            "CREATE TABLE case_transcripts ("
-            "case_id TEXT PRIMARY KEY, transcript_id TEXT NOT NULL)"
+            "CREATE TABLE case_transcripts (case_id TEXT PRIMARY KEY, transcript_id TEXT NOT NULL)"
         )
         schema_before = connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
@@ -664,8 +666,7 @@ def test_closed_generic_events_and_provider_projection_are_atomic_and_redacted(
     )
     assert tuple(item.call_sequence for item in usage) == (1, 2)
     assert tuple(
-        None if item.failure_category is None else item.failure_category.value
-        for item in usage
+        None if item.failure_category is None else item.failure_category.value for item in usage
     ) == (None, "timeout")
     assert usage[0].total_tokens == 15
     assert usage[0].estimated_cost_micros == 42
@@ -835,8 +836,7 @@ def test_reopen_rejects_provider_ledger_source_mismatches(
             )
         else:
             state_row = connection.execute(
-                "SELECT source_audit_sequence FROM workflow_events "
-                "WHERE event_kind = 'state'"
+                "SELECT source_audit_sequence FROM workflow_events WHERE event_kind = 'state'"
             ).fetchone()
             assert state_row is not None
             state_sequence = int(state_row[0])
@@ -1374,8 +1374,7 @@ def test_capability_consumption_after_expiry_is_rejected_but_late_revocation_is_
     )
     with sqlite3.connect(database_path) as connection:
         connection.execute(
-            "UPDATE authority_capabilities SET consumed_at = ? "
-            "WHERE capability_digest = ?",
+            "UPDATE authority_capabilities SET consumed_at = ? WHERE capability_digest = ?",
             ((NOW + timedelta(seconds=31)).isoformat(), consumption_digest),
         )
 
@@ -1412,8 +1411,7 @@ def test_capability_authority_cannot_escape_case_version_or_lifetime(
             )
         else:
             connection.execute(
-                "UPDATE authority_capabilities SET issued_at = ? "
-                "WHERE capability_digest = ?",
+                "UPDATE authority_capabilities SET issued_at = ? WHERE capability_digest = ?",
                 ((NOW - timedelta(seconds=1)).isoformat(), digest),
             )
 
@@ -1486,8 +1484,7 @@ def test_canonical_receipt_must_bind_to_current_receipt_case_version(
     receipt = _receipt(case.case_id)
     with sqlite3.connect(database_path) as connection:
         connection.execute(
-            "INSERT INTO sandbox_receipts (case_id, receipt_json, created_at) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO sandbox_receipts (case_id, receipt_json, created_at) VALUES (?, ?, ?)",
             (
                 case.case_id,
                 receipt.model_dump_json(by_alias=True),
@@ -1538,8 +1535,7 @@ def test_case_delete_cascades_every_v3_child_projection(tmp_path: Path) -> None:
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
-            "INSERT INTO sandbox_receipts (case_id, receipt_json, created_at) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO sandbox_receipts (case_id, receipt_json, created_at) VALUES (?, ?, ?)",
             (case.case_id, receipt.model_dump_json(by_alias=True), NOW.isoformat()),
         )
 

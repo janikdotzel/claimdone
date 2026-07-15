@@ -26,7 +26,6 @@ from claimdone_api.contracts import (
     CaseState,
     GateDecision,
     GateId,
-    PortalVariant,
 )
 from claimdone_api.media import PersistentCaseMediaCleaner
 from claimdone_api.persistence import (
@@ -215,6 +214,12 @@ def _database_identity_and_dump(
     return int(application_id[0]), int(user_version[0]), dump
 
 
+def _drop_v7_authority(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP TABLE verification_attempt_authority")
+    connection.execute("DROP TABLE portal_session_authority")
+    connection.execute("DROP TABLE portal_run_authority")
+
+
 def test_schema_migration_enables_wal_and_is_repeatable(tmp_path: Path) -> None:
     database_path = tmp_path / "cases.db"
 
@@ -229,7 +234,7 @@ def test_schema_migration_enables_wal_and_is_repeatable(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_schema WHERE type = 'table'"
         ).fetchall()
     assert journal_mode == ("wal",)
-    assert schema_version == (6,)
+    assert schema_version == (7,)
     assert {str(row[0]) for row in table_rows} >= {
         "cases",
         "audit_events",
@@ -244,6 +249,9 @@ def test_schema_migration_enables_wal_and_is_repeatable(tmp_path: Path) -> None:
         "case_intake_authority",
         "case_transcript_authority",
         "case_packet_authority",
+        "portal_run_authority",
+        "portal_session_authority",
+        "verification_attempt_authority",
     }
 
 
@@ -256,6 +264,7 @@ def test_schema_version_one_upgrades_without_losing_cases(tmp_path: Path) -> Non
         created_at=NOW,
     )
     with sqlite3.connect(database_path) as connection:
+        _drop_v7_authority(connection)
         connection.execute("DROP TABLE sandbox_receipt_authority")
         connection.execute("DROP TABLE case_packet_authority")
         connection.execute("DROP TABLE case_transcript_authority")
@@ -273,7 +282,7 @@ def test_schema_version_one_upgrades_without_losing_cases(tmp_path: Path) -> Non
 
     assert upgraded.get_case("case-before-media-mapping") is not None
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE name = 'case_media_handles'"
         ).fetchone() == ("case_media_handles",)
@@ -283,7 +292,7 @@ def test_newer_schema_version_is_never_downgraded(tmp_path: Path) -> None:
     database_path = tmp_path / "future.db"
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA application_id = 1128549937")
-        connection.execute("PRAGMA user_version = 7")
+        connection.execute("PRAGMA user_version = 8")
 
     with pytest.raises(UnsupportedSchemaVersionError, match="newer than supported"):
         SqliteCaseRepository(database_path)
@@ -293,7 +302,7 @@ def test_newer_schema_version_is_never_downgraded(tmp_path: Path) -> None:
         case_table = connection.execute(
             "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'cases'"
         ).fetchone()
-    assert schema_version == (7,)
+    assert schema_version == (8,)
     assert case_table is None
 
 
@@ -314,7 +323,7 @@ def test_unmarked_current_databases_are_never_adopted_by_either_authority(
         SqliteCaseRepository(canonical_path)
     with sqlite3.connect(canonical_path) as connection:
         assert connection.execute("PRAGMA application_id").fetchone() == (0,)
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
 
     legacy_path = tmp_path / "legacy.db"
     legacy = LegacyWalkingRepository(legacy_path)
@@ -330,7 +339,7 @@ def test_unmarked_current_databases_are_never_adopted_by_either_authority(
         LegacyWalkingRepository(legacy_path)
     with sqlite3.connect(legacy_path) as connection:
         assert connection.execute("PRAGMA application_id").fetchone() == (0,)
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
 
 
 def test_fresh_identity_requires_an_empty_user_schema_and_claims_no_media_root(
@@ -400,24 +409,20 @@ def test_canonical_and_legacy_initializers_cannot_race_to_claim_one_database(
             return error
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(
-            executor.map(construct, ("canonical", "legacy"))
-        )
+        results = tuple(executor.map(construct, ("canonical", "legacy")))
 
     winners = tuple(
         result
         for result in results
         if isinstance(result, SqliteCaseRepository | LegacyWalkingRepository)
     )
-    losers = tuple(
-        result for result in results if isinstance(result, AuthorityModeMismatchError)
-    )
+    losers = tuple(result for result in results if isinstance(result, AuthorityModeMismatchError))
     assert len(winners) == 1
     assert len(losers) == 1
     with sqlite3.connect(database_path) as connection:
         application_id = connection.execute("PRAGMA application_id").fetchone()
         assert application_id in {(1128549937,), (1128549425,)}
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
 
 
 @pytest.mark.parametrize("mode", ("canonical", "legacy"))
@@ -452,7 +457,7 @@ def test_opposite_modes_remain_exclusive_across_processes(tmp_path: Path) -> Non
     with sqlite3.connect(database_path) as connection:
         application_id = connection.execute("PRAGMA application_id").fetchone()
         assert application_id in {(1128549937,), (1128549425,)}
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
 
 
 def test_rejected_v4_to_v5_migration_rolls_back_schema_and_content(
@@ -466,10 +471,9 @@ def test_rejected_v4_to_v5_migration_rolls_back_schema_and_content(
         created_at=NOW,
     )
     with sqlite3.connect(database_path) as connection:
+        _drop_v7_authority(connection)
         connection.execute("DROP TABLE sandbox_receipt_authority")
-        connection.execute(
-            "ALTER TABLE authority_capabilities DROP COLUMN portal_variant"
-        )
+        connection.execute("ALTER TABLE authority_capabilities DROP COLUMN portal_variant")
         connection.execute("DROP TABLE case_packet_authority")
         connection.execute("PRAGMA user_version = 4")
         connection.execute(
@@ -498,20 +502,24 @@ def test_v5_human_authority_reaches_explicit_v6_rejection_and_rolls_back_atomica
         redacted_metadata={},
         created_at=NOW,
     )
-    repository.issue_authority_capability(
-        case_id=created.case_id,
-        expected_case_version=created.version,
-        digest=b"h" * 32,
-        role="human",
-        purpose="human_approve",
-        portal_variant=PortalVariant.A,
-        issued_at=NOW,
-        expires_at=NOW + timedelta(seconds=30),
-    )
     with sqlite3.connect(database_path) as connection:
+        _drop_v7_authority(connection)
         connection.execute("DROP TABLE sandbox_receipt_authority")
+        connection.execute("ALTER TABLE authority_capabilities DROP COLUMN portal_variant")
         connection.execute(
-            "ALTER TABLE authority_capabilities DROP COLUMN portal_variant"
+            """
+            INSERT INTO authority_capabilities (
+                capability_digest, case_id, role, purpose, bound_case_version,
+                issued_at, expires_at, consumed_at, revoked_at
+            ) VALUES (?, ?, 'human', 'human_approve', ?, ?, ?, NULL, NULL)
+            """,
+            (
+                b"h" * 32,
+                created.case_id,
+                created.version,
+                NOW.isoformat(),
+                (NOW + timedelta(seconds=30)).isoformat(),
+            ),
         )
         connection.execute("PRAGMA user_version = 5")
     before = _database_identity_and_dump(database_path)
@@ -549,13 +557,10 @@ def test_v5_to_v6_ddl_collision_rolls_back_added_variant_and_schema_version(
         created_at=NOW,
     )
     with sqlite3.connect(database_path) as connection:
+        _drop_v7_authority(connection)
         connection.execute("DROP TABLE sandbox_receipt_authority")
-        connection.execute(
-            "ALTER TABLE authority_capabilities DROP COLUMN portal_variant"
-        )
-        connection.execute(
-            "CREATE TABLE sandbox_receipt_authority (case_id TEXT PRIMARY KEY)"
-        )
+        connection.execute("ALTER TABLE authority_capabilities DROP COLUMN portal_variant")
+        connection.execute("CREATE TABLE sandbox_receipt_authority (case_id TEXT PRIMARY KEY)")
         connection.execute("PRAGMA user_version = 5")
     before = _database_identity_and_dump(database_path)
 
@@ -589,10 +594,9 @@ def test_v5_agent_only_authority_migrates_with_null_portal_variant(
         expires_at=NOW + timedelta(seconds=30),
     )
     with sqlite3.connect(database_path) as connection:
+        _drop_v7_authority(connection)
         connection.execute("DROP TABLE sandbox_receipt_authority")
-        connection.execute(
-            "ALTER TABLE authority_capabilities DROP COLUMN portal_variant"
-        )
+        connection.execute("ALTER TABLE authority_capabilities DROP COLUMN portal_variant")
         connection.execute("PRAGMA user_version = 5")
 
     migrated = SqliteCaseRepository(database_path)
@@ -600,7 +604,7 @@ def test_v5_agent_only_authority_migrates_with_null_portal_variant(
     assert capability is not None
     assert capability.portal_variant is None
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
 
 
 def test_v3_canonical_migration_rejects_every_populated_authority_child(
@@ -614,16 +618,14 @@ def test_v3_canonical_migration_rejects_every_populated_authority_child(
         created_at=NOW,
     )
     with sqlite3.connect(database_path) as connection:
+        _drop_v7_authority(connection)
         connection.execute("DROP TABLE sandbox_receipt_authority")
-        connection.execute(
-            "ALTER TABLE authority_capabilities DROP COLUMN portal_variant"
-        )
+        connection.execute("ALTER TABLE authority_capabilities DROP COLUMN portal_variant")
         connection.execute("DROP TABLE case_packet_authority")
         connection.execute("DROP TABLE case_transcript_authority")
         connection.execute("DROP TABLE case_intake_authority")
         connection.execute(
-            "INSERT INTO case_media_handles (case_id, storage_name, created_at) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO case_media_handles (case_id, storage_name, created_at) VALUES (?, ?, ?)",
             (created.case_id, f"case-{'d' * 32}", NOW.isoformat()),
         )
         connection.execute("PRAGMA user_version = 3")
@@ -637,9 +639,12 @@ def test_v3_canonical_migration_rejects_every_populated_authority_child(
             "SELECT storage_name FROM case_media_handles WHERE case_id = ?",
             (created.case_id,),
         ).fetchone() == (f"case-{'d' * 32}",)
-        assert connection.execute(
-            "SELECT name FROM sqlite_schema WHERE name = 'case_intake_authority'"
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_schema WHERE name = 'case_intake_authority'"
+            ).fetchone()
+            is None
+        )
 
 
 def test_media_cleaner_and_case_service_require_one_repository_owned_store(
@@ -945,14 +950,20 @@ def test_audit_and_gate_cursors_are_monotone_and_cascade_on_delete(tmp_path: Pat
     assert len(set(audit_sequences)) == len(audit_sequences) == 4
     assert gate_sequences == tuple(sorted(gate_sequences))
     assert len(set(gate_sequences)) == len(gate_sequences) == 2
-    assert repository.list_audit_events(
-        record.case_id,
-        after=audit_sequences[1],
-    ) == audit_events[2:]
-    assert repository.list_gate_decisions(
-        record.case_id,
-        after=gate_sequences[0],
-    ) == gate_decisions[1:]
+    assert (
+        repository.list_audit_events(
+            record.case_id,
+            after=audit_sequences[1],
+        )
+        == audit_events[2:]
+    )
+    assert (
+        repository.list_gate_decisions(
+            record.case_id,
+            after=gate_sequences[0],
+        )
+        == gate_decisions[1:]
+    )
 
     service.delete_case(record.case_id)
 

@@ -20,13 +20,17 @@ from claimdone_api.contracts import (
     GateDecision,
     OperationalFailureWorkflowEvent,
     PlanStepWorkflowEvent,
+    PortalSessionView,
     PortalState,
     PortalVariant,
     ProviderCallWorkflowEvent,
     ProviderFailureCategory,
     ProviderModelId,
+    RenderedPortalSnapshot,
     RetryWorkflowEvent,
     SandboxReceipt,
+    ToolInvocation,
+    VerificationAttempt,
     WorkflowEventEnvelope,
     WorkflowOperation,
 )
@@ -37,9 +41,7 @@ if TYPE_CHECKING:
     from claimdone_api.media.types import IntakeRequest, PrivacyReview
 
 type JsonObject = dict[str, JsonValue]
-type AnalysisProviderWorkflowEvent = (
-    ProviderCallWorkflowEvent | RetryWorkflowEvent
-)
+type AnalysisProviderWorkflowEvent = ProviderCallWorkflowEvent | RetryWorkflowEvent
 
 _PORTAL_STATES_BY_CASE_STATE = MappingProxyType(
     {
@@ -68,9 +70,7 @@ def validate_portal_state(case_state: CaseState, portal_state: PortalState) -> N
     allowed = _PORTAL_STATES_BY_CASE_STATE[case_state]
     if portal_state not in allowed:
         values = ", ".join(sorted(value.value for value in allowed))
-        raise ValueError(
-            f"Case state {case_state.value} requires portal state in: {values}"
-        )
+        raise ValueError(f"Case state {case_state.value} requires portal state in: {values}")
 
 
 def portal_state_after_transition(
@@ -285,6 +285,114 @@ class HumanApprovalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PortalRunStartCommand:
+    """Secret-free request to consume one agent capability and open G6.
+
+    ``control_digest`` is a globally unique recovery identifier derived for
+    exactly this run by the trusted caller.  It is neither a root secret nor a
+    reusable signing/HMAC key, and every later command must echo it exactly.
+    """
+
+    case_id: str
+    expected_case_version: int
+    run_id: str
+    capability_digest: bytes = field(repr=False)
+    control_digest: bytes = field(repr=False)
+    portal_variant: PortalVariant
+    invocation_payload: object = field(repr=False)
+    current_url: str = field(repr=False)
+    action: str = field(repr=False)
+    proposed_action_number: int
+    elapsed_seconds: float
+    prestage_session: PortalSessionView = field(repr=False)
+    consumed_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PortalRunRecord:
+    """Read-only digest-bound status for uncertain-commit recovery."""
+
+    run_id: str
+    case_id: str
+    portal_variant: PortalVariant
+    ready_case_version: int
+    g6_case_version: int
+    terminal_case_version: int | None
+    status: str
+    invocation: ToolInvocation
+    g6_decision: GateDecision
+    prestage_session: PortalSessionView
+    created_at: datetime
+    terminal_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class PortalRunStartResult:
+    """Case and immutable run authority committed by the G6 transaction."""
+
+    case: CaseRecord
+    run: PortalRunRecord
+
+
+@dataclass(frozen=True, slots=True)
+class PortalWriteFinalizeCommand:
+    """One full candidate write closed by deterministic G7 authority.
+
+    ``control_digest`` must be the persisted per-run recovery digest from G6.
+    """
+
+    case_id: str
+    expected_case_version: int
+    run_id: str
+    control_digest: bytes = field(repr=False)
+    fields_payload: object = field(repr=False)
+    duration_ms: int
+    completed_at: datetime
+    portal_session: PortalSessionView | None = field(default=None, repr=False)
+    rendered_snapshot: RenderedPortalSnapshot | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PortalWriteFinalizeResult:
+    """Case and terminal run status produced by one G7 transaction."""
+
+    case: CaseRecord
+    run: PortalRunRecord
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationAttemptCommand:
+    """Trusted freshness inputs for one independently recomputed attempt.
+
+    ``control_digest`` must be the persisted per-run recovery digest from G6.
+    """
+
+    case_id: str
+    expected_case_version: int
+    run_id: str
+    control_digest: bytes = field(repr=False)
+    attempt_id: str
+    rendered_snapshot: RenderedPortalSnapshot = field(repr=False)
+    screenshot_sha256: str
+    snapshot_requested_at: datetime
+    snapshot_received_at: datetime
+    model_reported_mismatch: bool
+    verified_at: datetime
+    decided_at: datetime
+    final: bool
+    repaired_session: PortalSessionView | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationAttemptResult:
+    """Case and canonical attempt created by one G8/repair transaction."""
+
+    case: CaseRecord
+    attempt: VerificationAttempt
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderUsageLedgerRecord:
     """Queryable, content-free provider telemetry bound to one workflow cursor."""
 
@@ -354,12 +462,8 @@ class ObservabilityMetricsSnapshot:
             raise ValueError("Retry count cannot exceed provider request count")
         if bool(self.model_ids) is not (self.provider_request_count > 0):
             raise ValueError("Model IDs must be present exactly when requests exist")
-        if (
-            self.estimated_cost_micros is None
-            and self.costed_request_count > 0
-        ) or (
-            self.estimated_cost_micros is not None
-            and self.costed_request_count == 0
+        if (self.estimated_cost_micros is None and self.costed_request_count > 0) or (
+            self.estimated_cost_micros is not None and self.costed_request_count == 0
         ):
             raise ValueError("Estimated cost presence must match costed request count")
         if self.costed_request_count == 0:
@@ -372,12 +476,8 @@ class ObservabilityMetricsSnapshot:
             for snapshot_id in self.pricing_snapshot_ids
         ):
             raise ValueError("Pricing snapshot IDs must be unique non-empty strings")
-        if (
-            self.estimated_cost_micros is not None
-            and (
-                type(self.estimated_cost_micros) is not int
-                or self.estimated_cost_micros < 0
-            )
+        if self.estimated_cost_micros is not None and (
+            type(self.estimated_cost_micros) is not int or self.estimated_cost_micros < 0
         ):
             raise ValueError("Estimated cost must be a non-negative integer")
         if len(set(self.model_ids)) != len(self.model_ids) or any(

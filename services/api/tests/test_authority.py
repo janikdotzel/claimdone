@@ -22,26 +22,26 @@ from test_workflow_atomic import (
     _initial_command,
 )
 
-from claimdone_api.audit import build_state_change_event
 from claimdone_api.authority import AuthorityError, AuthorityService, create_authority_router
 from claimdone_api.cases import CaseService, create_workflow_router
 from claimdone_api.cases.workflow_events import EventStreamConfig
 from claimdone_api.contracts import (
+    CONTRACT_VERSION,
     ActorType,
     AuditEventType,
     CaseState,
     ClaimPacket,
-    GateDecision,
     GateId,
     GateWorkflowEvent,
+    PortalSessionView,
     PortalState,
     PortalVariant,
-    RequiredClaimField,
+    RenderedPortalSnapshot,
     SandboxReceipt,
     StateWorkflowEvent,
     WorkflowEventKind,
 )
-from claimdone_api.gates import make_gate_decision
+from claimdone_api.gates import canonical_portal_case_url
 from claimdone_api.main import ApiSettings, create_app
 from claimdone_api.media import (
     ExifChoice,
@@ -53,11 +53,13 @@ from claimdone_api.media import (
 )
 from claimdone_api.persistence import (
     CaseRecord,
-    CaseSnapshot,
     IncompatiblePersistedContractError,
     IntakeDisclosureCommand,
     PersistedDataIntegrityError,
+    PortalRunStartCommand,
+    PortalWriteFinalizeCommand,
     SqliteCaseRepository,
+    VerificationAttemptCommand,
 )
 from claimdone_api.walking_skeleton.body_limit import RequestBodyLimitMiddleware
 
@@ -187,198 +189,159 @@ def _reopen_case(
 def _append_test_only_review_authority(
     repository: SqliteCaseRepository,
     ready: CaseRecord,
+    *,
+    variant: PortalVariant = PortalVariant.A,
 ) -> CaseRecord:
-    """Persist closed contract events only; never exposed as a product writer."""
+    """Use the production G6-G8 writers to create one review fixture."""
 
     ready_packet = ready.snapshot.claim_packet
     assert ready.state is CaseState.READY_TO_FILL and ready_packet is not None
-    filling_at = ready.updated_at + timedelta(seconds=1)
-    verifying_at = filling_at + timedelta(seconds=1)
-    review_at = verifying_at + timedelta(seconds=1)
-
-    filling_packet = _packet_for_state(
-        ready_packet,
-        state=CaseState.FILLING,
-        portal_state=PortalState.DRAFT,
-        gates=ready_packet.gate_decisions,
-        verification=ready_packet.verification.model_dump(mode="json", by_alias=True),
-    )
-    g6 = make_gate_decision(
-        GateId.G6_TOOL_AUTHORITY,
-        decided_at=filling_at + timedelta(microseconds=1),
-    )
-    g7 = make_gate_decision(
-        GateId.G7_PORTAL_WRITE,
-        decided_at=filling_at + timedelta(microseconds=2),
-    )
-    verifying_packet = _packet_for_state(
-        filling_packet,
-        state=CaseState.VERIFYING,
-        portal_state=PortalState.REVIEW,
-        gates=(*filling_packet.gate_decisions, g6, g7),
-        verification=filling_packet.verification.model_dump(mode="json", by_alias=True),
-    )
-    g8 = make_gate_decision(
-        GateId.G8_VERIFICATION,
-        decided_at=verifying_at + timedelta(microseconds=1),
-    )
-    review_packet = _packet_for_state(
-        verifying_packet,
-        state=CaseState.REVIEW,
-        portal_state=PortalState.REVIEW,
-        gates=(*verifying_packet.gate_decisions, g8),
-        verification=_verified_report(verifying_packet, verified_at=g8.decided_at),
-    )
-
-    with repository._write_connection() as connection:
-        filling = _persist_test_only_packet_transition(
-            repository,
-            connection,
-            current=ready,
-            target=CaseState.FILLING,
-            packet=filling_packet,
-            actor=ActorType.AGENT,
-            occurred_at=filling_at,
-        )
-        repository._insert_authority_gate(
-            connection,
+    with sqlite3.connect(repository.database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT capability_digest FROM authority_capabilities
+            WHERE case_id = ? AND role = 'agent' AND purpose = 'portal_run'
+              AND consumed_at IS NULL AND revoked_at IS NULL
+            """,
+            (ready.case_id,),
+        ).fetchone()
+    issued_at = ready.updated_at + timedelta(microseconds=1)
+    if row is None:
+        capability_digest = hashlib.sha256(f"test-agent:{ready.case_id}".encode()).digest()
+        repository.issue_authority_capability(
             case_id=ready.case_id,
-            decision=g6,
+            expected_case_version=ready.version,
+            digest=capability_digest,
+            role="agent",
+            purpose="portal_run",
+            issued_at=issued_at,
+            expires_at=issued_at + timedelta(seconds=30),
         )
-        repository._insert_authority_gate(
-            connection,
-            case_id=ready.case_id,
-            decision=g7,
-        )
-        verifying = _persist_test_only_packet_transition(
-            repository,
-            connection,
-            current=filling,
-            target=CaseState.VERIFYING,
-            packet=verifying_packet,
-            actor=ActorType.AGENT,
-            occurred_at=verifying_at,
-        )
-        repository._insert_authority_gate(
-            connection,
-            case_id=ready.case_id,
-            decision=g8,
-        )
-        review = _persist_test_only_packet_transition(
-            repository,
-            connection,
-            current=verifying,
-            target=CaseState.REVIEW,
-            packet=review_packet,
-            actor=ActorType.SYSTEM,
-            occurred_at=review_at,
-        )
-    return review
+    else:
+        capability_digest = bytes(row[0])
+        capability = repository.get_authority_capability(capability_digest)
+        assert capability is not None
+        issued_at = max(issued_at, capability.issued_at + timedelta(microseconds=1))
 
-
-def _packet_for_state(
-    packet: ClaimPacket,
-    *,
-    state: CaseState,
-    portal_state: PortalState,
-    gates: tuple[GateDecision, ...],
-    verification: dict[str, Any],
-) -> ClaimPacket:
-    data = packet.model_dump(mode="json", by_alias=True)
-    data.update(
+    claim = ready_packet.claim.model_dump(mode="json", by_alias=True)
+    fields = {
+        "incidentDate": claim["incidentDate"],
+        "incidentTime": claim["incidentTime"],
+        "location": claim["location"],
+        "claimantName": claim["claimantName"],
+        "policyReference": claim["policyReference"],
+        "vehicleRegistration": claim["vehicleRegistration"],
+        "counterpartyKnown": claim["counterpartyKnown"],
+        "narrative": claim["narrative"],
+        "attachments": claim["attachments"],
+    }
+    empty_fields = {
+        **{key: "" for key in fields if key != "attachments"},
+        "attachments": claim["attachments"],
+    }
+    run_id = f"run-auth-{ready.case_id}"
+    control_digest = hashlib.sha256(f"test-control:{ready.case_id}".encode()).digest()
+    prestage_at = issued_at + timedelta(microseconds=1)
+    prestage = PortalSessionView.model_validate(
         {
-            "state": state.value,
-            "portalState": portal_state.value,
-            "gateDecisions": gates,
-            "verification": verification,
+            "contractVersion": CONTRACT_VERSION,
+            "caseId": ready.case_id,
+            "variant": variant,
+            "state": "draft",
+            "version": 1,
+            "fields": empty_fields,
+            "updatedAt": prestage_at,
+            "auditCount": 0,
         }
     )
-    return ClaimPacket.model_validate(data)
-
-
-def _verified_report(packet: ClaimPacket, *, verified_at: datetime) -> dict[str, Any]:
-    claim = packet.claim.model_dump(mode="json", by_alias=False)
-    source_by_field = {
-        item.field: item.source_refs for item in packet.claim.field_provenance
-    }
-    fields = tuple(
+    fill_step = next(
+        step for step in ready_packet.plan.steps if step.tool.value == "fill_until_review"
+    )
+    consumed_at = prestage_at + timedelta(microseconds=1)
+    filling = repository.start_portal_run(
+        PortalRunStartCommand(
+            case_id=ready.case_id,
+            expected_case_version=ready.version,
+            run_id=run_id,
+            capability_digest=capability_digest,
+            control_digest=control_digest,
+            portal_variant=variant,
+            invocation_payload={
+                "contractVersion": CONTRACT_VERSION,
+                "invocationId": run_id,
+                "sequence": fill_step.sequence,
+                "tool": "fill_until_review",
+                "arguments": {},
+            },
+            current_url=canonical_portal_case_url(ready.case_id, variant),
+            action="click",
+            proposed_action_number=1,
+            elapsed_seconds=0.1,
+            prestage_session=prestage,
+            consumed_at=consumed_at,
+            updated_at=consumed_at + timedelta(microseconds=1),
+        )
+    ).case
+    reviewed_at = filling.updated_at + timedelta(microseconds=1)
+    reviewed = PortalSessionView.model_validate(
         {
-            "field": field.value,
-            "expected": claim[field.value],
-            "actual": claim[field.value],
-            "status": "match",
-            "sourceRefs": source_by_field[field],
+            "contractVersion": CONTRACT_VERSION,
+            "caseId": ready.case_id,
+            "variant": variant,
+            "state": "review",
+            "version": 3,
+            "fields": fields,
+            "updatedAt": reviewed_at,
+            "auditCount": 1,
         }
-        for field in RequiredClaimField
-        if field is not RequiredClaimField.ATTACHMENTS
     )
-    return {
-        "status": "verified",
-        "deterministicMatch": True,
-        "modelReportedMismatch": False,
-        "fieldResults": fields,
-        "expectedAttachmentCount": 3,
-        "expectedAttachmentIds": packet.claim.attachments,
-        "actualAttachmentCount": 3,
-        "actualAttachmentIds": packet.claim.attachments,
-        "reviewAllowed": True,
-        "verifiedAt": verified_at,
-    }
-
-
-def _persist_test_only_packet_transition(
-    repository: SqliteCaseRepository,
-    connection: sqlite3.Connection,
-    *,
-    current: CaseRecord,
-    target: CaseState,
-    packet: ClaimPacket,
-    actor: ActorType,
-    occurred_at: datetime,
-) -> CaseRecord:
-    snapshot = CaseSnapshot(
-        portal_state=packet.portal_state,
-        redacted_metadata=current.snapshot.redacted_metadata,
-        claim_packet=packet,
-        intake_summary=current.snapshot.intake_summary,
-        active_clarification=None,
+    g7_rendered = RenderedPortalSnapshot.model_validate(
+        {
+            "contractVersion": CONTRACT_VERSION,
+            "caseId": ready.case_id,
+            "variant": variant,
+            "state": "review",
+            "version": 3,
+            "fields": fields,
+            "renderedAt": reviewed_at + timedelta(microseconds=1),
+        }
     )
-    repository._insert_packet_authority(
-        connection,
-        case_id=current.case_id,
-        bound_case_version=current.version + 1,
-        packet=packet,
-        created_at=occurred_at,
+    verifying = repository.finalize_portal_write(
+        PortalWriteFinalizeCommand(
+            case_id=ready.case_id,
+            expected_case_version=filling.version,
+            run_id=run_id,
+            control_digest=control_digest,
+            fields_payload=fields,
+            duration_ms=1,
+            completed_at=g7_rendered.rendered_at + timedelta(microseconds=1),
+            portal_session=reviewed,
+            rendered_snapshot=g7_rendered,
+        )
+    ).case
+    requested_at = verifying.updated_at + timedelta(microseconds=1)
+    rendered = g7_rendered.model_copy(
+        update={"rendered_at": requested_at + timedelta(microseconds=1)}
     )
-    repository._update_case_row(
-        connection,
-        current=current,
-        state=target,
-        snapshot=snapshot,
-        updated_at=occurred_at,
-    )
-    audit = build_state_change_event(
-        case_id=current.case_id,
-        current=current.state,
-        target=target,
-        actor=actor,
-        occurred_at=occurred_at,
-    )
-    audit_sequence = repository._insert_audit_event(connection, audit)
-    repository._insert_workflow_projection(
-        connection,
-        audit_sequence=audit_sequence,
-        audit=audit,
-        event=StateWorkflowEvent.model_validate(
-            {
-                "kind": WorkflowEventKind.STATE,
-                "actor": actor,
-                "fromState": current.state,
-                "toState": target,
-            }
-        ),
-    )
-    return repository._require_current(connection, current.case_id, current.version + 1)
+    received_at = rendered.rendered_at + timedelta(microseconds=1)
+    verified_at = received_at + timedelta(microseconds=1)
+    return repository.record_verification_attempt(
+        VerificationAttemptCommand(
+            case_id=ready.case_id,
+            expected_case_version=verifying.version,
+            run_id=run_id,
+            control_digest=control_digest,
+            attempt_id=f"attempt-auth-{ready.case_id}",
+            rendered_snapshot=rendered,
+            screenshot_sha256="f" * 64,
+            snapshot_requested_at=requested_at,
+            snapshot_received_at=received_at,
+            model_reported_mismatch=False,
+            verified_at=verified_at,
+            decided_at=verified_at + timedelta(microseconds=1),
+            final=True,
+        )
+    ).case
 
 
 def _service(
@@ -505,9 +468,9 @@ def _append_completed_receipt_case(
     )
     created = case_service.create_case()
     disclosed = case_service.commit_intake_disclosure(
-            IntakeDisclosureCommand(
-                case_id=created.case_id,
-                expected_version=created.version,
+        IntakeDisclosureCommand(
+            case_id=created.case_id,
+            expected_version=created.version,
             request=IntakeRequest(
                 images=tuple(
                     ImageUpload(
@@ -545,15 +508,17 @@ def _append_completed_receipt_case(
     ready = case_service.commit_analysis_workflow(
         _initial_command(analyzing, prefix, target=CaseState.READY_TO_FILL)
     ).case
-    review = _append_test_only_review_authority(repository, ready)
+    review = _append_test_only_review_authority(
+        repository,
+        ready,
+        variant=PortalVariant.B,
+    )
     clock = MutableClock(review.updated_at)
     authority_service = AuthorityService(
         repository,
         now=clock,
         secret_factory=lambda: SECOND_HUMAN_SECRET,
-        approval_id_factory=lambda variant: (
-            f"approval-{variant.value.lower()}-second"
-        ),
+        approval_id_factory=lambda variant: (f"approval-{variant.value.lower()}-second"),
         receipt_id_factory=lambda: "receipt-auth-second",
     )
     issued = authority_service.issue_human_approval_capability(
@@ -612,7 +577,11 @@ def test_server_only_issuance_is_state_and_version_bound_and_digest_only(
         expected_version=ready.version,
     )
     assert agent.role == "agent" and agent.purpose == "portal_run"
+    assert agent.digest == hashlib.sha256(agent.token.encode("ascii")).digest()
+    assert agent.issued_at == ready.updated_at
     assert agent.token not in repr(agent)
+    assert repr(agent.digest) not in repr(agent)
+    assert agent.digest.hex() not in repr(agent)
 
     review = _append_test_only_review_authority(repository, ready)
     repository, review = _reopen_case(repository, review)
@@ -631,17 +600,30 @@ def test_server_only_issuance_is_state_and_version_bound_and_digest_only(
         variant=PortalVariant.A,
     )
     assert human.role == "human" and human.purpose == "human_approve"
+    assert human.digest == hashlib.sha256(human.token.encode("ascii")).digest()
+    assert human.issued_at == review.updated_at
     assert human.token not in repr(human)
+    assert repr(human.digest) not in repr(human)
+    assert human.digest.hex() not in repr(human)
+
+    for issued in (agent, human):
+        persisted = repository.get_authority_capability(issued.digest)
+        assert persisted is not None
+        assert persisted.digest == issued.digest
+        assert persisted.case_id == issued.case_id
+        assert persisted.bound_case_version == issued.bound_case_version
+        assert persisted.issued_at == issued.issued_at
+        assert persisted.expires_at == issued.expires_at
 
     with sqlite3.connect(repository.database_path) as connection:
         rows = connection.execute(
-            "SELECT capability_digest, role, purpose FROM authority_capabilities "
-            "ORDER BY role"
+            "SELECT capability_digest, role, purpose FROM authority_capabilities ORDER BY role"
         ).fetchall()
     assert [(len(row[0]), row[1], row[2]) for row in rows] == [
         (32, "agent", "portal_run"),
         (32, "human", "human_approve"),
     ]
+    assert {bytes(row[0]) for row in rows} == {agent.digest, human.digest}
     persisted_bytes = _database_bytes(repository)
     assert agent.token.encode() not in persisted_bytes
     assert human.token.encode() not in persisted_bytes
@@ -686,9 +668,8 @@ def test_valid_agent_token_always_returns_the_same_403_before_body_and_case_orac
     digest = hashlib.sha256(agent.token.encode("ascii")).digest()
     with sqlite3.connect(repository.database_path) as connection:
         connection.execute(
-            "UPDATE authority_capabilities SET bound_case_version = 1, revoked_at = ? "
-            "WHERE capability_digest = ?",
-            ((ready.updated_at + timedelta(seconds=1)).isoformat(), digest),
+            "UPDATE authority_capabilities SET bound_case_version = 1 WHERE capability_digest = ?",
+            (digest,),
         )
     responses.append(
         client.post(
@@ -818,16 +799,14 @@ def test_human_approval_consumes_once_and_returns_only_a_redacted_receipt(
         AuditEventType.RECEIPT,
         AuditEventType.CASE_STATE_CHANGED,
     )
-    assert next(
-        item
-        for item in audits
-        if item.event.event_type is AuditEventType.HUMAN_APPROVAL
-    ).event.actor is ActorType.HUMAN
+    assert (
+        next(
+            item for item in audits if item.event.event_type is AuditEventType.HUMAN_APPROVAL
+        ).event.actor
+        is ActorType.HUMAN
+    )
     serialized_events = json.dumps(
-        [
-            item.envelope.model_dump(mode="json", by_alias=True)
-            for item in events
-        ]
+        [item.envelope.model_dump(mode="json", by_alias=True) for item in events]
     )
     serialized_audits = json.dumps(
         [item.event.model_dump(mode="json", by_alias=True) for item in audits]
@@ -958,10 +937,7 @@ def test_reconnect_rejects_coherent_audit_identity_tampering_before_cursor(
                 (earlier.sequence,),
             ).fetchone()
             assert row is not None
-            changed_at = _json_time(
-                datetime.fromisoformat(str(row[0]))
-                + timedelta(microseconds=1)
-            )
+            changed_at = _json_time(datetime.fromisoformat(str(row[0])) + timedelta(microseconds=1))
             connection.execute(
                 """
                 UPDATE audit_events
@@ -988,8 +964,7 @@ def test_reconnect_binds_gate_evidence_refs_to_full_history_before_cursor(
     earlier_gate = next(
         item
         for item in events
-        if item.sequence < g9_source
-        and isinstance(item.envelope.event, GateWorkflowEvent)
+        if item.sequence < g9_source and isinstance(item.envelope.event, GateWorkflowEvent)
     )
     assert isinstance(earlier_gate.envelope.event, GateWorkflowEvent)
 
@@ -1227,18 +1202,15 @@ def test_receipt_authority_rejects_deleted_added_swapped_and_mutated_rows_on_rea
             g9_sequence = int(authority["g9_gate_sequence"])
             g10_sequence = int(authority["g10_gate_sequence"])
             connection.execute(
-                "UPDATE sandbox_receipt_authority SET g9_gate_sequence = -1 "
-                "WHERE case_id = ?",
+                "UPDATE sandbox_receipt_authority SET g9_gate_sequence = -1 WHERE case_id = ?",
                 (receipt.case_id,),
             )
             connection.execute(
-                "UPDATE sandbox_receipt_authority SET g10_gate_sequence = ? "
-                "WHERE case_id = ?",
+                "UPDATE sandbox_receipt_authority SET g10_gate_sequence = ? WHERE case_id = ?",
                 (g9_sequence, receipt.case_id),
             )
             connection.execute(
-                "UPDATE sandbox_receipt_authority SET g9_gate_sequence = ? "
-                "WHERE case_id = ?",
+                "UPDATE sandbox_receipt_authority SET g9_gate_sequence = ? WHERE case_id = ?",
                 (g10_sequence, receipt.case_id),
             )
         elif tampering == "mutate_audit_time":
@@ -1266,8 +1238,7 @@ def test_receipt_authority_rejects_deleted_added_swapped_and_mutated_rows_on_rea
                 (receipt.case_id,),
             )
             connection.execute(
-                "UPDATE sandbox_receipt_authority SET receipt_audit_sequence = ? "
-                "WHERE case_id = ?",
+                "UPDATE sandbox_receipt_authority SET receipt_audit_sequence = ? WHERE case_id = ?",
                 (approval_sequence, receipt.case_id),
             )
             connection.execute(
@@ -1396,10 +1367,11 @@ def test_v5_final_receipt_reaches_explicit_v6_rejection_and_rolls_back_atomicall
     database_path = repository.database_path
     repository.media_store.close()
     with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE verification_attempt_authority")
+        connection.execute("DROP TABLE portal_session_authority")
+        connection.execute("DROP TABLE portal_run_authority")
         connection.execute("DROP TABLE sandbox_receipt_authority")
-        connection.execute(
-            "ALTER TABLE authority_capabilities DROP COLUMN portal_variant"
-        )
+        connection.execute("ALTER TABLE authority_capabilities DROP COLUMN portal_variant")
         connection.execute("PRAGMA user_version = 5")
     before = _database_identity_and_dump(database_path)
     original = SqliteCaseRepository._migrate_v5_to_v6
@@ -1612,9 +1584,7 @@ def test_failure_after_g9_rolls_back_token_gates_states_audits_and_receipt(
     assert repository.get_sandbox_receipt(review.case_id) is None
     with sqlite3.connect(repository.database_path) as connection:
         for table, count in before_counts.items():
-            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (
-                count,
-            )
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (count,)
 
     reopened_repository, reopened = _reopen_case(repository, review)
     assert reopened == review

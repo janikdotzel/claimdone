@@ -248,10 +248,12 @@ class AuthorityService:
             raise state_conflict(current_version=error.current_version) from None
         return IssuedCapability(
             token=token,
+            digest=digest,
             case_id=case_id,
             bound_case_version=expected_version,
             role=role,
             purpose=purpose,
+            issued_at=issued_at,
             expires_at=expires_at,
         )
 
