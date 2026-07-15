@@ -927,50 +927,60 @@ class SqliteCaseRepository:
             else self.database_path.parent / f"{self.database_path.stem}-media"
         )
         self.initialize()
-        if self._has_persisted_intake_authority():
-            self._require_existing_media_root(selected_media_root)
-        from claimdone_api.media import CaseMediaStore
+        from claimdone_api.media import (
+            CaseMediaStore,
+            MediaStorageError,
+            UnsafeStoragePath,
+        )
 
-        self.__media_store = CaseMediaStore(selected_media_root)
-        if self.is_canonical_authority:
-            with closing(self._connect()) as connection:
-                self._preflight_canonical_payloads(
-                    connection,
-                    legacy=False,
-                    verify_media=True,
-                )
-
-    def _has_persisted_intake_authority(self) -> bool:
-        with closing(self._connect()) as connection:
-            if not self._table_exists(connection, "case_intake_authority"):
-                return False
-            return (
-                connection.execute(
-                    "SELECT 1 FROM case_intake_authority LIMIT 1"
-                ).fetchone()
-                is not None
-            )
-
-    @staticmethod
-    def _require_existing_media_root(root: Path) -> None:
-        """Reject missing/unowned roots without claiming them during failed reopen."""
-
-        marker = root / ".claimdone-media-root-v1"
+        media_store: CaseMediaStore | None = None
         try:
-            if (
-                root.is_symlink()
-                or not root.is_dir()
-                or marker.is_symlink()
-                or not marker.is_file()
-                or marker.read_bytes() != b"ClaimDone temporary media root v1\n"
-            ):
-                raise PersistedDataIntegrityError(
-                    "Persisted intake authority has no existing owned media root"
-                )
-        except OSError as error:
-            raise PersistedDataIntegrityError(
-                "Persisted intake authority media root cannot be validated"
-            ) from error
+            with self._write_connection() as connection:
+                if self.is_canonical_authority:
+                    # Revalidate inside the write-reserving transaction so a
+                    # concurrent intake cannot appear between the DB preflight
+                    # and the choice to open-only or initialize media storage.
+                    self._preflight_canonical_payloads(
+                        connection,
+                        legacy=False,
+                        verify_media=False,
+                    )
+                require_existing = self._has_persisted_intake_authority(connection)
+                try:
+                    media_store = CaseMediaStore(
+                        selected_media_root,
+                        require_existing=require_existing,
+                    )
+                except (MediaStorageError, UnsafeStoragePath) as error:
+                    if require_existing:
+                        raise PersistedDataIntegrityError(
+                            "Persisted intake authority has no valid owned media root"
+                        ) from error
+                    raise
+                self.__media_store = media_store
+                if self.is_canonical_authority:
+                    self._preflight_canonical_payloads(
+                        connection,
+                        legacy=False,
+                        verify_media=True,
+                    )
+        except BaseException:
+            if media_store is not None:
+                media_store.close()
+            raise
+
+    def _has_persisted_intake_authority(
+        self,
+        connection: sqlite3.Connection,
+    ) -> bool:
+        if not self._table_exists(connection, "case_intake_authority"):
+            return False
+        return (
+            connection.execute(
+                "SELECT 1 FROM case_intake_authority LIMIT 1"
+            ).fetchone()
+            is not None
+        )
 
     @property
     def is_canonical_authority(self) -> bool:

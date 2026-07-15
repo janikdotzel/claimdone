@@ -104,6 +104,16 @@ def case_directories(store: CaseMediaStore) -> list[Path]:
     return sorted(path for path in store.root.iterdir() if path.name.startswith("case-"))
 
 
+def add_sanitized_tombstones(parent: Path, count: int) -> tuple[Path, ...]:
+    paths = tuple(
+        parent / f".claimdone-delete-{index:032x}"
+        for index in range(count)
+    )
+    for path in paths:
+        path.write_bytes(b"")
+    return paths
+
+
 def full_review(session: object) -> PrivacyReview:
     from claimdone_api.media import IntakeSession
 
@@ -506,6 +516,412 @@ def test_reset_and_delete_do_not_follow_case_symlinks(tmp_path: Path) -> None:
     assert case_directories(store) == []
 
 
+@pytest.mark.parametrize(
+    "later_failure",
+    (
+        "fifo",
+        "asset_hardlink",
+        "marker_hardlink",
+        "not_writable",
+        "nested_fifo",
+    ),
+)
+def test_reset_preflights_every_later_case_before_mutating_any_case(
+    tmp_path: Path,
+    later_failure: str,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handles = tuple(
+        sorted(
+            (store.create_case(), store.create_case()),
+            key=lambda handle: handle.storage_name,
+        )
+    )
+    refs = tuple(
+        store.write_bytes(
+            handle,
+            f"owned-{index}".encode(),
+            role="temp",
+            suffix=".bin",
+            media_type="application/octet-stream",
+        )
+        for index, handle in enumerate(handles)
+    )
+    case_paths = tuple(store.root / handle.storage_name for handle in handles)
+    later_path = case_paths[1]
+    if later_failure == "fifo":
+        os.mkfifo(later_path / "blocked.fifo")
+    elif later_failure == "asset_hardlink":
+        os.link(later_path / refs[1].file_id, tmp_path / "outside-asset.bin")
+    elif later_failure == "marker_hardlink":
+        os.link(later_path / ".claimdone-case-v2", tmp_path / "outside-marker")
+    elif later_failure == "not_writable":
+        (later_path / refs[1].file_id).chmod(0o400)
+    else:
+        assert later_failure == "nested_fifo"
+        nested = later_path / "nested"
+        nested.mkdir()
+        os.mkfifo(nested / "blocked.fifo")
+
+    with pytest.raises(UnsafeStoragePath):
+        store.reset()
+
+    assert tuple(
+        (case_path / ref.file_id).read_bytes()
+        for case_path, ref in zip(case_paths, refs, strict=True)
+    ) == (b"owned-0", b"owned-1")
+    assert all((case_path / ".claimdone-case-v2").is_file() for case_path in case_paths)
+    assert all(
+        not any(path.name.startswith(".claimdone-delete-") for path in case_path.iterdir())
+        for case_path in case_paths
+    )
+
+
+@pytest.mark.parametrize(
+    "injection",
+    ("root_marker", "root_tombstone", "case_entry"),
+)
+def test_reset_revalidates_complete_plan_before_first_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    injection: str,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handles = tuple(
+        sorted(
+            (store.create_case(), store.create_case()),
+            key=lambda handle: handle.storage_name,
+        )
+    )
+    refs = tuple(
+        store.write_bytes(
+            handle,
+            f"owned-{index}".encode(),
+            role="temp",
+            suffix=".bin",
+            media_type="application/octet-stream",
+        )
+        for index, handle in enumerate(handles)
+    )
+    original = CaseMediaStore._revalidate_root_deletion_plan
+    injected = False
+
+    def inject_before_revalidation(
+        selected_store: CaseMediaStore,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            if injection == "root_marker":
+                marker = selected_store.root / ".claimdone-media-root-v2"
+                content = marker.read_bytes()
+                marker.unlink()
+                marker.write_bytes(content)
+            elif injection == "root_tombstone":
+                add_sanitized_tombstones(selected_store.root, 1)
+            else:
+                assert injection == "case_entry"
+                later = selected_store.root / handles[1].storage_name
+                (later / "injected.bin").write_bytes(b"injected")
+        original(selected_store, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CaseMediaStore,
+        "_revalidate_root_deletion_plan",
+        inject_before_revalidation,
+    )
+
+    with pytest.raises(UnsafeStoragePath):
+        store.reset()
+
+    assert tuple(
+        (store.root / handle.storage_name / ref.file_id).read_bytes()
+        for handle, ref in zip(handles, refs, strict=True)
+    ) == (b"owned-0", b"owned-1")
+
+
+def test_reset_root_tombstone_capacity_allows_exact_fit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handles = (store.create_case(), store.create_case())
+    for handle in handles:
+        store.write_bytes(
+            handle,
+            b"owned",
+            role="temp",
+            suffix=".bin",
+            media_type="application/octet-stream",
+        )
+    add_sanitized_tombstones(store.root, 1)
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 3)
+
+    assert store.reset() == 2
+    assert case_directories(store) == []
+    assert len(
+        tuple(
+            path
+            for path in store.root.iterdir()
+            if path.name.startswith(".claimdone-delete-")
+        )
+    ) == 3
+
+
+def test_reset_root_tombstone_capacity_one_short_fails_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handles = tuple(
+        sorted(
+            (store.create_case(), store.create_case()),
+            key=lambda handle: handle.storage_name,
+        )
+    )
+    refs = tuple(
+        store.write_bytes(
+            handle,
+            f"owned-{index}".encode(),
+            role="temp",
+            suffix=".bin",
+            media_type="application/octet-stream",
+        )
+        for index, handle in enumerate(handles)
+    )
+    add_sanitized_tombstones(store.root, 2)
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 3)
+
+    with pytest.raises(MediaStorageError, match="tombstone limit"):
+        store.reset()
+
+    assert tuple(
+        (store.root / handle.storage_name / ref.file_id).read_bytes()
+        for handle, ref in zip(handles, refs, strict=True)
+    ) == (b"owned-0", b"owned-1")
+
+
+def test_case_delete_capacity_allows_existing_tombstone_plus_assets_exact_fit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    for index in range(2):
+        store.write_bytes(
+            handle,
+            f"owned-{index}".encode(),
+            role="temp",
+            suffix=".bin",
+            media_type="application/octet-stream",
+        )
+    add_sanitized_tombstones(case_path, 1)
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 3)
+
+    assert store.delete_case(handle)
+    assert not case_path.exists()
+
+
+def test_case_delete_over_capacity_never_truncates_asset_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    refs = tuple(
+        store.write_bytes(
+            handle,
+            f"owned-{index}".encode(),
+            role="temp",
+            suffix=".bin",
+            media_type="application/octet-stream",
+        )
+        for index in range(2)
+    )
+    add_sanitized_tombstones(case_path, 1)
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 2)
+
+    with pytest.raises(MediaStorageError, match="tombstone limit"):
+        store.delete_case(handle)
+
+    assert tuple((case_path / ref.file_id).read_bytes() for ref in refs) == (
+        b"owned-0",
+        b"owned-1",
+    )
+    assert (case_path / ".claimdone-case-v2").is_file()
+
+
+def test_case_delete_root_capacity_failure_preserves_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    ref = store.write_bytes(
+        handle,
+        b"owned",
+        role="temp",
+        suffix=".bin",
+        media_type="application/octet-stream",
+    )
+    add_sanitized_tombstones(store.root, 1)
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 1)
+
+    with pytest.raises(MediaStorageError, match="tombstone limit"):
+        store.delete_case(handle)
+
+    assert (store.root / handle.storage_name / ref.file_id).read_bytes() == b"owned"
+
+
+def test_reset_preflights_later_case_local_capacity_before_first_case_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handles = tuple(
+        sorted(
+            (store.create_case(), store.create_case()),
+            key=lambda handle: handle.storage_name,
+        )
+    )
+    refs_by_handle = {
+        handle.storage_name: tuple(
+            store.write_bytes(
+                handle,
+                f"{handle.storage_name}-{index}".encode(),
+                role="temp",
+                suffix=".bin",
+                media_type="application/octet-stream",
+            )
+            for index in range(1 if position == 0 else 3)
+        )
+        for position, handle in enumerate(handles)
+    }
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 2)
+
+    with pytest.raises(MediaStorageError, match="tombstone limit"):
+        store.reset()
+
+    for handle in handles:
+        case_path = store.root / handle.storage_name
+        for index, ref in enumerate(refs_by_handle[handle.storage_name]):
+            assert (case_path / ref.file_id).read_bytes() == (
+                f"{handle.storage_name}-{index}".encode()
+            )
+
+
+def test_case_delete_preflights_nested_capacity_before_outer_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    nested = case_path / "nested"
+    nested.mkdir()
+    payloads = (nested / "first.bin", nested / "second.bin")
+    payloads[0].write_bytes(b"first")
+    payloads[1].write_bytes(b"second")
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 1)
+
+    with pytest.raises(MediaStorageError, match="tombstone limit"):
+        store.delete_case(handle)
+
+    assert tuple(path.read_bytes() for path in payloads) == (b"first", b"second")
+    assert (case_path / ".claimdone-case-v2").is_file()
+
+
+def test_case_delete_at_limit_keeps_existing_sanitized_tombstone_in_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    add_sanitized_tombstones(case_path, 1)
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONES_PER_DIRECTORY", 1)
+
+    assert store.delete_case(handle)
+    assert not case_path.exists()
+
+
+@pytest.mark.parametrize("permission_target", ("root", "case", "nested"))
+def test_case_delete_preflights_directory_mutation_permissions(
+    tmp_path: Path,
+    permission_target: str,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    ref = store.write_bytes(
+        handle,
+        b"outer-owned",
+        role="temp",
+        suffix=".bin",
+        media_type="application/octet-stream",
+    )
+    nested = case_path / "nested"
+    nested.mkdir()
+    nested_payload = nested / "nested.bin"
+    nested_payload.write_bytes(b"nested-owned")
+    target = {
+        "root": store.root,
+        "case": case_path,
+        "nested": nested,
+    }[permission_target]
+    target.chmod(0o500)
+    try:
+        with pytest.raises(UnsafeStoragePath, match="cannot be mutated safely"):
+            store.delete_case(handle)
+    finally:
+        target.chmod(0o700)
+
+    assert (case_path / ref.file_id).read_bytes() == b"outer-owned"
+    assert nested_payload.read_bytes() == b"nested-owned"
+    assert not any(
+        path.name.startswith(".claimdone-delete-")
+        for path in case_path.iterdir()
+    )
+
+
+def test_case_delete_accepts_empty_nested_directory_at_exact_depth_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    (case_path / "nested").mkdir()
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONE_DEPTH", 1)
+
+    assert store.delete_case(handle)
+    assert not case_path.exists()
+
+
+def test_case_delete_rejects_content_beyond_tombstone_depth_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CaseMediaStore(tmp_path / "media")
+    handle = store.create_case()
+    case_path = store.root / handle.storage_name
+    nested = case_path / "nested"
+    nested.mkdir()
+    payload = nested / "too-deep.bin"
+    payload.write_bytes(b"owned")
+    monkeypatch.setattr(media_storage, "_MAX_TOMBSTONE_DEPTH", 1)
+
+    with pytest.raises(UnsafeStoragePath, match="nesting is too deep"):
+        store.delete_case(handle)
+
+    assert payload.read_bytes() == b"owned"
+    assert (case_path / ".claimdone-case-v2").is_file()
+
+
 def test_delete_and_reset_reject_case_shaped_regular_files(tmp_path: Path) -> None:
     store = CaseMediaStore(tmp_path / "media")
     fake_name = f"case-{'d' * 32}"
@@ -693,6 +1109,61 @@ def test_storage_refuses_preexisting_empty_unowned_root(tmp_path: Path) -> None:
         CaseMediaStore(root)
 
     assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("invalid", (1, 0, None, "true"))
+def test_storage_existing_only_flag_requires_an_exact_bool(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    root = tmp_path / "media"
+
+    with pytest.raises(TypeError, match="exact bool"):
+        CaseMediaStore(root, require_existing=cast(Any, invalid))
+
+    assert not root.exists()
+
+
+def test_storage_existing_only_never_creates_missing_parent_or_root(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "missing-parent"
+    root = parent / "media"
+
+    with pytest.raises(UnsafeStoragePath, match="component"):
+        CaseMediaStore(root, require_existing=True)
+
+    assert not parent.exists()
+
+
+def test_storage_existing_only_reopens_v2_root_without_mutating_permissions_or_marker(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "media"
+    marker = root / ".claimdone-media-root-v2"
+    with CaseMediaStore(root) as created:
+        created.create_case()
+    root.chmod(0o750)
+    before_root = root.stat()
+    before_marker = marker.stat()
+    marker_content = marker.read_bytes()
+
+    with CaseMediaStore(root, require_existing=True) as reopened:
+        assert reopened.root == root
+
+    after_root = root.stat()
+    after_marker = marker.stat()
+    assert stat.S_IMODE(after_root.st_mode) == 0o750
+    assert (after_root.st_dev, after_root.st_ino) == (
+        before_root.st_dev,
+        before_root.st_ino,
+    )
+    assert marker.read_bytes() == marker_content
+    assert (after_marker.st_dev, after_marker.st_ino, after_marker.st_mtime_ns) == (
+        before_marker.st_dev,
+        before_marker.st_ino,
+        before_marker.st_mtime_ns,
+    )
 
 
 def test_storage_rejects_content_injected_during_root_claim(

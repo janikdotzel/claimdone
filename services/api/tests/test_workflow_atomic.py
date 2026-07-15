@@ -78,6 +78,7 @@ from claimdone_api.gates import (
 )
 from claimdone_api.media import (
     AudioUpload,
+    CaseMediaStore,
     ExifChoice,
     ExifDecision,
     ImageUpload,
@@ -2088,6 +2089,59 @@ def test_intake_authority_tampering_fails_closed_on_reopen(
 
     with pytest.raises(PersistedDataIntegrityError):
         SqliteCaseRepository(database_path)
+
+
+def test_persisted_intake_reopens_through_owned_v2_media_root(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "owned-v2-reopen.db"
+    _service, repository, _prefix, current = _analysis_case(database_path)
+    media_root = repository.media_store.root
+
+    reopened = SqliteCaseRepository(database_path)
+
+    assert reopened.get_case(current.case_id) == current
+    assert reopened.media_store.root == media_root
+    assert (media_root / ".claimdone-media-root-v2").is_file()
+    assert not (media_root / ".claimdone-media-root-v1").exists()
+
+
+@pytest.mark.parametrize(
+    "root_failure",
+    ("missing", "replaced", "symlink", "wrong_marker"),
+)
+def test_persisted_intake_reopen_requires_exact_owned_v2_media_root(
+    tmp_path: Path,
+    root_failure: str,
+) -> None:
+    database_path = tmp_path / f"owned-v2-{root_failure}.db"
+    _service, repository, _prefix, _current = _analysis_case(database_path)
+    media_root = repository.media_store.root
+    parked_root = tmp_path / f"parked-{root_failure}"
+    media_root.rename(parked_root)
+
+    if root_failure == "replaced":
+        with CaseMediaStore(media_root):
+            pass
+    elif root_failure == "symlink":
+        media_root.symlink_to(parked_root, target_is_directory=True)
+    elif root_failure == "wrong_marker":
+        parked_root.rename(media_root)
+        (media_root / ".claimdone-media-root-v2").write_bytes(b"wrong marker\n")
+    else:
+        assert root_failure == "missing"
+
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
+
+    if root_failure == "missing":
+        assert not media_root.exists()
+    elif root_failure == "symlink":
+        assert media_root.is_symlink()
+    elif root_failure == "wrong_marker":
+        assert (media_root / ".claimdone-media-root-v2").read_bytes() == b"wrong marker\n"
+    else:
+        assert (media_root / ".claimdone-media-root-v2").is_file()
 
 
 def test_reopen_binds_case_state_to_contiguous_workflow_replay(

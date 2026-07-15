@@ -12,6 +12,7 @@ import stat
 import sys
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from functools import cache, wraps
 from pathlib import Path
 from threading import RLock
@@ -50,6 +51,39 @@ class MediaStorageError(RuntimeError):
 
 
 type _FileIdentity = tuple[int, int]
+type _DeletionEntryKind = Literal["directory", "regular", "symlink"]
+
+
+@dataclass(frozen=True, slots=True)
+class _TombstonePlan:
+    name: str
+    identity: _FileIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _DeletionEntryPlan:
+    name: str
+    identity: _FileIdentity
+    kind: _DeletionEntryKind
+    child: _DirectoryDeletionPlan | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryDeletionPlan:
+    identity: _FileIdentity
+    tombstone_depth: int
+    preserve_name: str | None
+    marker_storage_name: str | None
+    preserve_identity: _FileIdentity | None
+    tombstones: tuple[_TombstonePlan, ...]
+    entries: tuple[_DeletionEntryPlan, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CaseDeletionPlan:
+    storage_name: str
+    identity: _FileIdentity
+    directory: _DirectoryDeletionPlan
 
 
 def _serialized[**P, R](
@@ -376,6 +410,7 @@ def _validate_marker(
         metadata = os.fstat(marker_fd)
         if (
             not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
             or metadata.st_size != len(expected)
             or _read_fd(marker_fd) != expected
         ):
@@ -426,12 +461,19 @@ def _write_marker(
     return marker_identity
 
 
-def _open_or_create_media_root(path: Path) -> tuple[int, bool]:
-    """Publish a fully initialized root with one atomic no-replace rename."""
+def _open_or_create_media_root(
+    path: Path,
+    *,
+    require_existing: bool = False,
+) -> tuple[int, bool]:
+    """Open an owned root or publish a new one with an atomic no-replace rename."""
 
     if path == Path(path.anchor):
         raise UnsafeStoragePath("Filesystem root cannot be used as media storage")
-    parent_fd, _parent_created = _open_or_create_absolute_directory(path.parent)
+    if require_existing:
+        parent_fd = _open_absolute_directory(path.parent)
+    else:
+        parent_fd, _parent_created = _open_or_create_absolute_directory(path.parent)
     try:
         try:
             root_fd = os.open(
@@ -439,8 +481,11 @@ def _open_or_create_media_root(path: Path) -> tuple[int, bool]:
                 _directory_open_flags(),
                 dir_fd=parent_fd,
             )
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError as error:
+            if require_existing:
+                raise UnsafeStoragePath(
+                    "Existing media root could not be opened safely"
+                ) from error
         except OSError as error:
             raise UnsafeStoragePath("Media root could not be opened safely") from error
         else:
@@ -539,7 +584,9 @@ class CaseMediaStore:
     no path returned to a caller can stay race-free after this method returns.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, require_existing: bool = False) -> None:
+        if type(require_existing) is not bool:
+            raise TypeError("require_existing must be an exact bool")
         if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
             raise MediaStorageError(
                 "Media storage requires O_DIRECTORY and O_NOFOLLOW support"
@@ -548,14 +595,18 @@ class CaseMediaStore:
         if type(root) is not Path:
             root = Path(root)
         absolute = Path(os.path.abspath(root))
-        root_fd, root_created = _open_or_create_media_root(absolute)
+        root_fd, root_created = _open_or_create_media_root(
+            absolute,
+            require_existing=require_existing,
+        )
         root_metadata: os.stat_result | None = None
         try:
             root_metadata = os.fstat(root_fd)
             if not stat.S_ISDIR(root_metadata.st_mode):
                 raise UnsafeStoragePath("Media root must be a directory")
             self._initialize_marker(root_fd, root_created=root_created)
-            os.fchmod(root_fd, 0o700)
+            if not require_existing:
+                os.fchmod(root_fd, 0o700)
         except BaseException:
             os.close(root_fd)
             raise
@@ -1017,14 +1068,33 @@ class CaseMediaStore:
             raise UnsafeStoragePath(
                 "Case path is not an authority-marked owned directory"
             )
-        self._delete_case_directory(storage_name, expected=_identity(metadata))
+        plan = self._plan_case_deletion(
+            storage_name,
+            expected=_identity(metadata),
+        )
+        root_marker_identity = self._plan_root_marker()
+        root_tombstones = self._plan_root_tombstones()
+        self._require_planned_tombstone_capacity(
+            existing=len(root_tombstones),
+            additions=1,
+        )
+        self._revalidate_root_deletion_plan(
+            root_marker_identity,
+            root_tombstones,
+            (plan,),
+            require_exact_case_set=False,
+        )
+        self._delete_case_directory(plan)
         return True
 
     @_serialized
     def reset(self) -> int:
         self._require_root_identity()
-        removed = 0
-        for name in tuple(os.listdir(self._root_fd)):
+        names = tuple(sorted(os.listdir(self._root_fd)))
+        root_marker_identity = self._plan_root_marker()
+        root_tombstones = self._plan_root_tombstones(names=names)
+        targets: list[_CaseDeletionPlan] = []
+        for name in names:
             if _CASE_NAME.fullmatch(name) is None:
                 continue
             try:
@@ -1033,40 +1103,505 @@ class CaseMediaStore:
                     dir_fd=self._root_fd,
                     follow_symlinks=False,
                 )
-            except FileNotFoundError:
-                continue
-            if stat.S_ISDIR(metadata.st_mode):
-                self._delete_case_directory(name, expected=_identity(metadata))
-            else:
+            except OSError as error:
+                raise UnsafeStoragePath(
+                    "Reset target could not be inspected safely"
+                ) from error
+            if not stat.S_ISDIR(metadata.st_mode):
                 raise UnsafeStoragePath(
                     "Reset target is not an authority-marked owned directory"
                 )
-            removed += 1
-        return removed
+            targets.append(
+                self._plan_case_deletion(
+                    name,
+                    expected=_identity(metadata),
+                )
+            )
 
-    def _delete_case_directory(
+        plans = tuple(targets)
+        self._require_planned_tombstone_capacity(
+            existing=len(root_tombstones),
+            additions=len(plans),
+        )
+        self._revalidate_root_deletion_plan(
+            root_marker_identity,
+            root_tombstones,
+            plans,
+            require_exact_case_set=True,
+        )
+        for plan in plans:
+            self._delete_case_directory(plan)
+        return len(plans)
+
+    def _plan_root_marker(self) -> _FileIdentity:
+        self._require_directory_mutation_access(
+            self._root_fd,
+            message="Media root cannot be mutated safely",
+        )
+        try:
+            metadata = os.stat(
+                _ROOT_MARKER,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+            identity = _identity(metadata)
+            _validate_marker(
+                self._root_fd,
+                _ROOT_MARKER,
+                _root_marker_content(self._root_identity),
+                invalid_message="Media root ownership marker is invalid",
+            )
+            current = os.stat(
+                _ROOT_MARKER,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise UnsafeStoragePath(
+                "Media root ownership marker could not be inspected safely"
+            ) from error
+        if _identity(current) != identity:
+            raise UnsafeStoragePath("Media root marker changed during deletion preflight")
+        return identity
+
+    def _plan_root_tombstones(
+        self,
+        *,
+        names: tuple[str, ...] | None = None,
+    ) -> tuple[_TombstonePlan, ...]:
+        selected_names = (
+            tuple(sorted(os.listdir(self._root_fd))) if names is None else names
+        )
+        return tuple(
+            self._plan_tombstone(self._root_fd, name, depth=0)
+            for name in selected_names
+            if name.startswith(_TOMBSTONE_PREFIX)
+        )
+
+    def _plan_case_deletion(
         self,
         storage_name: str,
         *,
         expected: _FileIdentity,
-    ) -> None:
+    ) -> _CaseDeletionPlan:
         directory_fd = self._open_case_name(
             storage_name,
             remember=False,
             require_marker=True,
         )
         try:
-            if _identity(os.fstat(directory_fd)) != expected:
-                raise UnsafeStoragePath("Case directory changed before deletion")
-            self._clear_directory(directory_fd, preserve_name=_CASE_MARKER)
+            identity = _identity(os.fstat(directory_fd))
+            if identity != expected:
+                raise UnsafeStoragePath(
+                    "Case directory changed during deletion preflight"
+                )
+            directory = self._plan_directory_deletion(
+                directory_fd,
+                preserve_name=_CASE_MARKER,
+                marker_storage_name=storage_name,
+                depth=1,
+            )
+        finally:
+            os.close(directory_fd)
+        return _CaseDeletionPlan(
+            storage_name=storage_name,
+            identity=identity,
+            directory=directory,
+        )
+
+    def _plan_directory_deletion(
+        self,
+        directory_fd: int,
+        *,
+        preserve_name: str | None,
+        marker_storage_name: str | None,
+        depth: int,
+    ) -> _DirectoryDeletionPlan:
+        directory_metadata = os.fstat(directory_fd)
+        if not stat.S_ISDIR(directory_metadata.st_mode):
+            raise UnsafeStoragePath("Media deletion target must be a directory")
+        self._require_directory_mutation_access(
+            directory_fd,
+            message="Media directory cannot be mutated safely",
+        )
+        directory_identity = _identity(directory_metadata)
+        names = tuple(sorted(os.listdir(directory_fd)))
+        preserve_identity: _FileIdentity | None = None
+        if preserve_name is not None:
+            if marker_storage_name is None:
+                raise UnsafeStoragePath("Preserved case marker lost its storage binding")
+            self._validate_case_marker(directory_fd, marker_storage_name)
+            marker_metadata = os.stat(
+                preserve_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            preserve_identity = _identity(marker_metadata)
+
+        tombstones: list[_TombstonePlan] = []
+        entries: list[_DeletionEntryPlan] = []
+        for name in names:
+            if name == preserve_name:
+                continue
+            if depth > _MAX_TOMBSTONE_DEPTH:
+                raise UnsafeStoragePath("Media directory nesting is too deep")
+            if name.startswith(_TOMBSTONE_PREFIX):
+                # It is already sanitized and will move with its containing
+                # directory, so retaining it consumes no transient extra slot.
+                tombstones.append(
+                    self._plan_tombstone(directory_fd, name, depth=depth)
+                )
+                continue
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise UnsafeStoragePath(
+                    "Media entry could not be inspected safely"
+                ) from error
+            identity = _identity(metadata)
+            if stat.S_ISDIR(metadata.st_mode):
+                try:
+                    child_fd = os.open(
+                        name,
+                        _directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                except OSError as error:
+                    raise UnsafeStoragePath(
+                        "Nested media directory could not be opened safely"
+                    ) from error
+                try:
+                    if _identity(os.fstat(child_fd)) != identity:
+                        raise UnsafeStoragePath(
+                            "Nested media directory changed during deletion preflight"
+                        )
+                    child = self._plan_directory_deletion(
+                        child_fd,
+                        preserve_name=None,
+                        marker_storage_name=None,
+                        depth=depth + 1,
+                    )
+                finally:
+                    os.close(child_fd)
+                entries.append(
+                    _DeletionEntryPlan(
+                        name=name,
+                        identity=identity,
+                        kind="directory",
+                        child=child,
+                    )
+                )
+            elif stat.S_ISREG(metadata.st_mode):
+                self._require_deletable_regular_entry(
+                    directory_fd,
+                    name,
+                    expected=identity,
+                )
+                entries.append(
+                    _DeletionEntryPlan(
+                        name=name,
+                        identity=identity,
+                        kind="regular",
+                    )
+                )
+            elif stat.S_ISLNK(metadata.st_mode):
+                entries.append(
+                    _DeletionEntryPlan(
+                        name=name,
+                        identity=identity,
+                        kind="symlink",
+                    )
+                )
+            else:
+                raise UnsafeStoragePath(
+                    "Media directory contains an unsupported filesystem type"
+                )
+
+        self._require_planned_tombstone_capacity(
+            existing=len(tombstones),
+            additions=len(entries),
+        )
+        return _DirectoryDeletionPlan(
+            identity=directory_identity,
+            tombstone_depth=depth,
+            preserve_name=preserve_name,
+            marker_storage_name=marker_storage_name,
+            preserve_identity=preserve_identity,
+            tombstones=tuple(tombstones),
+            entries=tuple(entries),
+        )
+
+    @staticmethod
+    def _require_planned_tombstone_capacity(
+        *,
+        existing: int,
+        additions: int,
+    ) -> None:
+        if existing + additions > _MAX_TOMBSTONES_PER_DIRECTORY:
+            raise MediaStorageError(
+                "Media tombstone limit reached; run the explicit local reset"
+            )
+
+    @staticmethod
+    def _plan_tombstone(
+        parent_fd: int,
+        name: str,
+        *,
+        depth: int,
+    ) -> _TombstonePlan:
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            identity = _identity(metadata)
+            CaseMediaStore._validate_tombstone(parent_fd, name, depth=depth)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            raise UnsafeStoragePath(
+                "Media tombstone could not be inspected safely"
+            ) from error
+        if _identity(current) != identity:
+            raise UnsafeStoragePath("Media tombstone changed during deletion preflight")
+        return _TombstonePlan(name=name, identity=identity)
+
+    def _revalidate_root_deletion_plan(
+        self,
+        root_marker_identity: _FileIdentity,
+        root_tombstones: tuple[_TombstonePlan, ...],
+        cases: tuple[_CaseDeletionPlan, ...],
+        *,
+        require_exact_case_set: bool,
+    ) -> None:
+        self._require_root_identity()
+        self._require_directory_mutation_access(
+            self._root_fd,
+            message="Media root cannot be mutated safely",
+        )
+        try:
+            marker = os.stat(
+                _ROOT_MARKER,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise UnsafeStoragePath(
+                "Media root marker could not be revalidated before deletion"
+            ) from error
+        if _identity(marker) != root_marker_identity:
+            raise UnsafeStoragePath("Media root marker changed after deletion preflight")
+        _validate_marker(
+            self._root_fd,
+            _ROOT_MARKER,
+            _root_marker_content(self._root_identity),
+            invalid_message="Media root ownership marker is invalid",
+        )
+        names = set(os.listdir(self._root_fd))
+        expected_tombstones = {plan.name for plan in root_tombstones}
+        if {
+            name for name in names if name.startswith(_TOMBSTONE_PREFIX)
+        } != expected_tombstones:
+            raise UnsafeStoragePath("Media root tombstones changed after preflight")
+        expected_cases = {plan.storage_name for plan in cases}
+        if require_exact_case_set and {
+            name for name in names if _CASE_NAME.fullmatch(name) is not None
+        } != expected_cases:
+            raise UnsafeStoragePath("Reset targets changed after deletion preflight")
+        self._require_planned_tombstone_capacity(
+            existing=len(root_tombstones),
+            additions=len(cases),
+        )
+        for tombstone in root_tombstones:
+            self._revalidate_tombstone_plan(self._root_fd, tombstone, depth=0)
+        for plan in cases:
+            self._revalidate_case_deletion_plan(plan)
+
+    def _revalidate_case_deletion_plan(self, plan: _CaseDeletionPlan) -> None:
+        try:
+            metadata = os.stat(
+                plan.storage_name,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise UnsafeStoragePath(
+                "Case directory could not be revalidated before deletion"
+            ) from error
+        if not stat.S_ISDIR(metadata.st_mode) or _identity(metadata) != plan.identity:
+            raise UnsafeStoragePath("Case directory changed after deletion preflight")
+        directory_fd = self._open_case_name(
+            plan.storage_name,
+            remember=False,
+            require_marker=True,
+        )
+        try:
+            self._revalidate_directory_deletion_plan(directory_fd, plan.directory)
+        finally:
+            os.close(directory_fd)
+
+    def _revalidate_directory_deletion_plan(
+        self,
+        directory_fd: int,
+        plan: _DirectoryDeletionPlan,
+    ) -> None:
+        metadata = os.fstat(directory_fd)
+        if not stat.S_ISDIR(metadata.st_mode) or _identity(metadata) != plan.identity:
+            raise UnsafeStoragePath("Media directory changed after deletion preflight")
+        self._require_directory_mutation_access(
+            directory_fd,
+            message="Media directory cannot be mutated safely",
+        )
+        expected_names = {
+            *(tombstone.name for tombstone in plan.tombstones),
+            *(entry.name for entry in plan.entries),
+        }
+        if plan.preserve_name is not None:
+            expected_names.add(plan.preserve_name)
+        if set(os.listdir(directory_fd)) != expected_names:
+            raise UnsafeStoragePath("Media directory entries changed after deletion preflight")
+        if plan.preserve_name is not None:
+            if plan.marker_storage_name is None:
+                raise UnsafeStoragePath("Preserved case marker lost its storage binding")
+            self._validate_case_marker(
+                directory_fd,
+                plan.marker_storage_name,
+            )
+            preserved = os.stat(
+                plan.preserve_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if _identity(preserved) != plan.preserve_identity:
+                raise UnsafeStoragePath("Case marker changed after deletion preflight")
+        for tombstone in plan.tombstones:
+            self._revalidate_tombstone_plan(
+                directory_fd,
+                tombstone,
+                depth=plan.tombstone_depth,
+            )
+        for entry in plan.entries:
             current = os.stat(
-                storage_name,
+                entry.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if _identity(current) != entry.identity:
+                raise UnsafeStoragePath("Media entry changed after deletion preflight")
+            if entry.kind == "directory":
+                if not stat.S_ISDIR(current.st_mode) or entry.child is None:
+                    raise UnsafeStoragePath("Media directory type changed after preflight")
+                child_fd = os.open(
+                    entry.name,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    self._revalidate_directory_deletion_plan(child_fd, entry.child)
+                finally:
+                    os.close(child_fd)
+            elif entry.kind == "regular":
+                self._require_deletable_regular_entry(
+                    directory_fd,
+                    entry.name,
+                    expected=entry.identity,
+                )
+            elif not stat.S_ISLNK(current.st_mode):
+                raise UnsafeStoragePath("Media symlink changed after deletion preflight")
+        self._require_planned_tombstone_capacity(
+            existing=len(plan.tombstones),
+            additions=len(plan.entries),
+        )
+
+    @staticmethod
+    def _require_deletable_regular_entry(
+        parent_fd: int,
+        name: str,
+        *,
+        expected: _FileIdentity,
+    ) -> None:
+        flags = os.O_RDWR | os.O_NOFOLLOW
+        try:
+            file_fd = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise UnsafeStoragePath(
+                "Storage file could not be opened safely for deletion"
+            ) from error
+        try:
+            metadata = os.fstat(file_fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or _identity(metadata) != expected
+            ):
+                raise UnsafeStoragePath("Storage file changed after deletion preflight")
+            if metadata.st_nlink != 1:
+                raise UnsafeStoragePath("Storage file has multiple hard links")
+        finally:
+            os.close(file_fd)
+
+    @staticmethod
+    def _require_directory_mutation_access(
+        directory_fd: int,
+        *,
+        message: str,
+    ) -> None:
+        try:
+            allowed = os.access(
+                ".",
+                os.W_OK | os.X_OK,
+                dir_fd=directory_fd,
+                effective_ids=True,
+            )
+        except (NotImplementedError, OSError, TypeError, ValueError) as error:
+            raise MediaStorageError(
+                "Directory permission preflight is unavailable"
+            ) from error
+        if not allowed:
+            raise UnsafeStoragePath(message)
+
+    @staticmethod
+    def _revalidate_tombstone_plan(
+        parent_fd: int,
+        plan: _TombstonePlan,
+        *,
+        depth: int,
+    ) -> None:
+        try:
+            metadata = os.stat(
+                plan.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if _identity(metadata) != plan.identity:
+                raise UnsafeStoragePath("Media tombstone changed after deletion preflight")
+            CaseMediaStore._validate_tombstone(parent_fd, plan.name, depth=depth)
+        except OSError as error:
+            raise UnsafeStoragePath(
+                "Media tombstone could not be revalidated before deletion"
+            ) from error
+
+    def _delete_case_directory(
+        self,
+        plan: _CaseDeletionPlan,
+    ) -> None:
+        directory_fd = self._open_case_name(
+            plan.storage_name,
+            remember=False,
+            require_marker=True,
+        )
+        try:
+            if _identity(os.fstat(directory_fd)) != plan.identity:
+                raise UnsafeStoragePath("Case directory changed before deletion")
+            self._revalidate_directory_deletion_plan(directory_fd, plan.directory)
+            self._clear_directory(directory_fd, plan.directory)
+            current = os.stat(
+                plan.storage_name,
                 dir_fd=self._root_fd,
                 follow_symlinks=False,
             )
             if (
                 not stat.S_ISDIR(current.st_mode)
-                or _identity(current) != expected
+                or _identity(current) != plan.identity
             ):
                 raise UnsafeStoragePath("Case directory changed during deletion")
             os.fsync(directory_fd)
@@ -1075,8 +1610,8 @@ class CaseMediaStore:
 
         quarantine = _quarantine_entry(
             self._root_fd,
-            storage_name,
-            expected=expected,
+            plan.storage_name,
+            expected=plan.identity,
         )
         try:
             os.fsync(self._root_fd)
@@ -1089,30 +1624,32 @@ class CaseMediaStore:
                 _restore_quarantine(
                     self._root_fd,
                     quarantine,
-                    storage_name,
-                    expected=expected,
+                    plan.storage_name,
+                    expected=plan.identity,
                 )
             raise
-        self._case_identities.pop(storage_name, None)
+        self._case_identities.pop(plan.storage_name, None)
 
     def _clear_directory(
         self,
         directory_fd: int,
-        *,
-        preserve_name: str | None = None,
+        plan: _DirectoryDeletionPlan,
     ) -> None:
-        names = tuple(os.listdir(directory_fd))
-        ordered_names = tuple(name for name in names if name != preserve_name)
-        for name in ordered_names:
-            try:
-                metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if stat.S_ISDIR(metadata.st_mode):
-                expected = _identity(metadata)
+        self._revalidate_directory_deletion_plan(directory_fd, plan)
+        for entry in plan.entries:
+            metadata = os.stat(
+                entry.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if _identity(metadata) != entry.identity:
+                raise UnsafeStoragePath("Media entry changed before deletion")
+            if entry.kind == "directory":
+                if entry.child is None or not stat.S_ISDIR(metadata.st_mode):
+                    raise UnsafeStoragePath("Nested media directory changed before deletion")
                 try:
                     child_fd = os.open(
-                        name,
+                        entry.name,
                         _directory_open_flags(),
                         dir_fd=directory_fd,
                     )
@@ -1125,14 +1662,14 @@ class CaseMediaStore:
                     child_identity = _identity(child_metadata)
                     if (
                         not stat.S_ISDIR(child_metadata.st_mode)
-                        or child_identity != expected
+                        or child_identity != entry.identity
                     ):
                         raise UnsafeStoragePath(
                             "Nested media directory changed before deletion"
                         )
-                    self._clear_directory(child_fd)
+                    self._clear_directory(child_fd, entry.child)
                     current = os.stat(
-                        name,
+                        entry.name,
                         dir_fd=directory_fd,
                         follow_symlinks=False,
                     )
@@ -1148,8 +1685,8 @@ class CaseMediaStore:
                     os.close(child_fd)
                 quarantine = _quarantine_entry(
                     directory_fd,
-                    name,
-                    expected=expected,
+                    entry.name,
+                    expected=entry.identity,
                 )
                 try:
                     os.fsync(directory_fd)
@@ -1162,20 +1699,57 @@ class CaseMediaStore:
                         _restore_quarantine(
                             directory_fd,
                             quarantine,
-                            name,
-                            expected=expected,
+                            entry.name,
+                            expected=entry.identity,
                         )
                     raise
-            elif stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            elif entry.kind in {"regular", "symlink"}:
                 _quarantine_and_destroy(
                     directory_fd,
-                    name,
-                    expected=_identity(metadata),
+                    entry.name,
+                    expected=entry.identity,
                 )
             else:
                 raise UnsafeStoragePath(
                     "Media directory contains an unsupported filesystem type"
                 )
+        self._require_sanitized_directory(
+            directory_fd,
+            preserve_name=plan.preserve_name,
+            marker_storage_name=plan.marker_storage_name,
+            tombstone_depth=plan.tombstone_depth,
+        )
+
+    @staticmethod
+    def _require_sanitized_directory(
+        directory_fd: int,
+        *,
+        preserve_name: str | None,
+        marker_storage_name: str | None,
+        tombstone_depth: int,
+    ) -> None:
+        names = tuple(os.listdir(directory_fd))
+        for name in names:
+            if name == preserve_name:
+                continue
+            if not name.startswith(_TOMBSTONE_PREFIX):
+                raise UnsafeStoragePath("Media directory was not sanitized before deletion")
+            CaseMediaStore._validate_tombstone(
+                directory_fd,
+                name,
+                depth=tombstone_depth,
+            )
+        if preserve_name is not None:
+            if marker_storage_name is None:
+                raise UnsafeStoragePath("Preserved case marker lost its storage binding")
+            CaseMediaStore._validate_case_marker(
+                directory_fd,
+                marker_storage_name,
+            )
+        CaseMediaStore._require_planned_tombstone_capacity(
+            existing=len(names) - (1 if preserve_name is not None else 0),
+            additions=0,
+        )
 
     def _open_case_directory(self, handle: CaseHandle) -> int:
         return self._open_case_name(
@@ -1235,6 +1809,7 @@ class CaseMediaStore:
             metadata = os.fstat(marker_fd)
             if (
                 not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
                 or metadata.st_size != len(expected)
                 or _read_fd(marker_fd) != expected
             ):

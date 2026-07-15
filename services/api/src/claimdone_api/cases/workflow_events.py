@@ -120,6 +120,8 @@ class WorkflowEventStreamer:
         page = replay.initial_events
         first_page = True
         last_output_at = self._clock()
+        seen_event_ids: set[str] = set()
+        seen_source_audit_event_ids: set[str] = set()
         while True:
             if await disconnected():
                 return
@@ -129,6 +131,16 @@ class WorkflowEventStreamer:
                 except (CaseNotFoundError, WorkflowDataIntegrityError):
                     return
             first_page = False
+            try:
+                _record_replay_identities(
+                    page,
+                    seen_event_ids=seen_event_ids,
+                    seen_source_audit_event_ids=seen_source_audit_event_ids,
+                )
+            except WorkflowDataIntegrityError:
+                # Headers are already committed. Closing without emitting any
+                # item from the invalid page is the only fail-closed response.
+                return
             for item in page:
                 if await disconnected():
                     return
@@ -207,3 +219,19 @@ def _validate_replay_page(
     except ValueError as error:
         raise WorkflowDataIntegrityError("Persisted workflow replay is invalid") from error
     return materialized
+
+
+def _record_replay_identities(
+    events: Sequence[SequencedWorkflowEvent],
+    *,
+    seen_event_ids: set[str],
+    seen_source_audit_event_ids: set[str],
+) -> None:
+    """Reject identities repeated by a later polling page before it is emitted."""
+
+    event_ids = {item.envelope.event_id for item in events}
+    source_ids = {item.envelope.source_audit_event_id for item in events}
+    if event_ids & seen_event_ids or source_ids & seen_source_audit_event_ids:
+        raise WorkflowDataIntegrityError("Persisted workflow replay is invalid")
+    seen_event_ids.update(event_ids)
+    seen_source_audit_event_ids.update(source_ids)

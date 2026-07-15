@@ -1,6 +1,6 @@
 """Strict reconnectable SSE tests for the canonical workflow router."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -9,7 +9,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from claimdone_api.cases.errors import CaseNotFoundError
-from claimdone_api.cases.workflow_events import EventStreamConfig, WorkflowEventStreamer
+from claimdone_api.cases.workflow_events import (
+    EventStreamConfig,
+    WorkflowEventStreamer,
+    encode_workflow_event,
+)
 from claimdone_api.cases.workflow_router import create_workflow_router
 from claimdone_api.contracts import CONTRACT_VERSION, WorkflowEventEnvelope, WorkflowSnapshot
 from claimdone_api.persistence import CaseRecord, SequencedWorkflowEvent
@@ -190,6 +194,19 @@ def test_sse_rejects_mismatched_or_invalid_last_event_id(
     assert not response.headers["content-type"].startswith("text/event-stream")
 
 
+def test_sse_rejects_duplicate_last_event_id_headers() -> None:
+    response = _client(FakeWorkflowService()).get(
+        f"/api/cases/{CASE_ID}/events",
+        headers=[("Last-Event-ID", "2"), ("Last-Event-ID", "2")],
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _error(
+        "WORKFLOW_CURSOR_INVALID",
+        "The workflow replay cursor is invalid.",
+    )
+
+
 @pytest.mark.parametrize("unsafe", ("duplicate", "cross_case"))
 def test_sse_rejects_unsafe_persisted_page_before_stream_headers(unsafe: str) -> None:
     event = _event(2)
@@ -198,6 +215,62 @@ def test_sse_rejects_unsafe_persisted_page_before_stream_headers(unsafe: str) ->
         if unsafe == "duplicate"
         else (_event(2, case_id="case-other"),)
     )
+
+    response = _client(FakeWorkflowService(events=events)).get(
+        f"/api/cases/{CASE_ID}/events"
+    )
+
+    assert response.status_code == 500
+    assert not response.headers["content-type"].startswith("text/event-stream")
+    assert response.json() == _error(
+        "WORKFLOW_DATA_INVALID",
+        "The workflow data could not be read safely.",
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        "out_of_order",
+        "event_id_reused",
+        "source_id_reused",
+        "sequence_mismatch",
+    ),
+)
+def test_sse_rejects_order_and_identity_corruption_before_headers(
+    unsafe: str,
+) -> None:
+    first = _event(2)
+    second = _event(5)
+    events: tuple[SequencedWorkflowEvent, ...]
+    if unsafe == "out_of_order":
+        events = (second, first)
+    elif unsafe == "event_id_reused":
+        events = (
+            first,
+            replace(
+                second,
+                envelope=second.envelope.model_copy(
+                    update={"event_id": first.envelope.event_id}
+                ),
+            ),
+        )
+    elif unsafe == "source_id_reused":
+        events = (
+            first,
+            replace(
+                second,
+                envelope=second.envelope.model_copy(
+                    update={
+                        "source_audit_event_id": (
+                            first.envelope.source_audit_event_id
+                        )
+                    }
+                ),
+            ),
+        )
+    else:
+        events = (replace(first, sequence=3),)
 
     response = _client(FakeWorkflowService(events=events)).get(
         f"/api/cases/{CASE_ID}/events"
@@ -243,3 +316,64 @@ async def test_stream_stops_before_output_when_client_is_disconnected() -> None:
     frames = [frame async for frame in streamer.stream(replay, disconnected=disconnected)]
 
     assert frames == []
+
+
+@pytest.mark.parametrize(
+    "later_failure",
+    ("event_id_reused", "source_id_reused", "repository_error"),
+)
+@pytest.mark.anyio
+async def test_stream_closes_before_emitting_a_corrupt_later_page(
+    later_failure: str,
+) -> None:
+    first = _event(2)
+    second = _event(5)
+
+    @dataclass
+    class PagedService:
+        calls: list[tuple[str, int, int]] = field(default_factory=list)
+
+        def list_workflow_events(
+            self,
+            case_id: str,
+            *,
+            after: int = 0,
+            limit: int = 100,
+        ) -> tuple[SequencedWorkflowEvent, ...]:
+            self.calls.append((case_id, after, limit))
+            if after == 0:
+                return (first,)
+            if later_failure == "repository_error":
+                raise RuntimeError("private later failure")
+            duplicate = replace(
+                second,
+                envelope=second.envelope.model_copy(
+                    update={
+                        (
+                            "event_id"
+                            if later_failure == "event_id_reused"
+                            else "source_audit_event_id"
+                        ): (
+                            first.envelope.event_id
+                            if later_failure == "event_id_reused"
+                            else first.envelope.source_audit_event_id
+                        )
+                    }
+                ),
+            )
+            return (duplicate,)
+
+    service = PagedService()
+    streamer = WorkflowEventStreamer(
+        service,
+        config=EventStreamConfig(page_size=1),
+    )
+    replay = streamer.prepare(CASE_ID, 0)
+
+    async def connected() -> bool:
+        return False
+
+    frames = [frame async for frame in streamer.stream(replay, disconnected=connected)]
+
+    assert frames == [encode_workflow_event(first.envelope)]
+    assert service.calls == [(CASE_ID, 0, 1), (CASE_ID, 2, 1)]

@@ -366,12 +366,14 @@ def test_invalid_current_payload_claims_neither_identity_nor_selected_media_root
             "UPDATE cases SET state = 'ready_to_fill' WHERE case_id = ?",
             (created.case_id,),
         )
-    unclaimed_root = tmp_path / "must-not-be-claimed"
+    untouched_parent = tmp_path / "must-not-be-touched"
+    unclaimed_root = untouched_parent / "media"
 
     with pytest.raises(PersistedDataIntegrityError, match="canonical JSON"):
         SqliteCaseRepository(database_path, media_root=unclaimed_root)
 
     assert not unclaimed_root.exists()
+    assert not untouched_parent.exists()
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("PRAGMA application_id").fetchone() == application_id
 

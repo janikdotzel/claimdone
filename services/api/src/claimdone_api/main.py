@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.types import ASGIApp
 
 from claimdone_api.cases import CaseService, create_case_router, create_workflow_router
 from claimdone_api.cases.router import CaseCrudService
@@ -62,6 +63,24 @@ class ApiSettings:
 class HealthResponse(BaseModel):
     service: Literal["api"] = "api"
     status: Literal["ok"] = "ok"
+
+
+class _OuterCorsFastAPI(FastAPI):
+    """Keep narrow CORS outside FastAPI's server-error middleware."""
+
+    def __init__(self, *, web_origin: str, title: str, version: str) -> None:
+        _validate_local_origin(web_origin, "web_origin")
+        self.__web_origin = web_origin
+        super().__init__(title=title, version=version)
+
+    def build_middleware_stack(self) -> ASGIApp:
+        return CORSMiddleware(
+            super().build_middleware_stack(),
+            allow_origins=[self.__web_origin],
+            allow_credentials=False,
+            allow_methods=["DELETE", "GET", "OPTIONS", "POST", "PUT"],
+            allow_headers=["Content-Type", "Last-Event-ID"],
+        )
 
 
 def create_app(
@@ -119,25 +138,22 @@ def create_app(
         case_service = CaseService(canonical_repository, resource_cleaner=cleaner)
         walking_service = None
 
-    application = FastAPI(title="ClaimDone API", version="0.0.0")
-    # Added before CORS so Starlette's reverse middleware build leaves the
-    # narrow CORS wrapper outermost, including for early 400/413 responses.
+    application = _OuterCorsFastAPI(
+        web_origin=selected.web_origin,
+        title="ClaimDone API",
+        version="0.0.0",
+    )
     application.add_middleware(
         RequestBodyLimitMiddleware,
         global_limit=selected.global_body_limit,
         intake_limit=selected.intake_body_limit,
     )
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=[selected.web_origin],
-        allow_credentials=False,
-        allow_methods=["DELETE", "GET", "OPTIONS", "POST", "PUT"],
-        allow_headers=["Content-Type", "Last-Event-ID"],
-    )
     if walking_service is not None:
         application.include_router(create_case_router(case_service))
     else:
         assert isinstance(case_service, CaseService)
+        # The older claimdone_api.workflow read-model prototype remains an
+        # unwired test fixture. This is the only production case router.
         application.include_router(create_workflow_router(case_service))
     if walking_service is not None:
         application.include_router(create_walking_skeleton_router(walking_service))

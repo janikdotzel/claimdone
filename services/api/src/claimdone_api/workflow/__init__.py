@@ -1,4 +1,9 @@
-"""Read-only canonical workflow HTTP and event-stream infrastructure."""
+"""Isolated read-model prototype retained only for its focused component tests.
+
+Production composition must use ``claimdone_api.cases.create_workflow_router``
+with the atomic ``CaseService``. Nothing in this package is mounted by
+``claimdone_api.main`` and it must not become a parallel HTTP authority.
+"""
 
 from .errors import (
     WorkflowCaseNotFoundError,
