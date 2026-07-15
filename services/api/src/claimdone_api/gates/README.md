@@ -32,6 +32,32 @@ separate release gate and is intentionally absent from this runtime registry.
   may ask; after three completed rounds it requires manual handoff. A failed G4
   conflict and its one bound G5 question live in `ClarificationSubflow`, outside
   authoritative gate history; a new packet must rerun the gates.
+- G6 accepts the raw closed `ToolInvocation` payload plus trusted runtime state.
+  It authorizes only the packet's exact `fill_until_review` plan step, the exact
+  canonical loopback case/variant URL, a closed browser-action kind, state
+  `filling`, a reserved one-based proposed-action number from 1 through 40,
+  and an inclusive 90-second limit. Approval,
+  submission, receipt, reset, delete, unknown tools, arguments, or paths always
+  add a deterministic block.
+- G7 evaluates the complete portal field payload atomically. The closed wire
+  field set, strict scalar types and values, all canonical provenance, state
+  `filling`/`draft`, and the exact ordered three attachment IDs must match the
+  packet. The complete packet is round-trip revalidated before any expected
+  value is derived; invalid trusted input raises one content-free error.
+  Rejected values are never retained in the result.
+- G8 revalidates the packet and fresh rendered snapshot, binds case, variant and
+  portal version, and requires the rendered timestamp to fall within its
+  trusted request/receive interval of at most five seconds and before the
+  verification timestamp. It then compares every scalar plus raw ordered attachment
+  identity. Scalar normalization is limited to line-ending normalization,
+  outer whitespace and conservative ISO date/time parsing. The model mismatch
+  boolean can add `G8_MODEL_MISMATCH`; it cannot remove deterministic reasons.
+  Forged, stale or foreign identity inputs raise one content-free input error
+  and never produce a verification report.
+
+Integration must preserve the portal session's G7-authorized fields in their
+raw exact form. G8's normalized comparison values and report are independent
+derived evidence and must never replace or rewrite that `PortalSession` state.
 
 Every result object may contain diagnostic values for display, but downstream
 work is authorized only by its immutable `GateDecision.passed` value.
