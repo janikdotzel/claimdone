@@ -283,6 +283,85 @@ class ProviderUsageLedgerRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservabilityMetricsSnapshot:
+    """Content-free aggregate derived from canonical persisted projections."""
+
+    case_id: str
+    through_cursor: int
+    provider_request_count: int
+    provider_request_duration_ms: int
+    retry_count: int
+    model_ids: tuple[ProviderModelId, ...]
+    usage_reported_request_count: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    costed_request_count: int
+    estimated_cost_micros: int | None
+    currency: str | None
+    pricing_snapshot_ids: tuple[str, ...]
+    tool_call_count: int
+    tool_duration_ms: int
+
+    def __post_init__(self) -> None:
+        counters = (
+            self.through_cursor,
+            self.provider_request_count,
+            self.provider_request_duration_ms,
+            self.retry_count,
+            self.usage_reported_request_count,
+            self.input_tokens,
+            self.output_tokens,
+            self.total_tokens,
+            self.costed_request_count,
+            self.tool_call_count,
+            self.tool_duration_ms,
+        )
+        if any(type(value) is not int or value < 0 for value in counters):
+            raise ValueError("Observability counters must be non-negative integers")
+        if self.total_tokens != self.input_tokens + self.output_tokens:
+            raise ValueError("Observability total tokens must be derived")
+        if self.usage_reported_request_count > self.provider_request_count:
+            raise ValueError("Usage count cannot exceed provider request count")
+        if self.costed_request_count > self.provider_request_count:
+            raise ValueError("Cost count cannot exceed provider request count")
+        if self.retry_count > self.provider_request_count:
+            raise ValueError("Retry count cannot exceed provider request count")
+        if bool(self.model_ids) is not (self.provider_request_count > 0):
+            raise ValueError("Model IDs must be present exactly when requests exist")
+        if (
+            self.estimated_cost_micros is None
+            and self.costed_request_count > 0
+        ) or (
+            self.estimated_cost_micros is not None
+            and self.costed_request_count == 0
+        ):
+            raise ValueError("Estimated cost presence must match costed request count")
+        if self.costed_request_count == 0:
+            if self.currency is not None or self.pricing_snapshot_ids:
+                raise ValueError("Uncosted metrics cannot name currency or pricing")
+        elif self.currency != "USD" or not self.pricing_snapshot_ids:
+            raise ValueError("Costed metrics require USD and pricing provenance")
+        if len(set(self.pricing_snapshot_ids)) != len(self.pricing_snapshot_ids) or any(
+            type(snapshot_id) is not str or not snapshot_id
+            for snapshot_id in self.pricing_snapshot_ids
+        ):
+            raise ValueError("Pricing snapshot IDs must be unique non-empty strings")
+        if (
+            self.estimated_cost_micros is not None
+            and (
+                type(self.estimated_cost_micros) is not int
+                or self.estimated_cost_micros < 0
+            )
+        ):
+            raise ValueError("Estimated cost must be a non-negative integer")
+        if len(set(self.model_ids)) != len(self.model_ids) or any(
+            not isinstance(model_id, ProviderModelId) for model_id in self.model_ids
+        ):
+            raise ValueError("Observability model IDs must be unique closed values")
+
+
+@dataclass(frozen=True, slots=True)
 class SequencedWorkflowEvent:
     """Canonical redacted projection with its database-owned replay cursor."""
 

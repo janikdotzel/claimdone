@@ -1,6 +1,7 @@
 """Strict persisted-only SSE replay for canonical case workflow events."""
 
 import asyncio
+import logging
 import math
 import re
 import time
@@ -8,6 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from claimdone_api.audit import ObservabilityLogEvent, emit_redacted_log
 from claimdone_api.contracts import WorkflowEventEnvelope, validate_workflow_event_order
 from claimdone_api.persistence import SequencedWorkflowEvent
 
@@ -19,6 +21,7 @@ MonotonicClock = Callable[[], float]
 
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 _CURSOR_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+_OBSERVABILITY_LOGGER = logging.getLogger("claimdone.observability")
 
 
 class WorkflowCursorError(ValueError):
@@ -181,9 +184,21 @@ class WorkflowEventStreamer:
             return _validate_replay_page(events, case_id=case_id, after=after)
         except CaseNotFoundError:
             raise
-        except WorkflowDataIntegrityError:
+        except WorkflowDataIntegrityError as error:
+            emit_redacted_log(
+                _OBSERVABILITY_LOGGER,
+                ObservabilityLogEvent.WORKFLOW_REPLAY_REJECTED,
+                fields={"caseId": case_id, "cursor": after},
+                error=error,
+            )
             raise
-        except Exception:
+        except Exception as error:
+            emit_redacted_log(
+                _OBSERVABILITY_LOGGER,
+                ObservabilityLogEvent.WORKFLOW_REPLAY_REJECTED,
+                fields={"caseId": case_id, "cursor": after},
+                error=error,
+            )
             raise WorkflowDataIntegrityError(
                 "Persisted workflow replay is invalid"
             ) from None

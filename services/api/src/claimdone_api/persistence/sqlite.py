@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import unicodedata
@@ -22,8 +23,10 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from claimdone_api.ai.core import NarrativeInput, compose_neutral_narrative
 from claimdone_api.audit import (
+    ObservabilityLogEvent,
     build_gate_audit_event,
     build_state_change_event,
+    emit_redacted_log,
     validate_redacted_metadata,
 )
 from claimdone_api.contracts import (
@@ -60,6 +63,7 @@ from claimdone_api.contracts import (
     RetryWorkflowEvent,
     SandboxReceipt,
     StateWorkflowEvent,
+    ToolCallStatus,
     ToolCallWorkflowEvent,
     TranscriptConfirmationView,
     VerificationState,
@@ -99,6 +103,7 @@ from .models import (
     CaseSnapshot,
     IntakeDisclosureCommand,
     JsonObject,
+    ObservabilityMetricsSnapshot,
     OutputContractAttempt,
     ProviderUsageLedgerRecord,
     ProviderWorkflowEmission,
@@ -120,12 +125,14 @@ if TYPE_CHECKING:
 SCHEMA_VERSION = 5
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
+MAX_OBSERVABILITY_EVENT_ROWS = 4_096
 CANONICAL_AUTHORITY_APPLICATION_ID = 0x43444E31
 LEGACY_AUTHORITY_APPLICATION_ID = 0x43444C31
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 _GATE_DECISIONS_ADAPTER: TypeAdapter[tuple[GateDecision, ...]] = TypeAdapter(
     tuple[GateDecision, ...]
 )
+_OBSERVABILITY_LOGGER = logging.getLogger("claimdone.observability")
 
 
 @dataclass(slots=True)
@@ -755,6 +762,185 @@ def _require_integer(value: object, field: str) -> int:
     if not isinstance(value, int):
         raise PersistedDataIntegrityError(f"Persisted {field} must be an integer")
     return value
+
+
+def _bounded_observability_sum(
+    values: tuple[int | None, ...],
+    field: str,
+) -> int:
+    """Sum persisted counters without accepting nulls or oversized aggregates."""
+
+    if any(type(value) is not int or value < 0 for value in values):
+        raise PersistedDataIntegrityError(
+            f"Persisted {field} contains an invalid counter"
+        )
+    total = sum(cast(int, value) for value in values)
+    if total > SQLITE_MAX_INTEGER:
+        raise PersistedDataIntegrityError(
+            f"Persisted {field} exceeds the SQLite integer bound"
+        )
+    return total
+
+
+def _validate_provider_metric_sequence(
+    provider: tuple[ProviderUsageLedgerRecord, ...],
+) -> None:
+    """Accept only cursor-ordered provider histories canonical V1 can write."""
+
+    by_operation: dict[WorkflowOperation, list[ProviderUsageLedgerRecord]] = {
+        operation: [] for operation in WorkflowOperation
+    }
+    previous_cursor = 0
+    terminal_cursor: int | None = None
+    operation_phase = 0
+    for item in provider:
+        if item.source_audit_sequence <= previous_cursor:
+            raise PersistedDataIntegrityError(
+                "Persisted provider cursors are not strictly increasing"
+            )
+        if terminal_cursor is not None:
+            raise PersistedDataIntegrityError(
+                "Persisted provider call follows a terminal failure"
+            )
+        if item.operation is WorkflowOperation.TRANSCRIPTION:
+            if operation_phase != 0:
+                raise PersistedDataIntegrityError(
+                    "Persisted transcription telemetry follows a later operation"
+                )
+        elif item.operation is WorkflowOperation.EXTRACTION:
+            if operation_phase > 1:
+                raise PersistedDataIntegrityError(
+                    "Persisted extraction telemetry is not one contiguous phase"
+                )
+            operation_phase = 1
+        else:
+            operation_phase = 2
+        previous_cursor = item.source_audit_sequence
+        by_operation[item.operation].append(item)
+        if item.status == "failed":
+            terminal_cursor = item.source_audit_sequence
+
+    transcription = tuple(by_operation[WorkflowOperation.TRANSCRIPTION])
+    if transcription:
+        only = transcription[0]
+        if len(transcription) != 1 or (
+            only.call_sequence != 1
+            or only.retry_attempt != 0
+            or only.status not in {"failed", "succeeded"}
+        ):
+            raise PersistedDataIntegrityError(
+                "Persisted transcription telemetry is not one canonical call"
+            )
+
+    extraction = tuple(by_operation[WorkflowOperation.EXTRACTION])
+    if extraction:
+        first = extraction[0]
+        initial_shape = (
+            first.call_sequence == 1
+            and first.retry_attempt == 0
+            and first.status in {"failed", "succeeded"}
+        )
+        if len(extraction) == 1:
+            if not initial_shape:
+                raise PersistedDataIntegrityError(
+                    "Persisted extraction initial call is invalid"
+                )
+        elif len(extraction) == 3:
+            retry, final = extraction[1:]
+            if (
+                not initial_shape
+                or first.status != "succeeded"
+                or retry.status != "retry_scheduled"
+                or retry.call_sequence != first.call_sequence
+                or retry.retry_attempt != 1
+                or retry.model_id is not first.model_id
+                or retry.provider_mode != first.provider_mode
+                or retry.duration_ms != first.duration_ms
+                or retry.failure_category
+                is not ProviderFailureCategory.INVALID_RESPONSE
+                or retry.source_audit_sequence <= first.source_audit_sequence
+                or final.status not in {"failed", "succeeded"}
+                or final.call_sequence != first.call_sequence + 1
+                or final.retry_attempt != 1
+                or final.model_id is not first.model_id
+                or final.provider_mode != first.provider_mode
+                or final.source_audit_sequence <= retry.source_audit_sequence
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted extraction retry chronology is invalid"
+                )
+        else:
+            raise PersistedDataIntegrityError(
+                "Persisted extraction telemetry exceeds one V1 retry"
+            )
+
+    for operation in (
+        WorkflowOperation.COMPUTER_USE,
+        WorkflowOperation.VERIFICATION,
+    ):
+        turns = tuple(by_operation[operation])
+        if not turns:
+            continue
+        model_id = turns[0].model_id
+        provider_mode = turns[0].provider_mode
+        for expected_call_sequence, item in enumerate(turns, start=1):
+            if (
+                item.call_sequence != expected_call_sequence
+                or item.retry_attempt != 0
+                or item.status not in {"failed", "succeeded"}
+                or item.model_id is not model_id
+                or item.provider_mode != provider_mode
+                or (
+                    item.status == "failed"
+                    and expected_call_sequence != len(turns)
+                )
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted multi-turn provider chronology is invalid"
+                )
+
+    if any(
+        item.status == "retry_scheduled"
+        and item.operation is not WorkflowOperation.EXTRACTION
+        for item in provider
+    ):
+        raise PersistedDataIntegrityError(
+            "Persisted provider retry belongs to a non-retryable operation"
+        )
+
+
+def _completed_tool_metric_events(
+    workflow: tuple[SequencedWorkflowEvent, ...],
+) -> tuple[ToolCallWorkflowEvent, ...]:
+    """Return unique terminal tool calls after validating optional start events."""
+
+    started: dict[str, tuple[int, AllowedTool]] = {}
+    terminal: set[str] = set()
+    completed: list[ToolCallWorkflowEvent] = []
+    for item in workflow:
+        event = item.envelope.event
+        if not isinstance(event, ToolCallWorkflowEvent):
+            continue
+        identity = event.invocation_id
+        if event.status is ToolCallStatus.STARTED:
+            if identity in started or identity in terminal:
+                raise PersistedDataIntegrityError(
+                    "Persisted tool invocation start is duplicated"
+                )
+            started[identity] = (event.sequence, event.tool)
+            continue
+        if identity in terminal:
+            raise PersistedDataIntegrityError(
+                "Persisted terminal tool invocation is duplicated"
+            )
+        origin = started.get(identity)
+        if origin is not None and origin != (event.sequence, event.tool):
+            raise PersistedDataIntegrityError(
+                "Persisted terminal tool invocation changed its identity"
+            )
+        terminal.add(identity)
+        completed.append(event)
+    return tuple(completed)
 
 
 def _validate_snapshot(case_id: str, state: CaseState, snapshot: CaseSnapshot) -> None:
@@ -3185,9 +3371,15 @@ class SqliteCaseRepository:
                 raise ValueError("Persisted workflow cursor does not match its row")
             return result
         except (ValidationError, ValueError, TypeError) as error:
+            emit_redacted_log(
+                _OBSERVABILITY_LOGGER,
+                ObservabilityLogEvent.WORKFLOW_REPLAY_REJECTED,
+                fields={"caseId": case_id, "cursor": after},
+                error=error,
+            )
             raise PersistedDataIntegrityError(
                 "Persisted workflow event projection is invalid"
-            ) from error
+            ) from None
 
     def _read_workflow_event_rows(
         self,
@@ -3232,9 +3424,188 @@ class SqliteCaseRepository:
         try:
             return tuple(self._row_to_provider_usage(row) for row in rows)
         except (PersistedDataIntegrityError, ValueError, TypeError) as error:
+            emit_redacted_log(
+                _OBSERVABILITY_LOGGER,
+                ObservabilityLogEvent.PROVIDER_USAGE_REJECTED,
+                fields={"caseId": case_id, "cursor": after},
+                error=error,
+            )
             raise PersistedDataIntegrityError(
                 "Persisted provider usage telemetry is invalid"
-            ) from error
+            ) from None
+
+    def get_observability_metrics(
+        self,
+        case_id: str,
+    ) -> ObservabilityMetricsSnapshot:
+        """Aggregate only canonical persisted events and provider ledger rows.
+
+        This is a read projection, never a second telemetry writer.  Provider
+        calls exclude the synthetic ``retry_scheduled`` row so request duration
+        is not double-counted.  Tool metrics use terminal tool-call events only.
+        """
+
+        self._require_canonical_authority_mode()
+        try:
+            workflow_rows, provider_rows = self._read_observability_rows(case_id)
+            if (
+                len(workflow_rows) > MAX_OBSERVABILITY_EVENT_ROWS
+                or len(provider_rows) > MAX_OBSERVABILITY_EVENT_ROWS
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted observability history exceeds the V1 bound"
+                )
+            workflow = tuple(
+                SequencedWorkflowEvent(
+                    sequence=_require_integer(
+                        row["source_audit_sequence"],
+                        "workflow sequence",
+                    ),
+                    envelope=WorkflowEventEnvelope.model_validate_json(
+                        _require_string(row["event_json"], "workflow event")
+                    ),
+                )
+                for row in workflow_rows
+            )
+            validate_workflow_event_order(tuple(item.envelope for item in workflow))
+            if any(
+                item.sequence != item.envelope.cursor
+                or item.envelope.case_id != case_id
+                for item in workflow
+            ) or len({item.envelope.event_id for item in workflow}) != len(workflow):
+                raise PersistedDataIntegrityError(
+                    "Persisted workflow identity does not match its row"
+                )
+
+            provider = tuple(self._row_to_provider_usage(row) for row in provider_rows)
+            _validate_provider_metric_sequence(provider)
+            provider_by_sequence = {
+                item.source_audit_sequence: item for item in provider
+            }
+            if len(provider_by_sequence) != len(provider):
+                raise PersistedDataIntegrityError(
+                    "Persisted provider usage contains duplicate cursors"
+                )
+            for item in workflow:
+                _validate_provider_usage_binding(
+                    item.envelope,
+                    provider_by_sequence.get(item.sequence),
+                )
+            workflow_sequences = {item.sequence for item in workflow}
+            if any(
+                sequence not in workflow_sequences
+                for sequence in provider_by_sequence
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted provider usage has no workflow event"
+                )
+
+            requests = tuple(
+                item for item in provider if item.status in {"failed", "succeeded"}
+            )
+            retries = tuple(
+                item for item in provider if item.status == "retry_scheduled"
+            )
+            usage_reported = tuple(
+                item for item in requests if item.total_tokens is not None
+            )
+            costed = tuple(
+                item for item in requests if item.estimated_cost_micros is not None
+            )
+            terminal_tools = _completed_tool_metric_events(workflow)
+            model_ids = tuple(dict.fromkeys(item.model_id for item in requests))
+            estimated_cost = (
+                None
+                if not costed
+                else _bounded_observability_sum(
+                    tuple(item.estimated_cost_micros for item in costed),
+                    "estimated cost",
+                )
+            )
+            pricing_snapshot_ids = tuple(
+                dict.fromkeys(
+                    cast(str, item.pricing_snapshot_id) for item in costed
+                )
+            )
+            return ObservabilityMetricsSnapshot(
+                case_id=case_id,
+                through_cursor=workflow[-1].sequence if workflow else 0,
+                provider_request_count=len(requests),
+                provider_request_duration_ms=_bounded_observability_sum(
+                    tuple(item.duration_ms for item in requests),
+                    "provider request duration",
+                ),
+                retry_count=len(retries),
+                model_ids=model_ids,
+                usage_reported_request_count=len(usage_reported),
+                input_tokens=_bounded_observability_sum(
+                    tuple(item.input_tokens for item in usage_reported),
+                    "input tokens",
+                ),
+                output_tokens=_bounded_observability_sum(
+                    tuple(item.output_tokens for item in usage_reported),
+                    "output tokens",
+                ),
+                total_tokens=_bounded_observability_sum(
+                    tuple(item.total_tokens for item in usage_reported),
+                    "total tokens",
+                ),
+                costed_request_count=len(costed),
+                estimated_cost_micros=estimated_cost,
+                currency="USD" if costed else None,
+                pricing_snapshot_ids=pricing_snapshot_ids,
+                tool_call_count=len(terminal_tools),
+                tool_duration_ms=_bounded_observability_sum(
+                    tuple(event.duration_ms for event in terminal_tools),
+                    "tool duration",
+                ),
+            )
+        except CaseRecordNotFoundError:
+            raise
+        except Exception as error:
+            emit_redacted_log(
+                _OBSERVABILITY_LOGGER,
+                ObservabilityLogEvent.OBSERVABILITY_METRICS_REJECTED,
+                fields={"caseId": case_id},
+                error=error,
+            )
+            raise PersistedDataIntegrityError(
+                "Persisted observability metrics are invalid"
+            ) from None
+
+    def _read_observability_rows(
+        self,
+        case_id: str,
+    ) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+        """Read both ledgers from one WAL snapshot before deriving metrics."""
+
+        with self._read_connection() as connection:
+            if connection.execute(
+                "SELECT 1 FROM cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone() is None:
+                raise CaseRecordNotFoundError(case_id)
+            workflow_rows = connection.execute(
+                """
+                SELECT source_audit_sequence, event_json
+                FROM workflow_events
+                WHERE case_id = ?
+                ORDER BY source_audit_sequence ASC
+                LIMIT ?
+                """,
+                (case_id, MAX_OBSERVABILITY_EVENT_ROWS + 1),
+            ).fetchall()
+            provider_rows = connection.execute(
+                """
+                SELECT *
+                FROM provider_usage_ledger
+                WHERE case_id = ?
+                ORDER BY source_audit_sequence ASC
+                LIMIT ?
+                """,
+                (case_id, MAX_OBSERVABILITY_EVENT_ROWS + 1),
+            ).fetchall()
+        return workflow_rows, provider_rows
 
     def confirm_transcript_and_transition(
         self,
@@ -7675,7 +8046,9 @@ class SqliteCaseRepository:
             record.currency is not None and record.currency != "USD"
         ):
             raise PersistedDataIntegrityError("Persisted provider cost metadata is invalid")
-        if record.pricing_snapshot_id == "":
+        if record.pricing_snapshot_id is not None and _IDENTIFIER.fullmatch(
+            record.pricing_snapshot_id
+        ) is None:
             raise PersistedDataIntegrityError("Persisted provider pricing snapshot is invalid")
 
         if record.status == "succeeded":
