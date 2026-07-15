@@ -58,6 +58,10 @@ def test_schema_exports_every_required_public_root() -> None:
         "PlanStep",
         "PortalDraftFields",
         "PortalReviewFields",
+        "PortalRunRenderFaultInjection",
+        "PortalRunRenderFaultRepair",
+        "PortalRunRelease",
+        "PortalRunSetup",
         "PortalSessionView",
         "ProvenanceRef",
         "ReleaseDecision",
@@ -137,6 +141,64 @@ def test_portal_attachment_schemas_require_unique_ids() -> None:
     assert definitions["PortalReviewFields"]["properties"]["attachments"][
         "uniqueItems"
     ] is True
+
+
+def test_portal_run_setup_schema_is_closed_and_requires_exact_ordered_attachments() -> None:
+    definitions = committed_schema()["$defs"]
+    setup = definitions["PortalRunSetup"]
+    expected = definitions["PortalRunExpectedFields"]
+    attachments = expected["properties"]["attachments"]
+    typescript = TYPESCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert setup["additionalProperties"] is False
+    assert set(setup["required"]) == {
+        "caseId",
+        "contractVersion",
+        "expectedFields",
+        "runId",
+        "variant",
+    }
+    assert expected["additionalProperties"] is False
+    assert len(expected["required"]) == 9
+    assert expected["properties"]["incidentDate"]["pattern"] == r"^\d{4}-\d{2}-\d{2}$"
+    assert expected["properties"]["incidentTime"]["pattern"] == (
+        r"^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
+    )
+    assert expected["properties"]["claimantName"]["minLength"] == 1
+    assert expected["properties"]["narrative"]["minLength"] == 1
+    assert attachments["minItems"] == 3
+    assert attachments["maxItems"] == 3
+    assert attachments["uniqueItems"] is True
+    assert attachments["items"]["pattern"].startswith(
+        "^(?:model-[a-f0-9]{32}"
+    )
+    assert "export interface PortalRunSetup" in typescript
+    assert "readonly attachments: readonly [string, string, string];" in typescript
+
+    scalar_fields = {
+        "claimant_name",
+        "counterparty_known",
+        "incident_date",
+        "incident_time",
+        "location",
+        "narrative",
+        "policy_reference",
+        "vehicle_registration",
+    }
+    for name in ("PortalRunRenderFaultInjection", "PortalRunRenderFaultRepair"):
+        command = definitions[name]
+        assert command["additionalProperties"] is False
+        assert set(command["required"]) == {
+            "caseId",
+            "contractVersion",
+            "expectedVersion",
+            "field",
+            "runId",
+            "variant",
+        }
+        assert set(command["properties"]["field"]["enum"]) == scalar_fields
+        assert "attachments" not in command["properties"]["field"]["enum"]
+        assert command["properties"]["expectedVersion"]["minimum"] == 1
 
 
 def test_generated_transition_map_covers_every_case_state() -> None:

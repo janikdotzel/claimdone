@@ -1,14 +1,24 @@
 """Typed local-sandbox portal views and redacted receipt contracts."""
 
+import re
+from datetime import date, time
 from typing import Annotated, Literal, Self
 
-from pydantic import ConfigDict, Field, StrictStr, model_validator
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictStr,
+    model_validator,
+)
 
 from .base import (
     AlwaysFalse,
     AlwaysTrue,
     ContractModel,
     ContractVersion,
+    ExactIdentifier,
     ExactlyEight,
     ExactlyThree,
     ExactlyThreeAttachmentIdentifiers,
@@ -27,6 +37,66 @@ DraftDateText = Annotated[StrictStr, Field(max_length=10)]
 DraftTimeText = Annotated[StrictStr, Field(max_length=21)]
 DraftShortText = Annotated[StrictStr, Field(max_length=512)]
 DraftNarrativeText = Annotated[StrictStr, Field(max_length=4_000)]
+PortalRunDateText = Annotated[
+    StrictStr,
+    Field(min_length=10, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+]
+PortalRunTimeText = Annotated[
+    StrictStr,
+    Field(
+        min_length=8,
+        max_length=15,
+        pattern=r"^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$",
+    ),
+]
+PortalRunShortText = Annotated[StrictStr, Field(min_length=1, max_length=512)]
+PortalRunNarrativeText = Annotated[StrictStr, Field(min_length=1, max_length=4_000)]
+_PORTAL_RUN_ATTACHMENT_PATTERN = re.compile(
+    r"^(?:model-[a-f0-9]{32}\.(?:jpg|png)|"
+    r"asset-demo-[a-z0-9]+(?:-[a-z0-9]+)*)$"
+)
+
+
+def _require_portal_run_attachment_identifier(value: object) -> object:
+    if type(value) is not str or _PORTAL_RUN_ATTACHMENT_PATTERN.fullmatch(value) is None:
+        raise ValueError("portal run attachment identifier is not server-approved")
+    return value
+
+
+PortalRunAttachmentIdentifier = Annotated[
+    StrictStr,
+    Field(
+        min_length=1,
+        max_length=128,
+        pattern=_PORTAL_RUN_ATTACHMENT_PATTERN.pattern,
+    ),
+    BeforeValidator(_require_portal_run_attachment_identifier),
+]
+
+
+def _require_unique_portal_run_attachments(value: tuple[str, ...]) -> tuple[str, ...]:
+    if len(set(value)) != len(value):
+        raise ValueError("portal run attachment identifiers must be unique")
+    return value
+
+
+PortalRunAttachmentIdentifiers = Annotated[
+    tuple[PortalRunAttachmentIdentifier, ...],
+    Field(min_length=3, max_length=3, json_schema_extra={"uniqueItems": True}),
+    AfterValidator(_require_unique_portal_run_attachments),
+]
+PortalScalarField = Literal[
+    "incident_date",
+    "incident_time",
+    "location",
+    "claimant_name",
+    "policy_reference",
+    "vehicle_registration",
+    "counterparty_known",
+    "narrative",
+]
+_PORTAL_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_PORTAL_TIME_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$")
 
 
 class PortalWireModel(ContractModel):
@@ -61,6 +131,85 @@ class PortalReviewFields(ContractModel):
     counterparty_known: CounterpartyKnown
     narrative: NonEmptyText
     attachments: ExactlyThreeAttachmentIdentifiers
+
+
+class PortalRunExpectedFields(PortalWireModel):
+    """Complete, byte-preserving values bound to one local portal run."""
+
+    incident_date: PortalRunDateText
+    incident_time: PortalRunTimeText
+    location: PortalRunShortText
+    claimant_name: PortalRunShortText
+    policy_reference: PortalRunShortText
+    vehicle_registration: PortalRunShortText
+    counterparty_known: CounterpartyKnown
+    narrative: PortalRunNarrativeText
+    attachments: PortalRunAttachmentIdentifiers
+
+    @model_validator(mode="after")
+    def require_review_complete_values(self) -> Self:
+        values = (
+            self.incident_date,
+            self.incident_time,
+            self.location,
+            self.claimant_name,
+            self.policy_reference,
+            self.vehicle_registration,
+            self.narrative,
+        )
+        if any(not value.strip() for value in values):
+            raise ValueError("expected portal scalar values must be complete")
+        if _PORTAL_DATE_PATTERN.fullmatch(self.incident_date) is None:
+            raise ValueError("expected portal incidentDate must use YYYY-MM-DD")
+        if _PORTAL_TIME_PATTERN.fullmatch(self.incident_time) is None:
+            raise ValueError("expected portal incidentTime must include seconds")
+        try:
+            date.fromisoformat(self.incident_date)
+            time.fromisoformat(self.incident_time)
+        except ValueError as error:
+            raise ValueError("expected portal date and time must be valid") from error
+        return self
+
+
+class PortalRunSetup(PortalWireModel):
+    """Server-only setup command for one packet-bound local portal run."""
+
+    contract_version: ContractVersion
+    run_id: ExactIdentifier
+    case_id: ExactIdentifier
+    variant: PortalVariant
+    expected_fields: PortalRunExpectedFields
+
+
+class PortalRunRelease(PortalWireModel):
+    """Identity binding used to release or abort one local portal run."""
+
+    contract_version: ContractVersion
+    run_id: ExactIdentifier
+    case_id: ExactIdentifier
+    variant: PortalVariant
+
+
+class PortalRunRenderFaultInjection(PortalWireModel):
+    """Arm one non-sensitive scalar render mismatch for local verification."""
+
+    contract_version: ContractVersion
+    run_id: ExactIdentifier
+    case_id: ExactIdentifier
+    variant: PortalVariant
+    expected_version: Annotated[StrictInteger, Field(ge=1)]
+    field: PortalScalarField
+
+
+class PortalRunRenderFaultRepair(PortalWireModel):
+    """Close the one render mismatch bound to a local verification run."""
+
+    contract_version: ContractVersion
+    run_id: ExactIdentifier
+    case_id: ExactIdentifier
+    variant: PortalVariant
+    expected_version: Annotated[StrictInteger, Field(ge=1)]
+    field: PortalScalarField
 
 
 class PortalSessionView(ContractModel):

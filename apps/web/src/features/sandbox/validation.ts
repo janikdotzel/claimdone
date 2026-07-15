@@ -2,11 +2,17 @@ import {
   COUNTERPARTY_KNOWN_VALUES,
   PORTAL_FIELD_NAMES,
   PORTAL_FIXTURES,
+  PORTAL_SCALAR_FIELDS,
   PORTAL_VARIANTS,
   type PortalDraftFields,
   type PortalFieldIssue,
   type PortalFieldName,
   type PortalFixture,
+  type PortalRunExpectedFields,
+  type PortalRunRenderFaultInjection,
+  type PortalRunRenderFaultRepair,
+  type PortalRunRelease,
+  type PortalRunSetup,
   type PortalState,
   type PortalVariant,
 } from "./contracts";
@@ -47,6 +53,12 @@ export class PortalInputError extends Error {
 export function assertCaseId(caseId: string): void {
   if (!CASE_ID_PATTERN.test(caseId)) {
     throw new PortalInputError("The sandbox case ID is invalid.");
+  }
+}
+
+export function assertPortalRunId(runId: string): void {
+  if (!CASE_ID_PATTERN.test(runId)) {
+    throw new PortalInputError("The portal run ID is invalid.");
   }
 }
 
@@ -123,6 +135,91 @@ export function parsePortalFields(value: unknown): PortalDraftFields {
   };
 }
 
+export function parsePortalRunExpectedFields(
+  value: unknown,
+): PortalRunExpectedFields {
+  const fields = parsePortalFields(value);
+  const issues = validateReviewFields(fields);
+  if (
+    issues.length ||
+    fields.counterpartyKnown === "" ||
+    fields.attachments.length !== 3
+  ) {
+    throw new PortalInputError("Expected portal fields must be complete.", issues);
+  }
+  return {
+    ...fields,
+    attachments: [
+      fields.attachments[0] as string,
+      fields.attachments[1] as string,
+      fields.attachments[2] as string,
+    ],
+    counterpartyKnown: fields.counterpartyKnown,
+  };
+}
+
+export function parsePortalRunSetup(value: unknown): PortalRunSetup {
+  const body = requireClosedObject(value, [
+    "caseId",
+    "contractVersion",
+    "expectedFields",
+    "runId",
+    "variant",
+  ]);
+  requireContractVersion(body.contractVersion);
+  if (typeof body.caseId !== "string") {
+    throw new PortalInputError("caseId must be a string.");
+  }
+  if (typeof body.runId !== "string") {
+    throw new PortalInputError("runId must be a string.");
+  }
+  assertCaseId(body.caseId);
+  assertPortalRunId(body.runId);
+  return {
+    caseId: body.caseId,
+    contractVersion: "4.0.0",
+    expectedFields: parsePortalRunExpectedFields(body.expectedFields),
+    runId: body.runId,
+    variant: parsePortalVariant(body.variant),
+  };
+}
+
+export function parsePortalRunRelease(value: unknown): PortalRunRelease {
+  const body = requireClosedObject(value, [
+    "caseId",
+    "contractVersion",
+    "runId",
+    "variant",
+  ]);
+  requireContractVersion(body.contractVersion);
+  if (typeof body.caseId !== "string") {
+    throw new PortalInputError("caseId must be a string.");
+  }
+  if (typeof body.runId !== "string") {
+    throw new PortalInputError("runId must be a string.");
+  }
+  assertCaseId(body.caseId);
+  assertPortalRunId(body.runId);
+  return {
+    caseId: body.caseId,
+    contractVersion: "4.0.0",
+    runId: body.runId,
+    variant: parsePortalVariant(body.variant),
+  };
+}
+
+export function parsePortalRunRenderFaultInjection(
+  value: unknown,
+): PortalRunRenderFaultInjection {
+  return parsePortalRunRenderFaultCommand(value);
+}
+
+export function parsePortalRunRenderFaultRepair(
+  value: unknown,
+): PortalRunRenderFaultRepair {
+  return parsePortalRunRenderFaultCommand(value);
+}
+
 export function validateReviewFields(fields: PortalDraftFields): readonly PortalFieldIssue[] {
   const issues: PortalFieldIssue[] = [];
   requireText(issues, "incidentDate", fields.incidentDate, "Incident date is required.");
@@ -189,7 +286,17 @@ function requireText(
 function isValidDate(value: string): boolean {
   if (!DATE_PATTERN.test(value)) return false;
   const [year, month, day] = value.split("-").map(Number);
-  const candidate = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 0));
+  if (
+    year === undefined ||
+    month === undefined ||
+    day === undefined ||
+    year < 1
+  ) {
+    return false;
+  }
+  const candidate = new Date(0);
+  candidate.setUTCHours(0, 0, 0, 0);
+  candidate.setUTCFullYear(year, month - 1, day);
   return (
     candidate.getUTCFullYear() === year &&
     candidate.getUTCMonth() + 1 === month &&
@@ -216,6 +323,66 @@ function isCounterpartyKnown(
   value: unknown,
 ): value is PortalDraftFields["counterpartyKnown"] {
   return value === "" || COUNTERPARTY_KNOWN_VALUES.some((candidate) => candidate === value);
+}
+
+function requireContractVersion(value: unknown): void {
+  if (value !== "4.0.0") {
+    throw new PortalInputError("The portal contract version is unsupported.");
+  }
+}
+
+function parsePortalRunRenderFaultCommand(
+  value: unknown,
+): PortalRunRenderFaultInjection {
+  const body = requireClosedObject(value, [
+    "caseId",
+    "contractVersion",
+    "expectedVersion",
+    "field",
+    "runId",
+    "variant",
+  ]);
+  requireContractVersion(body.contractVersion);
+  if (typeof body.caseId !== "string") {
+    throw new PortalInputError("caseId must be a string.");
+  }
+  if (typeof body.runId !== "string") {
+    throw new PortalInputError("runId must be a string.");
+  }
+  if (
+    typeof body.field !== "string" ||
+    !(PORTAL_SCALAR_FIELDS as readonly string[]).includes(body.field)
+  ) {
+    throw new PortalInputError("Render fault field must be one known scalar field.");
+  }
+  assertCaseId(body.caseId);
+  assertPortalRunId(body.runId);
+  return {
+    caseId: body.caseId,
+    contractVersion: "4.0.0",
+    expectedVersion: parseExpectedVersion(body.expectedVersion),
+    field: body.field as PortalRunRenderFaultInjection["field"],
+    runId: body.runId,
+    variant: parsePortalVariant(body.variant),
+  };
+}
+
+function requireClosedObject(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new PortalInputError("Request body must be an object.");
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new PortalInputError("Request body contains unknown or missing fields.");
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

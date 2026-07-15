@@ -37,9 +37,9 @@ Identifier: TypeAlias = Annotated[
 ]
 
 
-def _require_exact_attachment_identifier(value: object) -> object:
+def _require_exact_identifier(value: object) -> object:
     if type(value) is not str or _IDENTIFIER_PATTERN.fullmatch(value) is None:
-        raise ValueError("attachment identifier must already use the exact wire format")
+        raise ValueError("identifier must already use the exact wire format")
     return value
 
 
@@ -49,10 +49,11 @@ def _require_unique_attachment_identifiers(value: tuple[str, ...]) -> tuple[str,
     return value
 
 
-ExactAttachmentIdentifier: TypeAlias = Annotated[
+ExactIdentifier: TypeAlias = Annotated[
     Identifier,
-    BeforeValidator(_require_exact_attachment_identifier),
+    BeforeValidator(_require_exact_identifier),
 ]
+ExactAttachmentIdentifier: TypeAlias = ExactIdentifier
 ExactlyThreeAttachmentIdentifiers: TypeAlias = Annotated[
     tuple[ExactAttachmentIdentifier, ...],
     Field(min_length=3, max_length=3, json_schema_extra={"uniqueItems": True}),

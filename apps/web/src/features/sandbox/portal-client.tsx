@@ -127,6 +127,10 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
     setBusy(true);
     clearFeedback();
     try {
+      if (portalDraftFieldsEqual(view.fields, fields)) {
+        setMessage("Draft is already up to date on the sandbox server.");
+        return;
+      }
       const saved = await putDraft(caseId, variant, view.version, fields);
       setView(saved);
       setFields(clonePortalFields(saved.fields));
@@ -143,14 +147,11 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
     setBusy(true);
     clearFeedback();
     try {
-      const saved = await putDraft(caseId, variant, view.version, fields);
-      const reviewed = await requestPortal<PortalView>(
-        portalUrl(caseId, variant, "/review"),
-        {
-          body: JSON.stringify({ expectedVersion: saved.version }),
-          headers: { "Content-Type": "application/json" },
-          method: "POST",
-        },
+      const reviewed = await advancePortalDraftToReview(
+        caseId,
+        variant,
+        view,
+        fields,
       );
       setView(reviewed);
       setFields(clonePortalFields(reviewed.fields));
@@ -360,6 +361,57 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
         <span>Last updated {formatTimestamp(view.updatedAt)}</span>
       </footer>
     </PortalFrame>
+  );
+}
+
+export type SavePortalDraft = (
+  caseId: string,
+  variant: PortalVariant,
+  expectedVersion: number,
+  fields: PortalDraftFields,
+) => Promise<PortalView>;
+
+export type StartPortalReview = (
+  caseId: string,
+  variant: PortalVariant,
+  expectedVersion: number,
+) => Promise<PortalView>;
+
+/**
+ * Preserve exact-once active-run writes while retaining normal dirty-draft behavior.
+ * A byte-identical loaded view is already authoritative and can advance directly.
+ */
+export async function advancePortalDraftToReview(
+  caseId: string,
+  variant: PortalVariant,
+  view: PortalView,
+  fields: PortalDraftFields,
+  save: SavePortalDraft = putDraft,
+  review: StartPortalReview = postReview,
+): Promise<PortalView> {
+  const saved = portalDraftFieldsEqual(view.fields, fields)
+    ? view
+    : await save(caseId, variant, view.version, fields);
+  return review(caseId, variant, saved.version);
+}
+
+export function portalDraftFieldsEqual(
+  left: PortalDraftFields,
+  right: PortalDraftFields,
+): boolean {
+  return (
+    left.incidentDate === right.incidentDate &&
+    left.incidentTime === right.incidentTime &&
+    left.location === right.location &&
+    left.claimantName === right.claimantName &&
+    left.policyReference === right.policyReference &&
+    left.vehicleRegistration === right.vehicleRegistration &&
+    left.counterpartyKnown === right.counterpartyKnown &&
+    left.narrative === right.narrative &&
+    left.attachments.length === right.attachments.length &&
+    left.attachments.every(
+      (attachmentId, index) => attachmentId === right.attachments[index],
+    )
   );
 }
 
@@ -617,7 +669,20 @@ async function requestPortal<T>(input: string, init?: RequestInit): Promise<T> {
       error?.fieldErrors ?? [],
     );
   }
+
   return body as T;
+}
+
+async function postReview(
+  caseId: string,
+  variant: PortalVariant,
+  expectedVersion: number,
+): Promise<PortalView> {
+  return requestPortal<PortalView>(portalUrl(caseId, variant, "/review"), {
+    body: JSON.stringify({ expectedVersion }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
 }
 
 function errorMessage(error: unknown): string {

@@ -347,6 +347,51 @@ export interface PortalReviewFields {
   readonly vehicleRegistration: string;
 }
 
+export interface PortalRunExpectedFields {
+  readonly attachments: readonly [string, string, string];
+  readonly claimantName: string;
+  readonly counterpartyKnown: CounterpartyKnown;
+  readonly incidentDate: string;
+  readonly incidentTime: string;
+  readonly location: string;
+  readonly narrative: string;
+  readonly policyReference: string;
+  readonly vehicleRegistration: string;
+}
+
+export interface PortalRunRelease {
+  readonly caseId: string;
+  readonly contractVersion: "4.0.0";
+  readonly runId: string;
+  readonly variant: PortalVariant;
+}
+
+export interface PortalRunRenderFaultInjection {
+  readonly caseId: string;
+  readonly contractVersion: "4.0.0";
+  readonly expectedVersion: number;
+  readonly field: "incident_date" | "incident_time" | "location" | "claimant_name" | "policy_reference" | "vehicle_registration" | "counterparty_known" | "narrative";
+  readonly runId: string;
+  readonly variant: PortalVariant;
+}
+
+export interface PortalRunRenderFaultRepair {
+  readonly caseId: string;
+  readonly contractVersion: "4.0.0";
+  readonly expectedVersion: number;
+  readonly field: "incident_date" | "incident_time" | "location" | "claimant_name" | "policy_reference" | "vehicle_registration" | "counterparty_known" | "narrative";
+  readonly runId: string;
+  readonly variant: PortalVariant;
+}
+
+export interface PortalRunSetup {
+  readonly caseId: string;
+  readonly contractVersion: "4.0.0";
+  readonly expectedFields: PortalRunExpectedFields;
+  readonly runId: string;
+  readonly variant: PortalVariant;
+}
+
 export interface PortalSessionView {
   readonly auditCount?: number | null;
   readonly caseId: string;
@@ -633,6 +678,10 @@ export const CONTRACT_ROOT_MODELS = [
   "PlanStep",
   "PortalDraftFields",
   "PortalReviewFields",
+  "PortalRunRelease",
+  "PortalRunRenderFaultInjection",
+  "PortalRunRenderFaultRepair",
+  "PortalRunSetup",
   "PortalSessionView",
   "ProvenanceRef",
   "ReleaseDecision",

@@ -4,6 +4,9 @@ import type {
   ClarificationAnswerRequest,
   GateDecision,
   PortalSessionView,
+  PortalRunRenderFaultInjection,
+  PortalRunRenderFaultRepair,
+  PortalRunSetup,
   ReleaseDecision,
   ToolCallWorkflowEvent,
   ToolInvocation,
@@ -58,12 +61,47 @@ const workflowSnapshot: WorkflowSnapshot = {
   receipt: null,
 };
 const portalSession = {} as PortalSessionView;
+const portalRunSetup: PortalRunSetup = {
+  contractVersion: "4.0.0",
+  runId: "run-portal-1",
+  caseId: "case-1",
+  variant: "A",
+  expectedFields: {
+    attachments: ["one", "two", "three"],
+    claimantName: "Demo Claimant",
+    counterpartyKnown: "yes",
+    incidentDate: "2026-07-14",
+    incidentTime: "14:30:00",
+    location: "Berlin",
+    narrative: "Synthetic staged incident.",
+    policyReference: "DEMO-42",
+    vehicleRegistration: "DEMO-CD-1",
+  },
+};
+const renderFaultInjection: PortalRunRenderFaultInjection = {
+  caseId: "case-1",
+  contractVersion: "4.0.0",
+  expectedVersion: 3,
+  field: "claimant_name",
+  runId: "run-portal-1",
+  variant: "A",
+};
+const renderFaultRepair: PortalRunRenderFaultRepair = renderFaultInjection;
 const startedTool: ToolCallWorkflowEvent = {
   invocationId: "invocation-started",
   kind: "tool_call",
   sequence: 1,
   status: "started",
   tool: "inspect_form",
+};
+
+const shortPortalRunSetup: PortalRunSetup = {
+  ...portalRunSetup,
+  expectedFields: {
+    ...portalRunSetup.expectedFields,
+    // @ts-expect-error Packet-bound portal setup requires exactly three IDs.
+    attachments: ["one", "two"],
+  },
 };
 const terminalTool: ToolCallWorkflowEvent = {
   durationMs: 10,
@@ -156,6 +194,10 @@ void caseView;
 void clarificationAnswer;
 void workflowSnapshot;
 void portalSession;
+void portalRunSetup;
+void renderFaultInjection;
+void renderFaultRepair;
+void shortPortalRunSetup;
 void startedTool;
 void terminalTool;
 void twoAttachments;

@@ -2140,6 +2140,275 @@
       "title": "PortalReviewFields",
       "type": "object"
     },
+    "PortalRunExpectedFields": {
+      "additionalProperties": false,
+      "description": "Complete, byte-preserving values bound to one local portal run.",
+      "properties": {
+        "attachments": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^(?:model-[a-f0-9]{32}\\.(?:jpg|png)|asset-demo-[a-z0-9]+(?:-[a-z0-9]+)*)$",
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Attachments",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "claimantName": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Claimantname",
+          "type": "string"
+        },
+        "counterpartyKnown": {
+          "$ref": "#/$defs/CounterpartyKnown"
+        },
+        "incidentDate": {
+          "maxLength": 10,
+          "minLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "title": "Incidentdate",
+          "type": "string"
+        },
+        "incidentTime": {
+          "maxLength": 15,
+          "minLength": 8,
+          "pattern": "^\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?$",
+          "title": "Incidenttime",
+          "type": "string"
+        },
+        "location": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Location",
+          "type": "string"
+        },
+        "narrative": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Narrative",
+          "type": "string"
+        },
+        "policyReference": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Policyreference",
+          "type": "string"
+        },
+        "vehicleRegistration": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Vehicleregistration",
+          "type": "string"
+        }
+      },
+      "required": [
+        "incidentDate",
+        "incidentTime",
+        "location",
+        "claimantName",
+        "policyReference",
+        "vehicleRegistration",
+        "counterpartyKnown",
+        "narrative",
+        "attachments"
+      ],
+      "title": "PortalRunExpectedFields",
+      "type": "object"
+    },
+    "PortalRunRelease": {
+      "additionalProperties": false,
+      "description": "Identity binding used to release or abort one local portal run.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "4.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Runid",
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/PortalVariant"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "runId",
+        "caseId",
+        "variant"
+      ],
+      "title": "PortalRunRelease",
+      "type": "object"
+    },
+    "PortalRunRenderFaultInjection": {
+      "additionalProperties": false,
+      "description": "Arm one non-sensitive scalar render mismatch for local verification.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "4.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "expectedVersion": {
+          "minimum": 1,
+          "title": "Expectedversion",
+          "type": "integer"
+        },
+        "field": {
+          "enum": [
+            "incident_date",
+            "incident_time",
+            "location",
+            "claimant_name",
+            "policy_reference",
+            "vehicle_registration",
+            "counterparty_known",
+            "narrative"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Runid",
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/PortalVariant"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "runId",
+        "caseId",
+        "variant",
+        "expectedVersion",
+        "field"
+      ],
+      "title": "PortalRunRenderFaultInjection",
+      "type": "object"
+    },
+    "PortalRunRenderFaultRepair": {
+      "additionalProperties": false,
+      "description": "Close the one render mismatch bound to a local verification run.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "4.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "expectedVersion": {
+          "minimum": 1,
+          "title": "Expectedversion",
+          "type": "integer"
+        },
+        "field": {
+          "enum": [
+            "incident_date",
+            "incident_time",
+            "location",
+            "claimant_name",
+            "policy_reference",
+            "vehicle_registration",
+            "counterparty_known",
+            "narrative"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Runid",
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/PortalVariant"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "runId",
+        "caseId",
+        "variant",
+        "expectedVersion",
+        "field"
+      ],
+      "title": "PortalRunRenderFaultRepair",
+      "type": "object"
+    },
+    "PortalRunSetup": {
+      "additionalProperties": false,
+      "description": "Server-only setup command for one packet-bound local portal run.",
+      "properties": {
+        "caseId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "contractVersion": {
+          "const": "4.0.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "expectedFields": {
+          "$ref": "#/$defs/PortalRunExpectedFields"
+        },
+        "runId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Runid",
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/PortalVariant"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "runId",
+        "caseId",
+        "variant",
+        "expectedFields"
+      ],
+      "title": "PortalRunSetup",
+      "type": "object"
+    },
     "PortalSessionView": {
       "additionalProperties": false,
       "description": "Versioned portal state used for optimistic-concurrency checks.",
@@ -5600,6 +5869,18 @@
     },
     "PortalReviewFields": {
       "$ref": "#/$defs/PortalReviewFields"
+    },
+    "PortalRunRelease": {
+      "$ref": "#/$defs/PortalRunRelease"
+    },
+    "PortalRunRenderFaultInjection": {
+      "$ref": "#/$defs/PortalRunRenderFaultInjection"
+    },
+    "PortalRunRenderFaultRepair": {
+      "$ref": "#/$defs/PortalRunRenderFaultRepair"
+    },
+    "PortalRunSetup": {
+      "$ref": "#/$defs/PortalRunSetup"
     },
     "PortalSessionView": {
       "$ref": "#/$defs/PortalSessionView"

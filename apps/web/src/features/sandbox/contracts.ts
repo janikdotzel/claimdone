@@ -2,15 +2,29 @@ import type {
   CounterpartyKnown,
   EvalInput,
   PortalDraftFields as CanonicalPortalDraftFields,
+  PortalRunExpectedFields,
+  PortalRunRenderFaultInjection,
+  PortalRunRenderFaultRepair,
+  PortalRunRelease,
+  PortalRunSetup,
   PortalSessionView,
   PortalState,
   RequiredClaimField,
   RenderedPortalSnapshot,
 } from "../../../../../contracts/generated/claimdone";
 
-export type { CounterpartyKnown, PortalState };
+export type {
+  CounterpartyKnown,
+  PortalRunExpectedFields,
+  PortalRunRenderFaultInjection,
+  PortalRunRenderFaultRepair,
+  PortalRunRelease,
+  PortalRunSetup,
+  PortalState,
+};
 
 export type PortalVariant = EvalInput["portalVariant"];
+export type PortalScalarField = PortalRunRenderFaultInjection["field"];
 
 export const PORTAL_VARIANTS = ["A", "B"] as const satisfies readonly PortalVariant[];
 export const PORTAL_STATES = [
@@ -25,6 +39,16 @@ export const COUNTERPARTY_KNOWN_VALUES = [
   "unknown",
 ] as const satisfies readonly CounterpartyKnown[];
 export const PORTAL_FIXTURES = ["empty", "complete"] as const;
+export const PORTAL_SCALAR_FIELDS = [
+  "incident_date",
+  "incident_time",
+  "location",
+  "claimant_name",
+  "policy_reference",
+  "vehicle_registration",
+  "counterparty_known",
+  "narrative",
+] as const satisfies readonly PortalScalarField[];
 
 export type PortalFixture = (typeof PORTAL_FIXTURES)[number];
 
@@ -60,8 +84,13 @@ export interface PortalFieldIssue {
 
 export interface PortalAuditEntry {
   readonly sequence: number;
-  readonly action: "fixture_reset" | "draft_saved" | "review_started";
-  readonly actor: "developer" | "portal_client";
+  readonly action:
+    | "fixture_reset"
+    | "run_setup"
+    | "draft_saved"
+    | "review_started"
+    | "render_fault_repaired";
+  readonly actor: "developer" | "portal_control" | "portal_client";
   readonly occurredAt: string;
   readonly summary: Readonly<{
     attachmentCount: number;

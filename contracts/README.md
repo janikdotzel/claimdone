@@ -126,6 +126,18 @@ change during that repair, and only a final attempt may emit G8. Attachment IDs
 are exact raw wire values and unique within every attachment list, so whitespace
 normalization or repeating one physical reference cannot satisfy multiple slots.
 
+`PortalRunSetup` is the closed server-to-sandbox command that binds one opaque
+run ID, case ID, A/B variant, and the complete raw expected portal fields.
+`PortalRunRelease` repeats only that identity binding for authenticated release
+or abort. The setup fields require all eight scalars and exactly three ordered,
+unique attachment IDs; neither contract carries a control token or approval
+authority.
+
+`PortalRunRenderFaultInjection` and `PortalRunRenderFaultRepair` bind the same
+run identity, exact review version, and one scalar field. Attachments and
+caller-supplied replacement values are outside both closed commands. They exist
+only to exercise the single-repair verification path in the local sandbox.
+
 Eval result roots bind runs to a dataset SHA-256 and Git commit, require every
 closed metric aggregate, derive those aggregates from case checks, and require
 zero provider calls in deterministic mode.

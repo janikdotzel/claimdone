@@ -2,11 +2,16 @@ import type {
   PortalDraftFields,
   PortalErrorBody,
   PortalFixture,
+  PortalRunRenderFaultInjection,
+  PortalRunRenderFaultRepair,
+  PortalRunRelease,
+  PortalRunSetup,
   PortalVariant,
 } from "./contracts";
 import {
   PortalConflictError,
   PortalNotFoundError,
+  PortalRunConflictError,
   PortalStateConflictError,
 } from "./store";
 import {
@@ -14,6 +19,10 @@ import {
   parseExpectedVersion,
   parsePortalFields,
   parsePortalFixture,
+  parsePortalRunRelease,
+  parsePortalRunRenderFaultInjection,
+  parsePortalRunRenderFaultRepair,
+  parsePortalRunSetup,
   parsePortalVariant,
   PortalInputError,
 } from "./validation";
@@ -59,6 +68,30 @@ export async function readResetRequest(request: Request): Promise<ResetRequest> 
   };
 }
 
+export async function readPortalRunSetupRequest(
+  request: Request,
+): Promise<PortalRunSetup> {
+  return parsePortalRunSetup(await readJsonValue(request));
+}
+
+export async function readPortalRunReleaseRequest(
+  request: Request,
+): Promise<PortalRunRelease> {
+  return parsePortalRunRelease(await readJsonValue(request));
+}
+
+export async function readPortalRunRenderFaultInjectionRequest(
+  request: Request,
+): Promise<PortalRunRenderFaultInjection> {
+  return parsePortalRunRenderFaultInjection(await readJsonValue(request));
+}
+
+export async function readPortalRunRenderFaultRepairRequest(
+  request: Request,
+): Promise<PortalRunRenderFaultRepair> {
+  return parsePortalRunRenderFaultRepair(await readJsonValue(request));
+}
+
 export function variantFromRequest(request: Request): PortalVariant {
   const variant = new URL(request.url).searchParams.get("variant");
   return parsePortalVariant(variant);
@@ -69,6 +102,7 @@ export function portalErrorResponse(error: unknown): Response {
     error instanceof PortalInputError ||
     error instanceof PortalConflictError ||
     error instanceof PortalNotFoundError ||
+    error instanceof PortalRunConflictError ||
     error instanceof PortalStateConflictError
   ) {
     const body: PortalErrorBody = {
@@ -94,12 +128,7 @@ async function readObject(
   request: Request,
   expectedKeys: readonly string[],
 ): Promise<Record<string, unknown>> {
-  let value: unknown;
-  try {
-    value = await request.json();
-  } catch {
-    throw new PortalInputError("Request body must be valid JSON.");
-  }
+  const value = await readJsonValue(request);
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new PortalInputError("Request body must be an object.");
   }
@@ -110,4 +139,12 @@ async function readObject(
     throw new PortalInputError("Request body contains unknown or missing fields.");
   }
   return body;
+}
+
+async function readJsonValue(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    throw new PortalInputError("Request body must be valid JSON.");
+  }
 }

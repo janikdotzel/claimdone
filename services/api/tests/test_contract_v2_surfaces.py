@@ -16,6 +16,10 @@ from claimdone_api.contracts import (
     PlanStep,
     PortalDraftFields,
     PortalReviewFields,
+    PortalRunRelease,
+    PortalRunRenderFaultInjection,
+    PortalRunRenderFaultRepair,
+    PortalRunSetup,
     PortalSessionView,
     ProviderFailure,
     RenderedPortalSnapshot,
@@ -64,6 +68,122 @@ def complete_portal_fields() -> dict[str, object]:
         "narrative": "Synthetic staged collision narrative.",
         "attachments": ["asset-1", "asset-2", "asset-3"],
     }
+
+
+def test_portal_run_control_contracts_are_closed_complete_and_raw() -> None:
+    expected = complete_portal_fields()
+    expected["incidentTime"] = "14:30:00"
+    expected["location"] = "  Berlin  "
+    expected["claimantName"] = "😀" * 512
+    attachment_ids = [
+        f"model-{'1' * 32}.jpg",
+        f"model-{'2' * 32}.png",
+        f"model-{'3' * 32}.jpg",
+    ]
+    expected["attachments"] = attachment_ids
+    setup = PortalRunSetup.model_validate(
+        {
+            "contractVersion": CONTRACT_VERSION,
+            "runId": "run-portal-1",
+            "caseId": "case-1",
+            "variant": "A",
+            "expectedFields": expected,
+        }
+    )
+    assert setup.expected_fields.location == "  Berlin  "
+    assert setup.expected_fields.attachments == tuple(attachment_ids)
+
+    for fields in (
+        {**expected, "location": "   "},
+        {**expected, "unexpected": "forbidden"},
+        {**expected, "attachments": attachment_ids[:2]},
+        {
+            **expected,
+            "attachments": [
+                attachment_ids[0],
+                attachment_ids[1],
+                attachment_ids[0],
+            ],
+        },
+        {**expected, "attachments": ["one", "two", "three"]},
+        {**expected, "claimantName": "😀" * 513},
+    ):
+        with pytest.raises(ValidationError):
+            PortalRunSetup.model_validate(
+                {
+                    "contractVersion": CONTRACT_VERSION,
+                    "runId": "run-portal-1",
+                    "caseId": "case-1",
+                    "variant": "A",
+                    "expectedFields": fields,
+                }
+            )
+
+    with pytest.raises(ValidationError, match="extra"):
+        PortalRunSetup.model_validate(
+            {
+                **setup.model_dump(mode="json", by_alias=True),
+                "instruction": "forbidden",
+            }
+        )
+
+    release = PortalRunRelease.model_validate(
+        {
+            "contractVersion": CONTRACT_VERSION,
+            "runId": "run-portal-1",
+            "caseId": "case-1",
+            "variant": "A",
+        }
+    )
+    with pytest.raises(ValidationError, match="extra"):
+        PortalRunRelease.model_validate(
+            {**release.model_dump(mode="json", by_alias=True), "token": "forbidden"}
+        )
+    with pytest.raises(ValidationError, match="exact wire format"):
+        PortalRunRelease.model_validate(
+            {
+                **release.model_dump(mode="json", by_alias=True),
+                "runId": " run-portal-1",
+            }
+        )
+    for key, value in (("caseId", " case-1"), ("variant", " A")):
+        with pytest.raises(ValidationError):
+            PortalRunRelease.model_validate(
+                {
+                    **release.model_dump(mode="json", by_alias=True),
+                    key: value,
+                }
+            )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [PortalRunRenderFaultInjection, PortalRunRenderFaultRepair],
+)
+def test_portal_render_fault_commands_are_closed_scalar_only_and_strict(
+    model: type[PortalRunRenderFaultInjection] | type[PortalRunRenderFaultRepair],
+) -> None:
+    command = {
+        "contractVersion": CONTRACT_VERSION,
+        "runId": "run-portal-1",
+        "caseId": "case-1",
+        "variant": "A",
+        "expectedVersion": 3,
+        "field": "claimant_name",
+    }
+    parsed = model.model_validate(command)
+    assert parsed.expected_version == 3
+    assert parsed.field == "claimant_name"
+
+    for invalid in (
+        {**command, "field": "attachments"},
+        {**command, "field": "claimantName"},
+        {**command, "expectedVersion": True},
+        {**command, "replacementValue": "forbidden"},
+        {**command, "runId": " run-portal-1"},
+    ):
+        with pytest.raises(ValidationError):
+            model.model_validate(invalid)
 
 
 def clarification_envelope(cursor: int = 1) -> dict[str, Any]:
