@@ -21,6 +21,7 @@ from claimdone_api.contracts import (
     OperationalFailureWorkflowEvent,
     PlanStepWorkflowEvent,
     PortalState,
+    PortalVariant,
     ProviderCallWorkflowEvent,
     ProviderFailureCategory,
     ProviderModelId,
@@ -252,11 +253,35 @@ class AuthorityCapabilityRecord:
     case_id: str
     role: str
     purpose: str
+    portal_variant: PortalVariant | None
     bound_case_version: int
     issued_at: datetime
     expires_at: datetime
     consumed_at: datetime | None
     revoked_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class HumanApprovalCommand:
+    """Secret-free command for the one atomic AUTH approval boundary."""
+
+    case_id: str
+    expected_case_version: int
+    capability_digest: bytes = field(repr=False)
+    portal_variant: PortalVariant
+    approval_id: str
+    receipt_id: str
+    consumed_at: datetime
+    approved_at: datetime
+    rendered_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class HumanApprovalResult:
+    """Final receipt state produced only after the human capability is consumed."""
+
+    case: CaseRecord
+    receipt: SandboxReceiptRecord
 
 
 @dataclass(frozen=True, slots=True)

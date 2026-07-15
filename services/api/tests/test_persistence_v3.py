@@ -25,6 +25,7 @@ from claimdone_api.contracts import (
     GateDecision,
     GateId,
     GateWorkflowEvent,
+    PortalVariant,
     ProviderCallWorkflowEvent,
     RetryWorkflowEvent,
     SandboxReceipt,
@@ -1165,6 +1166,7 @@ def test_capabilities_store_digest_only_revoke_prior_open_and_cascade(
         digest=first_digest,
         role="human",
         purpose="human_approve",
+        portal_variant=PortalVariant.A,
         issued_at=NOW,
         expires_at=NOW + timedelta(seconds=120),
     )
@@ -1174,6 +1176,7 @@ def test_capabilities_store_digest_only_revoke_prior_open_and_cascade(
         digest=second_digest,
         role="human",
         purpose="human_approve",
+        portal_variant=PortalVariant.A,
         issued_at=NOW + timedelta(seconds=1),
         expires_at=NOW + timedelta(seconds=121),
     )
@@ -1191,6 +1194,7 @@ def test_capabilities_store_digest_only_revoke_prior_open_and_cascade(
             digest=hashlib.sha256(b"time-travel").digest(),
             role="human",
             purpose="human_approve",
+            portal_variant=PortalVariant.A,
             issued_at=NOW,
             expires_at=NOW + timedelta(seconds=30),
         )
@@ -1293,6 +1297,7 @@ def test_capability_consumption_after_expiry_is_rejected_but_late_revocation_is_
         digest=consumption_digest,
         role="human",
         purpose="human_approve",
+        portal_variant=PortalVariant.A,
         issued_at=NOW,
         expires_at=NOW + timedelta(seconds=30),
     )
@@ -1386,9 +1391,8 @@ def test_receipt_surface_is_read_only_and_fails_closed_on_invalid_json(
             ),
         )
 
-    stored = repository.get_sandbox_receipt(case.case_id)
-    assert stored is not None
-    assert stored.receipt == receipt
+    with pytest.raises(PersistedDataIntegrityError, match="receipt authority"):
+        repository.get_sandbox_receipt(case.case_id)
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute(
@@ -1455,6 +1459,7 @@ def test_case_delete_cascades_every_v3_child_projection(tmp_path: Path) -> None:
         digest=hashlib.sha256(b"cascade-capability").digest(),
         role="human",
         purpose="human_approve",
+        portal_variant=PortalVariant.A,
         issued_at=NOW,
         expires_at=NOW + timedelta(seconds=30),
     )
@@ -1479,5 +1484,6 @@ def test_case_delete_cascades_every_v3_child_projection(tmp_path: Path) -> None:
             "provider_usage_ledger",
             "authority_capabilities",
             "sandbox_receipts",
+            "sandbox_receipt_authority",
         ):
             assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)

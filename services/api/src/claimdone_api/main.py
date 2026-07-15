@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.types import ASGIApp
 
+from claimdone_api.authority import AuthorityService, create_authority_router
 from claimdone_api.cases import CaseService, create_case_router, create_workflow_router
 from claimdone_api.cases.router import CaseCrudService
 from claimdone_api.media import PersistentCaseMediaCleaner
@@ -99,6 +100,7 @@ def create_app(
     repository: SqliteCaseRepository | LegacyWalkingRepository
     case_service: CaseCrudService
     canonical_repository: SqliteCaseRepository | None = None
+    authority_service: AuthorityService | None = None
     if enable_legacy_walking_skeleton_for_dev:
         from claimdone_api.walking_skeleton.legacy_boundary import (
             LegacyWalkingCaseBoundary,
@@ -136,6 +138,7 @@ def create_app(
     else:
         assert canonical_repository is not None
         case_service = CaseService(canonical_repository, resource_cleaner=cleaner)
+        authority_service = AuthorityService(canonical_repository)
         walking_service = None
 
     application = _OuterCorsFastAPI(
@@ -155,6 +158,8 @@ def create_app(
         # The older claimdone_api.workflow read-model prototype remains an
         # unwired test fixture. This is the only production case router.
         application.include_router(create_workflow_router(case_service))
+        assert authority_service is not None
+        application.include_router(create_authority_router(authority_service))
     if walking_service is not None:
         application.include_router(create_walking_skeleton_router(walking_service))
 
@@ -196,6 +201,8 @@ def create_app(
     application.state.case_repository = repository
     application.state.case_service = case_service
     application.state.media_store = media_store
+    if authority_service is not None:
+        application.state.authority_service = authority_service
     if walking_service is not None:
         application.state.walking_skeleton_service = walking_service
     return application

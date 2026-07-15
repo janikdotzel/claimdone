@@ -55,6 +55,7 @@ from claimdone_api.contracts import (
     PlanStepWorkflowEvent,
     PortalFillWorkflowEvent,
     PortalState,
+    PortalVariant,
     ProvenanceRef,
     ProviderCallWorkflowEvent,
     ProviderFailureCategory,
@@ -93,6 +94,7 @@ from claimdone_api.gates import (
     evaluate_g3,
     evaluate_g4,
     evaluate_g5,
+    make_gate_decision,
 )
 
 from .models import (
@@ -101,6 +103,8 @@ from .models import (
     AuthorityCapabilityRecord,
     CaseRecord,
     CaseSnapshot,
+    HumanApprovalCommand,
+    HumanApprovalResult,
     IntakeDisclosureCommand,
     JsonObject,
     ObservabilityMetricsSnapshot,
@@ -122,7 +126,7 @@ from .models import (
 if TYPE_CHECKING:
     from claimdone_api.media import CaseMediaStore
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 MAX_OBSERVABILITY_EVENT_ROWS = 4_096
@@ -324,6 +328,7 @@ _REQUIRED_SCHEMA_TABLES = (
     "provider_usage_ledger",
     "authority_capabilities",
     "sandbox_receipts",
+    "sandbox_receipt_authority",
     "case_intake_authority",
     "case_transcript_authority",
     "case_packet_authority",
@@ -670,6 +675,77 @@ _MIGRATION_5 = (
     """,
 )
 
+_MIGRATION_6 = (
+    """
+    ALTER TABLE authority_capabilities
+    ADD COLUMN portal_variant TEXT
+        CHECK (
+            (
+                role = 'agent'
+                AND purpose = 'portal_run'
+                AND portal_variant IS NULL
+            )
+            OR (
+                role = 'human'
+                AND purpose = 'human_approve'
+                AND portal_variant IS NOT NULL
+                AND portal_variant IN ('A', 'B')
+            )
+        )
+    """,
+    """
+    CREATE TABLE sandbox_receipt_authority (
+        case_id TEXT PRIMARY KEY NOT NULL
+            REFERENCES sandbox_receipts(case_id) ON DELETE CASCADE,
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        bound_review_case_version INTEGER NOT NULL
+            CHECK (bound_review_case_version >= 1),
+        human_capability_digest BLOB NOT NULL UNIQUE
+            REFERENCES authority_capabilities(capability_digest) ON DELETE CASCADE
+            CHECK (
+                typeof(human_capability_digest) = 'blob'
+                AND length(human_capability_digest) = 32
+            ),
+        portal_variant TEXT NOT NULL CHECK (portal_variant IN ('A', 'B')),
+        approval_id TEXT NOT NULL UNIQUE,
+        receipt_id TEXT NOT NULL UNIQUE,
+        receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+        receipt_sha256 TEXT NOT NULL
+            CHECK (
+                length(receipt_sha256) = 64
+                AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        g9_gate_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        g10_gate_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        human_approval_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        human_approved_state_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        receipt_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        receipt_state_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES audit_events(sequence) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        CHECK (g9_gate_sequence < g10_gate_sequence),
+        CHECK (
+            human_approval_audit_sequence
+            < human_approved_state_audit_sequence
+            AND human_approved_state_audit_sequence < receipt_audit_sequence
+            AND receipt_audit_sequence < receipt_state_audit_sequence
+        ),
+        CHECK (json_extract(receipt_json, '$.caseId') IS case_id),
+        CHECK (json_extract(receipt_json, '$.variant') IS portal_variant),
+        CHECK (json_extract(receipt_json, '$.approvalId') IS approval_id),
+        CHECK (json_extract(receipt_json, '$.receiptId') IS receipt_id),
+        CHECK (json_extract(receipt_json, '$.redacted') IS 1),
+        CHECK (json_extract(receipt_json, '$.sandboxOnly') IS 1),
+        CHECK (json_extract(receipt_json, '$.submittedToRealInsurer') IS 0)
+    )
+    """,
+)
+
 _MEDIA_STORAGE_NAME = re.compile(r"^case-[a-f0-9]{32}$")
 _AUDIO_LOCAL_REF = re.compile(r"^audio-[a-f0-9]{32}\.wav$")
 _TRANSCRIPT_LOCAL_REF = re.compile(r"^transcript-[a-f0-9]{32}\.txt$")
@@ -961,6 +1037,15 @@ def _validate_audit_projection_binding(
     audit: AuditEvent,
     envelope: WorkflowEventEnvelope,
 ) -> None:
+    if (
+        envelope.source_audit_event_id != audit.event_id
+        or envelope.source_audit_event_type is not audit.event_type
+        or envelope.case_id != audit.case_id
+        or envelope.occurred_at != audit.occurred_at
+    ):
+        raise PersistedDataIntegrityError(
+            "Persisted workflow source identity disagrees with its audit event"
+        )
     expected_kind = _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE.get(audit.event_type)
     if expected_kind is None or envelope.event.kind is not expected_kind:
         raise PersistedDataIntegrityError(
@@ -982,6 +1067,70 @@ def _validate_audit_projection_binding(
     ):
         raise PersistedDataIntegrityError(
             "Persisted gate projection disagrees with its audit event"
+        )
+
+
+def _gate_decision_from_row(
+    row: sqlite3.Row,
+    *,
+    label: str,
+) -> tuple[str, GateDecision]:
+    case_id = _require_string(row["case_id"], f"{label} case id")
+    decision = GateDecision.model_validate_json(
+        _require_string(row["decision_json"], label)
+    )
+    if decision.gate_id.value != _require_string(
+        row["gate_id"], f"{label} id"
+    ) or decision.decided_at != _parse_datetime(
+        _require_string(row["decided_at"], f"{label} decided_at")
+    ):
+        raise PersistedDataIntegrityError(
+            "Persisted gate columns disagree with canonical JSON"
+        )
+    return case_id, decision
+
+
+def _validate_projected_gate_and_state_histories(
+    *,
+    case_states: dict[str, CaseState],
+    gate_decisions_by_case: dict[str, list[GateDecision]],
+    workflows_by_sequence: dict[int, WorkflowEventEnvelope],
+) -> None:
+    ordered_workflows = tuple(
+        workflows_by_sequence[sequence]
+        for sequence in sorted(workflows_by_sequence)
+    )
+    validate_workflow_event_order(ordered_workflows)
+
+    projected_gates_by_case: dict[str, list[GateDecision]] = {}
+    for envelope in ordered_workflows:
+        if isinstance(envelope.event, GateWorkflowEvent):
+            projected_gates_by_case.setdefault(envelope.case_id, []).append(
+                envelope.event.decision
+            )
+    if gate_decisions_by_case != projected_gates_by_case:
+        raise PersistedDataIntegrityError(
+            "Persisted gate decisions disagree with their workflow projections"
+        )
+
+    replayed_states = {case_id: CaseState.CREATED for case_id in case_states}
+    for envelope in ordered_workflows:
+        event = envelope.event
+        if not isinstance(event, StateWorkflowEvent):
+            continue
+        replayed = replayed_states.get(envelope.case_id)
+        if replayed is None or event.from_state is not replayed:
+            raise PersistedDataIntegrityError(
+                "Persisted state workflow history is not contiguous"
+            )
+        validate_case_transition(replayed, event.to_state)
+        replayed_states[envelope.case_id] = event.to_state
+    if any(
+        replayed_states[case_id] is not state
+        for case_id, state in case_states.items()
+    ):
+        raise PersistedDataIntegrityError(
+            "Persisted case state disagrees with replayed workflow history"
         )
 
 
@@ -1363,6 +1512,10 @@ class SqliteCaseRepository:
                     self._migrate_v4_to_v5(connection)
                     version = 5
                     connection.execute("PRAGMA user_version = 5")
+                if version == 5:
+                    self._migrate_v5_to_v6(connection)
+                    version = 6
+                    connection.execute("PRAGMA user_version = 6")
                 if version != SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(f"Unsupported database schema: {version}")
                 self._require_no_foreign_key_violations(connection)
@@ -1497,18 +1650,10 @@ class SqliteCaseRepository:
                     audits_by_sequence[sequence] = audit
             if self._table_exists(connection, "gate_decisions"):
                 for row in connection.execute("SELECT * FROM gate_decisions ORDER BY sequence"):
-                    case_id = _require_string(row["case_id"], "gate case id")
-                    decision = GateDecision.model_validate_json(
-                        _require_string(row["decision_json"], "gate decision")
+                    case_id, decision = _gate_decision_from_row(
+                        row,
+                        label="gate decision",
                     )
-                    if decision.gate_id.value != _require_string(
-                        row["gate_id"], "gate id"
-                    ) or decision.decided_at != _parse_datetime(
-                        _require_string(row["decided_at"], "gate decided_at")
-                    ):
-                        raise PersistedDataIntegrityError(
-                            "Persisted gate columns disagree with canonical JSON"
-                        )
                     gate_decisions_by_case.setdefault(case_id, []).append(decision)
             if workflow_table_exists:
                 for row in connection.execute(
@@ -1574,7 +1719,10 @@ class SqliteCaseRepository:
                 for row in connection.execute(
                     "SELECT * FROM authority_capabilities ORDER BY case_id, purpose"
                 ):
-                    capability = self._row_to_capability(row)
+                    capability = self._row_to_capability(
+                        row,
+                        allow_legacy_human_variant=legacy,
+                    )
                     capabilities.append(capability)
                     if not self.is_canonical_authority:
                         bound_case = cases_by_id.get(capability.case_id)
@@ -1586,7 +1734,13 @@ class SqliteCaseRepository:
                             raise PersistedDataIntegrityError(
                                 "Persisted capability is not bound to an existing case version"
                             )
-            if self._table_exists(connection, "sandbox_receipts"):
+            receipt_authority_exists = self._table_exists(
+                connection,
+                "sandbox_receipt_authority",
+            )
+            if receipt_authority_exists:
+                self._validate_all_receipt_authority(connection)
+            elif self._table_exists(connection, "sandbox_receipts"):
                 for row in connection.execute("SELECT * FROM sandbox_receipts ORDER BY case_id"):
                     receipt = SandboxReceipt.model_validate_json(
                         _require_string(row["receipt_json"], "sandbox receipt")
@@ -1596,6 +1750,22 @@ class SqliteCaseRepository:
                         _require_string(row["created_at"], "receipt created_at")
                     )
                     bound_case = cases_by_id.get(receipt_case_id)
+                    consumed_human_rows = connection.execute(
+                        """
+                        SELECT * FROM authority_capabilities
+                        WHERE case_id = ? AND role = 'human'
+                          AND purpose = 'human_approve' AND consumed_at IS NOT NULL
+                        """,
+                        (receipt_case_id,),
+                    ).fetchall()
+                    consumed_human = (
+                        None
+                        if len(consumed_human_rows) != 1
+                        else self._row_to_capability(
+                            consumed_human_rows[0],
+                            allow_legacy_human_variant=legacy,
+                        )
+                    )
                     if (
                         receipt.case_id != receipt_case_id
                         or (
@@ -1607,6 +1777,19 @@ class SqliteCaseRepository:
                                 or receipt_created_at != bound_case.updated_at
                                 or receipt.approved_at < bound_case.created_at
                                 or receipt.rendered_at != receipt_created_at
+                                or consumed_human is None
+                                or consumed_human.bound_case_version
+                                != bound_case.version - 2
+                                or consumed_human.consumed_at is None
+                                or not (
+                                    consumed_human.issued_at
+                                    < consumed_human.consumed_at
+                                    < receipt.approved_at
+                                    < receipt.rendered_at
+                                )
+                                or not receipt.approval_id.startswith(
+                                    f"approval-{receipt.variant.value.lower()}-"
+                                )
                             )
                         )
                     ):
@@ -1625,20 +1808,11 @@ class SqliteCaseRepository:
                         )
                     _validate_audit_projection_binding(audit, required_envelope)
 
-                projected_gates_by_case: dict[str, list[GateDecision]] = {}
                 for sequence in sorted(workflows_by_sequence):
                     envelope = workflows_by_sequence[sequence]
-                    if isinstance(envelope.event, GateWorkflowEvent):
-                        projected_gates_by_case.setdefault(envelope.case_id, []).append(
-                            envelope.event.decision
-                        )
                     _validate_provider_usage_binding(
                         envelope,
                         provider_usage_by_sequence.get(sequence),
-                    )
-                if gate_decisions_by_case != projected_gates_by_case:
-                    raise PersistedDataIntegrityError(
-                        "Persisted gate decisions disagree with their workflow projections"
                     )
                 if any(
                     sequence not in workflows_by_sequence
@@ -1648,28 +1822,13 @@ class SqliteCaseRepository:
                         "Persisted provider usage has no workflow event"
                     )
 
-                replayed_states = {
-                    case_id: CaseState.CREATED for case_id in cases_by_id
-                }
-                for sequence in sorted(workflows_by_sequence):
-                    envelope = workflows_by_sequence[sequence]
-                    event = envelope.event
-                    if not isinstance(event, StateWorkflowEvent):
-                        continue
-                    replayed = replayed_states.get(envelope.case_id)
-                    if replayed is None or event.from_state is not replayed:
-                        raise PersistedDataIntegrityError(
-                            "Persisted state workflow history is not contiguous"
-                        )
-                    validate_case_transition(replayed, event.to_state)
-                    replayed_states[envelope.case_id] = event.to_state
-                if any(
-                    replayed_states[case_id] is not case.state
-                    for case_id, case in cases_by_id.items()
-                ):
-                    raise PersistedDataIntegrityError(
-                        "Persisted case state disagrees with replayed workflow history"
-                    )
+                _validate_projected_gate_and_state_histories(
+                    case_states={
+                        case_id: case.state for case_id, case in cases_by_id.items()
+                    },
+                    gate_decisions_by_case=gate_decisions_by_case,
+                    workflows_by_sequence=workflows_by_sequence,
+                )
 
             transcripts_by_case = {
                 transcript.case_id: transcript for transcript in transcripts
@@ -1929,6 +2088,50 @@ class SqliteCaseRepository:
             if packet is not None:
                 raise IncompatiblePersistedContractError()
         for statement in _MIGRATION_5:
+            connection.execute(statement)
+
+    def _migrate_v5_to_v6(self, connection: sqlite3.Connection) -> None:
+        """Add immutable receipt authority without guessing historical human intent."""
+
+        unsafe_human_authority = connection.execute(
+            """
+            SELECT 1 FROM authority_capabilities WHERE role = 'human'
+            UNION ALL
+            SELECT 1 FROM sandbox_receipts
+            UNION ALL
+            SELECT 1 FROM cases WHERE state IN (?, ?)
+            UNION ALL
+            SELECT 1 FROM gate_decisions WHERE gate_id IN (?, ?)
+            UNION ALL
+            SELECT 1
+            FROM audit_events
+            WHERE json_extract(event_json, '$.eventType') IN (?, ?)
+               OR (
+                    json_extract(event_json, '$.eventType') = ?
+                    AND (
+                        json_extract(event_json, '$.fromState') IN (?, ?)
+                        OR json_extract(event_json, '$.toState') IN (?, ?)
+                    )
+               )
+            LIMIT 1
+            """,
+            (
+                CaseState.HUMAN_APPROVED.value,
+                CaseState.RECEIPT.value,
+                GateId.G9_HUMAN_APPROVAL.value,
+                GateId.G10_RECEIPT_REDACTION.value,
+                AuditEventType.HUMAN_APPROVAL.value,
+                AuditEventType.RECEIPT.value,
+                AuditEventType.CASE_STATE_CHANGED.value,
+                CaseState.HUMAN_APPROVED.value,
+                CaseState.RECEIPT.value,
+                CaseState.HUMAN_APPROVED.value,
+                CaseState.RECEIPT.value,
+            ),
+        ).fetchone()
+        if unsafe_human_authority is not None:
+            raise IncompatiblePersistedContractError()
+        for statement in _MIGRATION_6:
             connection.execute(statement)
 
     def _backfill_v3_workflow_events(self, connection: sqlite3.Connection) -> None:
@@ -3341,19 +3544,28 @@ class SqliteCaseRepository:
         """Replay completed redacted events after a database-owned cursor."""
 
         self._validate_page(after, limit)
-        with self._read_connection() as connection:
-            if connection.execute(
-                "SELECT 1 FROM cases WHERE case_id = ?",
-                (case_id,),
-            ).fetchone() is None:
-                raise CaseRecordNotFoundError(case_id)
-            rows = self._read_workflow_event_rows(
-                connection,
-                case_id=case_id,
-                after=after,
-                limit=limit,
-            )
         try:
+            with self._read_connection() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM cases WHERE case_id = ?",
+                    (case_id,),
+                ).fetchone() is None:
+                    raise CaseRecordNotFoundError(case_id)
+                if self.is_canonical_authority:
+                    self._validate_all_receipt_authority(
+                        connection,
+                        selected_case_id=case_id,
+                    )
+                self._validate_case_workflow_source_bindings(
+                    connection,
+                    case_id=case_id,
+                )
+                rows = self._read_workflow_event_rows(
+                    connection,
+                    case_id=case_id,
+                    after=after,
+                    limit=limit,
+                )
             result = tuple(
                 SequencedWorkflowEvent(
                     sequence=_require_integer(
@@ -3370,7 +3582,17 @@ class SqliteCaseRepository:
             if any(item.sequence != item.envelope.cursor for item in result):
                 raise ValueError("Persisted workflow cursor does not match its row")
             return result
-        except (ValidationError, ValueError, TypeError) as error:
+        except CaseRecordNotFoundError:
+            raise
+        except PersistedDataIntegrityError as error:
+            emit_redacted_log(
+                _OBSERVABILITY_LOGGER,
+                ObservabilityLogEvent.WORKFLOW_REPLAY_REJECTED,
+                fields={"caseId": case_id, "cursor": after},
+                error=error,
+            )
+            raise
+        except (ValidationError, ValueError, TypeError, KeyError, IndexError) as error:
             emit_redacted_log(
                 _OBSERVABILITY_LOGGER,
                 ObservabilityLogEvent.WORKFLOW_REPLAY_REJECTED,
@@ -3380,6 +3602,108 @@ class SqliteCaseRepository:
             raise PersistedDataIntegrityError(
                 "Persisted workflow event projection is invalid"
             ) from None
+
+    def _validate_case_workflow_source_bindings(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+    ) -> None:
+        """Validate both sides of every projected source in one WAL snapshot."""
+
+        case_row = connection.execute(
+            "SELECT state FROM cases WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if case_row is None:
+            raise PersistedDataIntegrityError(
+                "Persisted workflow case state is missing"
+            )
+        case_state = CaseState(
+            _require_string(case_row["state"], "workflow case state")
+        )
+
+        audits_by_sequence: dict[int, AuditEvent] = {}
+        for row in connection.execute(
+            "SELECT * FROM audit_events WHERE case_id = ? ORDER BY sequence",
+            (case_id,),
+        ):
+            sequence = _require_integer(row["sequence"], "workflow source audit sequence")
+            audit = AuditEvent.model_validate_json(
+                _require_string(row["event_json"], "workflow source audit")
+            )
+            if (
+                audit.event_id
+                != _require_string(row["event_id"], "workflow source audit id")
+                or audit.case_id
+                != _require_string(row["case_id"], "workflow source audit case id")
+                or audit.case_id != case_id
+                or audit.occurred_at
+                != _parse_datetime(
+                    _require_string(
+                        row["occurred_at"],
+                        "workflow source audit occurred_at",
+                    )
+                )
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted workflow source audit columns are invalid"
+                )
+            audits_by_sequence[sequence] = audit
+
+        projected_sequences: set[int] = set()
+        workflows_by_sequence: dict[int, WorkflowEventEnvelope] = {}
+        for row in connection.execute(
+            "SELECT * FROM workflow_events WHERE case_id = ? ORDER BY source_audit_sequence",
+            (case_id,),
+        ):
+            envelope = self._workflow_envelope_from_row(
+                row,
+                label="workflow projection",
+            )
+            sequence = envelope.source_audit_sequence
+            source = audits_by_sequence.get(sequence)
+            if (
+                source is None
+                or source.event_type not in _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted workflow projection lost its source audit"
+            )
+            _validate_audit_projection_binding(source, envelope)
+            projected_sequences.add(sequence)
+            workflows_by_sequence[sequence] = envelope
+
+        required_sequences = {
+            sequence
+            for sequence, audit in audits_by_sequence.items()
+            if audit.event_type in _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE
+        }
+        if projected_sequences != required_sequences:
+            raise PersistedDataIntegrityError(
+                "Persisted workflow source audits and projections are incomplete"
+            )
+
+        gate_decisions_by_case: dict[str, list[GateDecision]] = {}
+        for row in connection.execute(
+            "SELECT * FROM gate_decisions WHERE case_id = ? ORDER BY sequence",
+            (case_id,),
+        ):
+            row_case_id, decision = _gate_decision_from_row(
+                row,
+                label="workflow gate decision",
+            )
+            if row_case_id != case_id:
+                raise PersistedDataIntegrityError(
+                    "Persisted workflow gate decision belongs to another case"
+                )
+            gate_decisions_by_case.setdefault(row_case_id, []).append(decision)
+
+        _validate_projected_gate_and_state_histories(
+            case_states={case_id: case_state},
+            gate_decisions_by_case=gate_decisions_by_case,
+            workflows_by_sequence=workflows_by_sequence,
+        )
 
     def _read_workflow_event_rows(
         self,
@@ -3797,6 +4121,7 @@ class SqliteCaseRepository:
         digest: bytes,
         role: str,
         purpose: str,
+        portal_variant: PortalVariant | None = None,
         issued_at: datetime,
         expires_at: datetime,
     ) -> AuthorityCapabilityRecord:
@@ -3806,7 +4131,14 @@ class SqliteCaseRepository:
             expected_case_version,
             "Capability expected_case_version",
         )
-        self._validate_capability_values(digest, role, purpose, issued_at, expires_at)
+        self._validate_capability_values(
+            digest,
+            role,
+            purpose,
+            portal_variant,
+            issued_at,
+            expires_at,
+        )
         issued = _dump_aware_datetime(issued_at, "capability issued_at")
         expires = _dump_aware_datetime(expires_at, "capability expires_at")
         with self._write_connection() as connection:
@@ -3843,8 +4175,8 @@ class SqliteCaseRepository:
                 """
                 INSERT INTO authority_capabilities (
                     capability_digest, case_id, role, purpose, bound_case_version,
-                    issued_at, expires_at, consumed_at, revoked_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                    issued_at, expires_at, consumed_at, revoked_at, portal_variant
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                 """,
                 (
                     digest,
@@ -3854,6 +4186,7 @@ class SqliteCaseRepository:
                     expected_case_version,
                     issued,
                     expires,
+                    None if portal_variant is None else portal_variant.value,
                 ),
             )
             return self._require_capability(connection, digest)
@@ -3896,33 +4229,1021 @@ class SqliteCaseRepository:
             )
             return cursor.rowcount == 1
 
+    def approve_human_and_create_receipt(
+        self,
+        command: HumanApprovalCommand,
+    ) -> HumanApprovalResult:
+        """Consume one human capability and close G9/G10 in one transaction."""
+
+        self._require_canonical_authority_mode()
+        self._require_expected_version(
+            command.expected_case_version,
+            "Approval expected_case_version",
+        )
+        self._validate_digest(command.capability_digest)
+        for identifier, label in (
+            (command.approval_id, "approval_id"),
+            (command.receipt_id, "receipt_id"),
+        ):
+            if type(identifier) is not str or _IDENTIFIER.fullmatch(identifier) is None:
+                raise ValueError(f"{label} must be a canonical identifier")
+        if not command.approval_id.startswith(
+            f"approval-{command.portal_variant.value.lower()}-"
+        ):
+            raise ValueError("approval_id must bind the trusted portal variant")
+        consumed_at = _parse_datetime(
+            _dump_aware_datetime(command.consumed_at, "capability consumed_at")
+        )
+        approved_at = _parse_datetime(
+            _dump_aware_datetime(command.approved_at, "approved_at")
+        )
+        rendered_at = _parse_datetime(
+            _dump_aware_datetime(command.rendered_at, "rendered_at")
+        )
+        if not consumed_at < approved_at < rendered_at:
+            raise ValueError(
+                "Approval timestamps must be strictly ordered: consume, approve, receipt"
+        )
+
+        with self._write_connection() as connection:
+            capability_row = connection.execute(
+                "SELECT * FROM authority_capabilities WHERE capability_digest = ?",
+                (command.capability_digest,),
+            ).fetchone()
+            if capability_row is None:
+                raise AuthorityCapabilityError("Approval capability is invalid")
+            capability = self._row_to_capability(capability_row)
+
+            # Keep role classification ahead of state, version-lifetime, and expiry
+            # details so an agent capability never becomes an authority oracle.
+            if capability.role == "agent":
+                raise AuthorityCapabilityError("Agent capability is forbidden")
+            if capability.role != "human" or capability.purpose != "human_approve":
+                raise AuthorityCapabilityError("Approval capability role is invalid")
+            if (
+                capability.case_id != command.case_id
+                or capability.bound_case_version != command.expected_case_version
+                or capability.portal_variant is not command.portal_variant
+                or capability.consumed_at is not None
+                or capability.revoked_at is not None
+                or consumed_at <= capability.issued_at
+                or consumed_at >= capability.expires_at
+            ):
+                raise AuthorityCapabilityError("Approval capability is invalid")
+            self._preflight_canonical_payloads(
+                connection,
+                legacy=False,
+                verify_media=True,
+            )
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_case_version,
+            )
+            if current.state is not CaseState.REVIEW:
+                raise AuthorityCapabilityError("Approval requires the review state")
+            if current.snapshot.portal_state is not PortalState.REVIEW:
+                raise WorkflowAtomicityError("Review case lost its portal review state")
+            self._validate_canonical_case_snapshot(current)
+            self._require_current_packet_authority(connection, current)
+            packet = current.snapshot.claim_packet
+            if (
+                packet is None
+                or packet.state is not CaseState.REVIEW
+                or packet.portal_state is not PortalState.REVIEW
+                or not packet.verification.review_allowed
+                or packet.verification.status is not VerificationState.VERIFIED
+                or packet.verification.verified_at is None
+                or packet.verification.verified_at > consumed_at
+                or tuple(decision.gate_id for decision in packet.gate_decisions)
+                != tuple(GateId(f"G{index}") for index in range(9))
+                or any(not decision.passed for decision in packet.gate_decisions)
+            ):
+                raise WorkflowAtomicityError(
+                    "Human approval requires the exact passed review authority"
+                )
+            if self._get_sandbox_receipt_in_connection(connection, current.case_id) is not None:
+                raise AuthorityCapabilityError("Approval capability is invalid")
+
+            consumed = connection.execute(
+                """
+                UPDATE authority_capabilities
+                SET consumed_at = ?
+                WHERE capability_digest = ?
+                  AND role = 'human' AND purpose = 'human_approve'
+                  AND consumed_at IS NULL AND revoked_at IS NULL
+                """,
+                (
+                    _dump_aware_datetime(consumed_at, "capability consumed_at"),
+                    command.capability_digest,
+                ),
+            )
+            if consumed.rowcount != 1:
+                raise AuthorityCapabilityError("Approval capability is invalid")
+
+            g9 = make_gate_decision(
+                GateId.G9_HUMAN_APPROVAL,
+                decided_at=approved_at,
+            )
+            human_packet_payload = packet.model_dump(mode="json", by_alias=True)
+            human_packet_payload["state"] = CaseState.HUMAN_APPROVED.value
+            human_packet_payload["portalState"] = PortalState.HUMAN_APPROVED.value
+            human_packet_payload["gateDecisions"] = [
+                *human_packet_payload["gateDecisions"],
+                g9.model_dump(mode="json", by_alias=True),
+            ]
+            human_packet = ClaimPacket.model_validate(human_packet_payload)
+            human_snapshot = replace(
+                current.snapshot,
+                portal_state=PortalState.HUMAN_APPROVED,
+                claim_packet=human_packet,
+                active_clarification=None,
+            )
+            _validate_snapshot(current.case_id, CaseState.HUMAN_APPROVED, human_snapshot)
+
+            g9_sequence = self._insert_authority_gate(
+                connection,
+                case_id=current.case_id,
+                decision=g9,
+            )
+            self._insert_packet_authority(
+                connection,
+                case_id=current.case_id,
+                bound_case_version=current.version + 1,
+                packet=human_packet,
+                created_at=approved_at,
+            )
+            approval_audit = self._authority_audit_event(
+                case_id=current.case_id,
+                event_type=AuditEventType.HUMAN_APPROVAL,
+                actor=ActorType.HUMAN,
+                occurred_at=approved_at,
+            )
+            approval_audit_sequence = self._insert_audit_event(
+                connection,
+                approval_audit,
+            )
+            self._update_case_row(
+                connection,
+                current=current,
+                state=CaseState.HUMAN_APPROVED,
+                snapshot=human_snapshot,
+                updated_at=approved_at,
+            )
+            approval_state_audit = build_state_change_event(
+                case_id=current.case_id,
+                current=CaseState.REVIEW,
+                target=CaseState.HUMAN_APPROVED,
+                actor=ActorType.HUMAN,
+                occurred_at=approved_at,
+            )
+            approval_state_sequence = self._insert_audit_event(
+                connection,
+                approval_state_audit,
+            )
+            self._insert_workflow_projection(
+                connection,
+                audit_sequence=approval_state_sequence,
+                audit=approval_state_audit,
+                event=StateWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.STATE,
+                        "actor": ActorType.HUMAN,
+                        "fromState": CaseState.REVIEW,
+                        "toState": CaseState.HUMAN_APPROVED,
+                    }
+                ),
+            )
+            human_approved = self._require_current(
+                connection,
+                current.case_id,
+                current.version + 1,
+            )
+
+            g10 = make_gate_decision(
+                GateId.G10_RECEIPT_REDACTION,
+                decided_at=rendered_at,
+            )
+            g10_sequence = self._insert_authority_gate(
+                connection,
+                case_id=current.case_id,
+                decision=g10,
+            )
+            receipt = SandboxReceipt.model_validate(
+                {
+                    "contractVersion": CONTRACT_VERSION,
+                    "receiptId": command.receipt_id,
+                    "caseId": current.case_id,
+                    "approvalId": command.approval_id,
+                    "variant": command.portal_variant,
+                    "state": PortalState.RECEIPT,
+                    "version": current.version + 2,
+                    "environment": "sandbox",
+                    "sandboxOnly": True,
+                    "submittedToRealInsurer": False,
+                    "humanApproved": True,
+                    "redacted": True,
+                    "summary": {
+                        "completedFieldCount": len(packet.claim.field_provenance) - 1,
+                        "attachmentCount": len(packet.claim.attachments),
+                        "verificationPassed": True,
+                        "finalActionOwner": "human",
+                    },
+                    "approvedAt": approved_at,
+                    "renderedAt": rendered_at,
+                }
+            )
+            receipt_snapshot = replace(
+                human_approved.snapshot,
+                portal_state=PortalState.RECEIPT,
+                claim_packet=None,
+                active_clarification=None,
+            )
+            _validate_snapshot(current.case_id, CaseState.RECEIPT, receipt_snapshot)
+            receipt_audit = self._authority_audit_event(
+                case_id=current.case_id,
+                event_type=AuditEventType.RECEIPT,
+                actor=ActorType.SYSTEM,
+                occurred_at=rendered_at,
+            )
+            receipt_audit_sequence = self._insert_audit_event(
+                connection,
+                receipt_audit,
+            )
+            self._update_case_row(
+                connection,
+                current=human_approved,
+                state=CaseState.RECEIPT,
+                snapshot=receipt_snapshot,
+                updated_at=rendered_at,
+            )
+            receipt_state_audit = build_state_change_event(
+                case_id=current.case_id,
+                current=CaseState.HUMAN_APPROVED,
+                target=CaseState.RECEIPT,
+                actor=ActorType.SYSTEM,
+                occurred_at=rendered_at,
+            )
+            receipt_state_sequence = self._insert_audit_event(
+                connection,
+                receipt_state_audit,
+            )
+            self._insert_workflow_projection(
+                connection,
+                audit_sequence=receipt_state_sequence,
+                audit=receipt_state_audit,
+                event=StateWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.STATE,
+                        "actor": ActorType.SYSTEM,
+                        "fromState": CaseState.HUMAN_APPROVED,
+                        "toState": CaseState.RECEIPT,
+                    }
+                ),
+            )
+            receipt_json = receipt.model_dump_json(by_alias=True)
+            connection.execute(
+                """
+                INSERT INTO sandbox_receipts (case_id, receipt_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    current.case_id,
+                    receipt_json,
+                    _dump_aware_datetime(rendered_at, "receipt created_at"),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO sandbox_receipt_authority (
+                    case_id, authority_version, bound_review_case_version,
+                    human_capability_digest, portal_variant, approval_id, receipt_id,
+                    receipt_json, receipt_sha256, g9_gate_sequence, g10_gate_sequence,
+                    human_approval_audit_sequence,
+                    human_approved_state_audit_sequence,
+                    receipt_audit_sequence, receipt_state_audit_sequence, created_at
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    current.case_id,
+                    current.version,
+                    command.capability_digest,
+                    command.portal_variant.value,
+                    command.approval_id,
+                    command.receipt_id,
+                    receipt_json,
+                    hashlib.sha256(receipt_json.encode("utf-8")).hexdigest(),
+                    g9_sequence,
+                    g10_sequence,
+                    approval_audit_sequence,
+                    approval_state_sequence,
+                    receipt_audit_sequence,
+                    receipt_state_sequence,
+                    _dump_aware_datetime(rendered_at, "receipt authority created_at"),
+                ),
+            )
+            final_case = self._require_current(
+                connection,
+                current.case_id,
+                current.version + 2,
+            )
+            receipt_record = self._get_sandbox_receipt_in_connection(
+                connection,
+                current.case_id,
+            )
+            if receipt_record is None:
+                raise WorkflowAtomicityError("Atomic approval lost its receipt")
+            return HumanApprovalResult(case=final_case, receipt=receipt_record)
+
+    def _insert_authority_gate(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        decision: GateDecision,
+    ) -> int:
+        gate_sequence = self._insert_gate_decision_row(
+            connection,
+            case_id=case_id,
+            decision=decision,
+        )
+        audit = build_gate_audit_event(
+            case_id=case_id,
+            decision=decision,
+            actor=ActorType.SYSTEM,
+        )
+        audit_sequence = self._insert_audit_event(connection, audit)
+        self._insert_workflow_projection(
+            connection,
+            audit_sequence=audit_sequence,
+            audit=audit,
+            event=GateWorkflowEvent.model_validate(
+                {
+                    "kind": WorkflowEventKind.GATE,
+                    "decision": decision,
+                }
+            ),
+        )
+        return gate_sequence
+
+    @staticmethod
+    def _authority_audit_event(
+        *,
+        case_id: str,
+        event_type: AuditEventType,
+        actor: ActorType,
+        occurred_at: datetime,
+    ) -> AuditEvent:
+        return AuditEvent.model_validate(
+            {
+                "contractVersion": CONTRACT_VERSION,
+                "eventId": f"event_{uuid4().hex}",
+                "caseId": case_id,
+                "eventType": event_type,
+                "actor": actor,
+                "occurredAt": occurred_at,
+                "fromState": None,
+                "toState": None,
+                "reasonCodes": (),
+                "details": (),
+            }
+        )
+
     def get_sandbox_receipt(self, case_id: str) -> SandboxReceiptRecord | None:
         """Read only; AUTH owns the later atomic receipt insertion path."""
 
         with self._read_connection() as connection:
             return self._get_sandbox_receipt_in_connection(connection, case_id)
 
-    @staticmethod
     def _get_sandbox_receipt_in_connection(
+        self,
         connection: sqlite3.Connection,
         case_id: str,
     ) -> SandboxReceiptRecord | None:
-        row = connection.execute(
+        if not self._table_exists(connection, "sandbox_receipt_authority"):
+            raise PersistedDataIntegrityError("Persisted receipt authority is missing")
+        try:
+            records = self._validate_all_receipt_authority(connection)
+        except PersistedDataIntegrityError:
+            raise
+        except (ValidationError, ValueError, TypeError, KeyError, IndexError) as error:
+            raise PersistedDataIntegrityError(
+                "Persisted sandbox receipt authority is invalid"
+            ) from error
+        return records.get(case_id)
+
+    def _validate_all_receipt_authority(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        selected_case_id: str | None = None,
+    ) -> dict[str, SandboxReceiptRecord]:
+        """Require one exact immutable authority projection for every final receipt."""
+
+        receipt_query = "SELECT case_id FROM sandbox_receipts"
+        authority_query = "SELECT * FROM sandbox_receipt_authority"
+        final_case_query = "SELECT case_id FROM cases WHERE state = ?"
+        intermediate_query = "SELECT 1 FROM cases WHERE state = ? LIMIT 1"
+        scope_parameters: tuple[str, ...] = ()
+        if selected_case_id is not None:
+            receipt_query += " WHERE case_id = ?"
+            authority_query += " WHERE case_id = ?"
+            final_case_query += " AND case_id = ?"
+            intermediate_query = (
+                "SELECT 1 FROM cases WHERE state = ? AND case_id = ? LIMIT 1"
+            )
+            scope_parameters = (selected_case_id,)
+        authority_query += " ORDER BY case_id"
+        receipt_case_ids = {
+            _require_string(row["case_id"], "receipt case id")
+            for row in connection.execute(receipt_query, scope_parameters)
+        }
+        authority_rows = connection.execute(
+            authority_query,
+            scope_parameters,
+        ).fetchall()
+        authority_case_ids = {
+            _require_string(row["case_id"], "receipt authority case id")
+            for row in authority_rows
+        }
+        final_case_ids = {
+            _require_string(row["case_id"], "final receipt case id")
+            for row in connection.execute(
+                final_case_query,
+                (CaseState.RECEIPT.value, *scope_parameters),
+            )
+        }
+        has_intermediate_final = connection.execute(
+            intermediate_query,
+            (CaseState.HUMAN_APPROVED.value, *scope_parameters),
+        ).fetchone()
+        if (
+            has_intermediate_final is not None
+            or receipt_case_ids != authority_case_ids
+            or receipt_case_ids != final_case_ids
+        ):
+            raise PersistedDataIntegrityError(
+                "Persisted final cases lost their receipt authority"
+            )
+
+        expected_gate_rows: set[tuple[int, str, str]] = set()
+        expected_human_audits: set[tuple[int, str]] = set()
+        expected_receipt_audits: set[tuple[int, str]] = set()
+        expected_approval_states: set[tuple[int, str]] = set()
+        expected_receipt_states: set[tuple[int, str]] = set()
+        expected_consumptions: set[tuple[bytes, str]] = set()
+        records: dict[str, SandboxReceiptRecord] = {}
+        for authority_row in authority_rows:
+            authority_case_id = _require_string(
+                authority_row["case_id"],
+                "receipt authority case id",
+            )
+            record = self._validate_receipt_authority_row(
+                connection,
+                authority_row=authority_row,
+            )
+            records[authority_case_id] = record
+            g9_sequence = _require_integer(
+                authority_row["g9_gate_sequence"],
+                "G9 authority sequence",
+            )
+            g10_sequence = _require_integer(
+                authority_row["g10_gate_sequence"],
+                "G10 authority sequence",
+            )
+            expected_gate_rows.update(
+                {
+                    (g9_sequence, authority_case_id, GateId.G9_HUMAN_APPROVAL.value),
+                    (
+                        g10_sequence,
+                        authority_case_id,
+                        GateId.G10_RECEIPT_REDACTION.value,
+                    ),
+                }
+            )
+            expected_human_audits.add(
+                (
+                    _require_integer(
+                        authority_row["human_approval_audit_sequence"],
+                        "human approval audit sequence",
+                    ),
+                    authority_case_id,
+                )
+            )
+            expected_approval_states.add(
+                (
+                    _require_integer(
+                        authority_row["human_approved_state_audit_sequence"],
+                        "human-approved state audit sequence",
+                    ),
+                    authority_case_id,
+                )
+            )
+            expected_receipt_audits.add(
+                (
+                    _require_integer(
+                        authority_row["receipt_audit_sequence"],
+                        "receipt audit sequence",
+                    ),
+                    authority_case_id,
+                )
+            )
+            expected_receipt_states.add(
+                (
+                    _require_integer(
+                        authority_row["receipt_state_audit_sequence"],
+                        "receipt state audit sequence",
+                    ),
+                    authority_case_id,
+                )
+            )
+            digest = authority_row["human_capability_digest"]
+            self._validate_digest(digest)
+            expected_consumptions.add((digest, authority_case_id))
+
+        gate_query = (
+            "SELECT sequence, case_id, gate_id FROM gate_decisions "
+            "WHERE gate_id IN (?, ?)"
+        )
+        gate_parameters: tuple[str, ...] = (
+            GateId.G9_HUMAN_APPROVAL.value,
+            GateId.G10_RECEIPT_REDACTION.value,
+        )
+        if selected_case_id is not None:
+            gate_query += " AND case_id = ?"
+            gate_parameters = (*gate_parameters, selected_case_id)
+        actual_gate_rows = {
+            (
+                _require_integer(row["sequence"], "final gate sequence"),
+                _require_string(row["case_id"], "final gate case id"),
+                _require_string(row["gate_id"], "final gate id"),
+            )
+            for row in connection.execute(gate_query, gate_parameters)
+        }
+        actual_human_audits = self._audit_sequence_case_set(
+            connection,
+            event_type=AuditEventType.HUMAN_APPROVAL,
+            case_id=selected_case_id,
+        )
+        actual_receipt_audits = self._audit_sequence_case_set(
+            connection,
+            event_type=AuditEventType.RECEIPT,
+            case_id=selected_case_id,
+        )
+        actual_approval_states = self._state_audit_sequence_case_set(
+            connection,
+            from_state=CaseState.REVIEW,
+            to_state=CaseState.HUMAN_APPROVED,
+            case_id=selected_case_id,
+        )
+        actual_receipt_states = self._state_audit_sequence_case_set(
+            connection,
+            from_state=CaseState.HUMAN_APPROVED,
+            to_state=CaseState.RECEIPT,
+            case_id=selected_case_id,
+        )
+        consumption_query = """
+            SELECT capability_digest, case_id
+            FROM authority_capabilities
+            WHERE role = 'human' AND purpose = 'human_approve'
+              AND consumed_at IS NOT NULL
+        """
+        consumption_parameters: tuple[str, ...] = ()
+        if selected_case_id is not None:
+            consumption_query += " AND case_id = ?"
+            consumption_parameters = (selected_case_id,)
+        actual_consumptions = {
+            (
+                bytes(row["capability_digest"]),
+                _require_string(row["case_id"], "consumed capability case id"),
+            )
+            for row in connection.execute(
+                consumption_query,
+                consumption_parameters,
+            )
+        }
+        if (
+            actual_gate_rows != expected_gate_rows
+            or actual_human_audits != expected_human_audits
+            or actual_receipt_audits != expected_receipt_audits
+            or actual_approval_states != expected_approval_states
+            or actual_receipt_states != expected_receipt_states
+            or actual_consumptions != expected_consumptions
+        ):
+            raise PersistedDataIntegrityError(
+                "Persisted receipt boundary contains missing or additional authority rows"
+            )
+        return records
+
+    def _validate_receipt_authority_row(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        authority_row: sqlite3.Row,
+    ) -> SandboxReceiptRecord:
+        case_id = _require_string(authority_row["case_id"], "receipt authority case id")
+        if _require_integer(authority_row["authority_version"], "receipt authority version") != 1:
+            raise PersistedDataIntegrityError("Persisted receipt authority version is invalid")
+        receipt_row = connection.execute(
             "SELECT receipt_json, created_at FROM sandbox_receipts WHERE case_id = ?",
             (case_id,),
         ).fetchone()
-        if row is None:
-            return None
+        case_row = connection.execute(
+            "SELECT * FROM cases WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if receipt_row is None or case_row is None:
+            raise PersistedDataIntegrityError("Persisted receipt authority lost its parent")
         try:
-            receipt = SandboxReceipt.model_validate_json(
-                _require_string(row["receipt_json"], "sandbox receipt")
+            receipt_json = _require_string(receipt_row["receipt_json"], "sandbox receipt")
+            authority_json = _require_string(
+                authority_row["receipt_json"],
+                "receipt authority JSON",
             )
-            created_at = _parse_datetime(_require_string(row["created_at"], "created_at"))
-            if receipt.case_id != case_id:
-                raise ValueError("Receipt caseId does not match its persistence key")
+            receipt = SandboxReceipt.model_validate_json(receipt_json)
+            authority_receipt = SandboxReceipt.model_validate_json(authority_json)
+            created_at = _parse_datetime(
+                _require_string(receipt_row["created_at"], "receipt created_at")
+            )
+            authority_created_at = _parse_datetime(
+                _require_string(authority_row["created_at"], "receipt authority created_at")
+            )
+            current = self._row_to_case(case_row)
+            digest = authority_row["human_capability_digest"]
+            self._validate_digest(digest)
+            capability = self._require_capability(connection, digest)
+            variant = PortalVariant(
+                _require_string(authority_row["portal_variant"], "receipt portal variant")
+            )
+            bound_review_version = _require_integer(
+                authority_row["bound_review_case_version"],
+                "receipt bound review version",
+            )
+            receipt_digest = _require_string(
+                authority_row["receipt_sha256"],
+                "receipt authority SHA-256",
+            )
+            if (
+                receipt_json != authority_json
+                or receipt != authority_receipt
+                or receipt_digest
+                != hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+                or receipt.case_id != case_id
+                or receipt.variant is not variant
+                or receipt.approval_id
+                != _require_string(authority_row["approval_id"], "authority approval id")
+                or receipt.receipt_id
+                != _require_string(authority_row["receipt_id"], "authority receipt id")
+                or not receipt.approval_id.startswith(
+                    f"approval-{variant.value.lower()}-"
+                )
+                or current.state is not CaseState.RECEIPT
+                or current.snapshot.portal_state is not PortalState.RECEIPT
+                or receipt.version != current.version
+                or bound_review_version != current.version - 2
+                or current.updated_at != receipt.rendered_at
+                or created_at != receipt.rendered_at
+                or authority_created_at != receipt.rendered_at
+                or capability.case_id != case_id
+                or capability.role != "human"
+                or capability.purpose != "human_approve"
+                or capability.portal_variant is not variant
+                or capability.bound_case_version != bound_review_version
+                or capability.consumed_at is None
+                or capability.revoked_at is not None
+                or not (
+                    capability.issued_at
+                    < capability.consumed_at
+                    < receipt.approved_at
+                    < receipt.rendered_at
+                )
+                or capability.consumed_at >= capability.expires_at
+            ):
+                raise ValueError("Receipt authority binding is inconsistent")
+
+            g9 = self._require_receipt_gate(
+                connection,
+                sequence=_require_integer(
+                    authority_row["g9_gate_sequence"],
+                    "G9 authority sequence",
+                ),
+                case_id=case_id,
+                gate_id=GateId.G9_HUMAN_APPROVAL,
+                occurred_at=receipt.approved_at,
+            )
+            g10 = self._require_receipt_gate(
+                connection,
+                sequence=_require_integer(
+                    authority_row["g10_gate_sequence"],
+                    "G10 authority sequence",
+                ),
+                case_id=case_id,
+                gate_id=GateId.G10_RECEIPT_REDACTION,
+                occurred_at=receipt.rendered_at,
+            )
+            self._require_gate_workflow_authority(
+                connection,
+                case_id=case_id,
+                expected=(g9, g10),
+            )
+            approval_audit = self._require_receipt_audit(
+                connection,
+                sequence=_require_integer(
+                    authority_row["human_approval_audit_sequence"],
+                    "human approval audit sequence",
+                ),
+                case_id=case_id,
+                event_type=AuditEventType.HUMAN_APPROVAL,
+                actor=ActorType.HUMAN,
+                occurred_at=receipt.approved_at,
+                from_state=None,
+                to_state=None,
+            )
+            approval_state = self._require_receipt_audit(
+                connection,
+                sequence=_require_integer(
+                    authority_row["human_approved_state_audit_sequence"],
+                    "human-approved state audit sequence",
+                ),
+                case_id=case_id,
+                event_type=AuditEventType.CASE_STATE_CHANGED,
+                actor=ActorType.HUMAN,
+                occurred_at=receipt.approved_at,
+                from_state=CaseState.REVIEW,
+                to_state=CaseState.HUMAN_APPROVED,
+            )
+            receipt_audit = self._require_receipt_audit(
+                connection,
+                sequence=_require_integer(
+                    authority_row["receipt_audit_sequence"],
+                    "receipt audit sequence",
+                ),
+                case_id=case_id,
+                event_type=AuditEventType.RECEIPT,
+                actor=ActorType.SYSTEM,
+                occurred_at=receipt.rendered_at,
+                from_state=None,
+                to_state=None,
+            )
+            receipt_state = self._require_receipt_audit(
+                connection,
+                sequence=_require_integer(
+                    authority_row["receipt_state_audit_sequence"],
+                    "receipt state audit sequence",
+                ),
+                case_id=case_id,
+                event_type=AuditEventType.CASE_STATE_CHANGED,
+                actor=ActorType.SYSTEM,
+                occurred_at=receipt.rendered_at,
+                from_state=CaseState.HUMAN_APPROVED,
+                to_state=CaseState.RECEIPT,
+            )
+            self._require_state_workflow_authority(
+                connection,
+                sequence=_require_integer(
+                    authority_row["human_approved_state_audit_sequence"],
+                    "human-approved state audit sequence",
+                ),
+                audit=approval_state,
+            )
+            self._require_state_workflow_authority(
+                connection,
+                sequence=_require_integer(
+                    authority_row["receipt_state_audit_sequence"],
+                    "receipt state audit sequence",
+                ),
+                audit=receipt_state,
+            )
+            del approval_audit, receipt_audit
         except (ValidationError, ValueError, TypeError) as error:
-            raise PersistedDataIntegrityError("Persisted sandbox receipt is invalid") from error
+            raise PersistedDataIntegrityError(
+                "Persisted sandbox receipt authority is invalid"
+            ) from error
         return SandboxReceiptRecord(receipt=receipt, created_at=created_at)
+
+    @staticmethod
+    def _audit_sequence_case_set(
+        connection: sqlite3.Connection,
+        *,
+        event_type: AuditEventType,
+        case_id: str | None = None,
+    ) -> set[tuple[int, str]]:
+        query = """
+            SELECT sequence, case_id FROM audit_events
+            WHERE json_extract(event_json, '$.eventType') = ?
+        """
+        parameters: tuple[str, ...] = (event_type.value,)
+        if case_id is not None:
+            query += " AND case_id = ?"
+            parameters = (event_type.value, case_id)
+        return {
+            (
+                _require_integer(row["sequence"], "authority audit sequence"),
+                _require_string(row["case_id"], "authority audit case id"),
+            )
+            for row in connection.execute(query, parameters)
+        }
+
+    @staticmethod
+    def _state_audit_sequence_case_set(
+        connection: sqlite3.Connection,
+        *,
+        from_state: CaseState,
+        to_state: CaseState,
+        case_id: str | None = None,
+    ) -> set[tuple[int, str]]:
+        query = """
+            SELECT sequence, case_id FROM audit_events
+            WHERE json_extract(event_json, '$.eventType') = ?
+              AND json_extract(event_json, '$.fromState') = ?
+              AND json_extract(event_json, '$.toState') = ?
+        """
+        parameters: tuple[str, ...] = (
+            AuditEventType.CASE_STATE_CHANGED.value,
+            from_state.value,
+            to_state.value,
+        )
+        if case_id is not None:
+            query += " AND case_id = ?"
+            parameters = (*parameters, case_id)
+        return {
+            (
+                _require_integer(row["sequence"], "state authority sequence"),
+                _require_string(row["case_id"], "state authority case id"),
+            )
+            for row in connection.execute(query, parameters)
+        }
+
+    @staticmethod
+    def _require_receipt_gate(
+        connection: sqlite3.Connection,
+        *,
+        sequence: int,
+        case_id: str,
+        gate_id: GateId,
+        occurred_at: datetime,
+    ) -> GateDecision:
+        row = connection.execute(
+            "SELECT * FROM gate_decisions WHERE sequence = ?",
+            (sequence,),
+        ).fetchone()
+        if row is None:
+            raise PersistedDataIntegrityError("Receipt authority gate is missing")
+        decision = GateDecision.model_validate_json(
+            _require_string(row["decision_json"], "receipt authority gate")
+        )
+        if (
+            _require_string(row["case_id"], "receipt gate case id") != case_id
+            or _require_string(row["gate_id"], "receipt gate id") != gate_id.value
+            or _parse_datetime(
+                _require_string(row["decided_at"], "receipt gate decided_at")
+            )
+            != occurred_at
+            or decision.gate_id is not gate_id
+            or decision.decided_at != occurred_at
+            or not decision.deterministic_passed
+            or decision.model_blocked
+            or not decision.passed
+            or decision.reason_codes
+            or decision.evidence_refs
+        ):
+            raise PersistedDataIntegrityError("Receipt authority gate is invalid")
+        return decision
+
+    @staticmethod
+    def _require_receipt_audit(
+        connection: sqlite3.Connection,
+        *,
+        sequence: int,
+        case_id: str,
+        event_type: AuditEventType,
+        actor: ActorType,
+        occurred_at: datetime,
+        from_state: CaseState | None,
+        to_state: CaseState | None,
+    ) -> AuditEvent:
+        row = connection.execute(
+            "SELECT * FROM audit_events WHERE sequence = ?",
+            (sequence,),
+        ).fetchone()
+        if row is None:
+            raise PersistedDataIntegrityError("Receipt authority audit is missing")
+        audit = AuditEvent.model_validate_json(
+            _require_string(row["event_json"], "receipt authority audit")
+        )
+        if (
+            audit.event_id != _require_string(row["event_id"], "receipt audit id")
+            or audit.case_id != _require_string(row["case_id"], "receipt audit case id")
+            or audit.occurred_at
+            != _parse_datetime(
+                _require_string(row["occurred_at"], "receipt audit occurred_at")
+            )
+            or audit.case_id != case_id
+            or audit.event_type is not event_type
+            or audit.actor is not actor
+            or audit.occurred_at != occurred_at
+            or audit.from_state is not from_state
+            or audit.to_state is not to_state
+            or audit.reason_codes
+            or audit.details
+        ):
+            raise PersistedDataIntegrityError("Receipt authority audit is invalid")
+        return audit
+
+    @staticmethod
+    def _require_state_workflow_authority(
+        connection: sqlite3.Connection,
+        *,
+        sequence: int,
+        audit: AuditEvent,
+    ) -> None:
+        row = connection.execute(
+            "SELECT * FROM workflow_events WHERE source_audit_sequence = ?",
+            (sequence,),
+        ).fetchone()
+        if row is None:
+            raise PersistedDataIntegrityError("Receipt state projection is missing")
+        envelope = SqliteCaseRepository._workflow_envelope_from_row(
+            row,
+            label="receipt state projection",
+        )
+        _validate_audit_projection_binding(audit, envelope)
+        event = envelope.event
+        if (
+            not isinstance(event, StateWorkflowEvent)
+            or event.actor is not audit.actor
+            or event.from_state is not audit.from_state
+            or event.to_state is not audit.to_state
+        ):
+            raise PersistedDataIntegrityError("Receipt state projection is invalid")
+
+    @staticmethod
+    def _require_gate_workflow_authority(
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        expected: tuple[GateDecision, GateDecision],
+    ) -> None:
+        actual: list[GateDecision] = []
+        for row in connection.execute(
+            """
+            SELECT * FROM workflow_events
+            WHERE case_id = ? AND event_kind = ?
+            ORDER BY source_audit_sequence
+            """,
+            (case_id, WorkflowEventKind.GATE.value),
+        ):
+            envelope = SqliteCaseRepository._workflow_envelope_from_row(
+                row,
+                label="receipt gate projection",
+            )
+            if (
+                isinstance(envelope.event, GateWorkflowEvent)
+                and envelope.event.decision.gate_id
+                in {GateId.G9_HUMAN_APPROVAL, GateId.G10_RECEIPT_REDACTION}
+            ):
+                source_audit = SqliteCaseRepository._require_receipt_audit(
+                    connection,
+                    sequence=envelope.source_audit_sequence,
+                    case_id=case_id,
+                    event_type=AuditEventType.GATE_DECISION,
+                    actor=ActorType.SYSTEM,
+                    occurred_at=envelope.event.decision.decided_at,
+                    from_state=None,
+                    to_state=None,
+                )
+                _validate_audit_projection_binding(source_audit, envelope)
+                actual.append(envelope.event.decision)
+        if tuple(actual) != expected:
+            raise PersistedDataIntegrityError("Receipt gate projections are invalid")
+
+    @staticmethod
+    def _workflow_envelope_from_row(
+        row: sqlite3.Row,
+        *,
+        label: str,
+    ) -> WorkflowEventEnvelope:
+        envelope = WorkflowEventEnvelope.model_validate_json(
+            _require_string(row["event_json"], label)
+        )
+        source_sequence = _require_integer(
+            row["source_audit_sequence"],
+            f"{label} source sequence",
+        )
+        if (
+            envelope.source_audit_sequence != source_sequence
+            or envelope.cursor != source_sequence
+            or envelope.source_audit_event_id
+            != _require_string(row["source_audit_event_id"], f"{label} source id")
+            or envelope.source_audit_event_type.value
+            != _require_string(row["source_audit_event_type"], f"{label} source type")
+            or envelope.case_id != _require_string(row["case_id"], f"{label} case id")
+            or envelope.event_id != _require_string(row["event_id"], f"{label} event id")
+            or envelope.event.kind.value
+            != _require_string(row["event_kind"], f"{label} event kind")
+        ):
+            raise PersistedDataIntegrityError(f"Persisted {label} columns are invalid")
+        return envelope
 
     def delete_case(self, case_id: str) -> bool:
         if self.is_canonical_authority:
@@ -4141,12 +5462,30 @@ class SqliteCaseRepository:
                 )
             self._validate_replay_actor(event, audit.actor)
             if isinstance(event, GateWorkflowEvent):
-                allowed_state = (
-                    replayed_state is CaseState.CREATED
-                    if event.decision.gate_id in {GateId.G0_INTAKE, GateId.G1_PRIVACY}
-                    else replayed_state
-                    in {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
-                )
+                gate_states = {
+                    GateId.G0_INTAKE: frozenset({CaseState.CREATED}),
+                    GateId.G1_PRIVACY: frozenset({CaseState.CREATED}),
+                    GateId.G2_OUTPUT_CONTRACT: frozenset(
+                        {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                    ),
+                    GateId.G3_SAFETY_SCOPE: frozenset(
+                        {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                    ),
+                    GateId.G4_PROVENANCE: frozenset(
+                        {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                    ),
+                    GateId.G5_COMPLETENESS: frozenset(
+                        {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                    ),
+                    GateId.G6_TOOL_AUTHORITY: frozenset({CaseState.FILLING}),
+                    GateId.G7_PORTAL_WRITE: frozenset({CaseState.FILLING}),
+                    GateId.G8_VERIFICATION: frozenset({CaseState.VERIFYING}),
+                    GateId.G9_HUMAN_APPROVAL: frozenset({CaseState.REVIEW}),
+                    GateId.G10_RECEIPT_REDACTION: frozenset(
+                        {CaseState.HUMAN_APPROVED}
+                    ),
+                }
+                allowed_state = replayed_state in gate_states[event.decision.gate_id]
                 if not allowed_state:
                     raise WorkflowAtomicityError(
                         "Persisted gate was not authorized by the replayed case state"
@@ -4413,6 +5752,25 @@ class SqliteCaseRepository:
                 ):
                     raise WorkflowAtomicityError(
                         "Packet-producing analysis mutation has no exact plan events"
+                    )
+                elif (event.from_state, event.to_state) in {
+                    (CaseState.READY_TO_FILL, CaseState.FILLING),
+                    (CaseState.FILLING, CaseState.VERIFYING),
+                    (CaseState.VERIFYING, CaseState.REVIEW),
+                    (CaseState.REVIEW, CaseState.HUMAN_APPROVED),
+                }:
+                    if last_plan_events is None or last_safe_plan is None:
+                        raise WorkflowAtomicityError(
+                            "Authority transition has no prior packet plan authority"
+                        )
+                    expected_packet_authorities.append(
+                        _ExpectedPacketAuthority(
+                            bound_version=replayed_version,
+                            created_at=occurred_at,
+                            state=event.to_state,
+                            plan_events=last_plan_events,
+                            safe_plan=last_safe_plan,
+                        )
                     )
                 elif pending_plan:
                     raise WorkflowAtomicityError(
@@ -4739,8 +6097,28 @@ class SqliteCaseRepository:
                 system,
                 frozenset({3}),
             ),
+            (CaseState.READY_TO_FILL, CaseState.FILLING): (
+                ActorType.AGENT,
+                frozenset({0}),
+            ),
+            (CaseState.FILLING, CaseState.VERIFYING): (
+                ActorType.AGENT,
+                frozenset({1}),
+            ),
+            (CaseState.VERIFYING, CaseState.REVIEW): (
+                system,
+                frozenset({1}),
+            ),
             (CaseState.FILLING, CaseState.FAILED): (system, frozenset({4})),
             (CaseState.VERIFYING, CaseState.FAILED): (system, frozenset({4})),
+            (CaseState.REVIEW, CaseState.HUMAN_APPROVED): (
+                ActorType.HUMAN,
+                frozenset({1}),
+            ),
+            (CaseState.HUMAN_APPROVED, CaseState.RECEIPT): (
+                system,
+                frozenset({1}),
+            ),
         }
         authority = allowed.get(transition)
         if (
@@ -5016,22 +6394,63 @@ class SqliteCaseRepository:
                 "Packet authority requires the canonical G0-G3 prefix"
             )
         tail = history[4:]
+        authority_start = next(
+            (
+                index
+                for index, decision in enumerate(tail)
+                if decision.gate_id
+                in {
+                    GateId.G6_TOOL_AUTHORITY,
+                    GateId.G7_PORTAL_WRITE,
+                    GateId.G8_VERIFICATION,
+                    GateId.G9_HUMAN_APPROVAL,
+                    GateId.G10_RECEIPT_REDACTION,
+                }
+            ),
+            len(tail),
+        )
+        analysis_tail = tail[:authority_start]
+        authority_tail = tail[authority_start:]
         if any(
             decision.gate_id
             is not (GateId.G4_PROVENANCE if index % 2 == 0 else GateId.G5_COMPLETENESS)
-            for index, decision in enumerate(tail)
+            for index, decision in enumerate(analysis_tail)
         ):
             raise WorkflowAtomicityError(
                 "Packet authority requires canonical G4/G5 history pairs"
             )
-        if not tail:
-            return history[:4]
-        effective_tail = (
-            tail[-2:]
-            if tail[-1].gate_id is GateId.G5_COMPLETENESS
-            else tail[-1:]
+        expected_authority = (
+            GateId.G6_TOOL_AUTHORITY,
+            GateId.G7_PORTAL_WRITE,
+            GateId.G8_VERIFICATION,
+            GateId.G9_HUMAN_APPROVAL,
+            GateId.G10_RECEIPT_REDACTION,
         )
-        return (*history[:4], *effective_tail)
+        if tuple(decision.gate_id for decision in authority_tail) != expected_authority[
+            : len(authority_tail)
+        ]:
+            raise WorkflowAtomicityError(
+                "Packet authority requires the canonical G6-G10 suffix"
+            )
+        if authority_tail and (
+            len(analysis_tail) < 2
+            or analysis_tail[-2].gate_id is not GateId.G4_PROVENANCE
+            or analysis_tail[-1].gate_id is not GateId.G5_COMPLETENESS
+            or not analysis_tail[-2].passed
+            or not analysis_tail[-1].passed
+        ):
+            raise WorkflowAtomicityError(
+                "Packet authority requires canonical G4/G5 history pairs; "
+                "G6 and later require the final pair to pass"
+            )
+        if not analysis_tail:
+            return (*history[:4], *authority_tail)
+        effective_tail = (
+            analysis_tail[-2:]
+            if analysis_tail[-1].gate_id is GateId.G5_COMPLETENESS
+            else analysis_tail[-1:]
+        )
+        return (*history[:4], *effective_tail, *authority_tail)
 
     @classmethod
     def _validate_packet_recomputations(
@@ -7806,13 +9225,22 @@ class SqliteCaseRepository:
         digest: bytes,
         role: str,
         purpose: str,
+        portal_variant: PortalVariant | None,
         issued_at: datetime,
         expires_at: datetime,
+        *,
+        allow_legacy_human_variant: bool = False,
     ) -> None:
         cls._validate_digest(digest)
         allowed = {("agent", "portal_run"), ("human", "human_approve")}
         if (role, purpose) not in allowed:
             raise ValueError("Capability role and purpose are not an allowed pair")
+        if (role == "agent" and portal_variant is not None) or (
+            role == "human"
+            and not isinstance(portal_variant, PortalVariant)
+            and not (allow_legacy_human_variant and portal_variant is None)
+        ):
+            raise ValueError("Capability portal variant does not match its role")
         _dump_aware_datetime(issued_at, "capability issued_at")
         _dump_aware_datetime(expires_at, "capability expires_at")
         lifetime = expires_at - issued_at
@@ -7892,17 +9320,36 @@ class SqliteCaseRepository:
         return self._row_to_capability(row)
 
     @staticmethod
-    def _row_to_capability(row: sqlite3.Row) -> AuthorityCapabilityRecord:
+    def _row_to_capability(
+        row: sqlite3.Row,
+        *,
+        allow_legacy_human_variant: bool = False,
+    ) -> AuthorityCapabilityRecord:
         digest = row["capability_digest"]
         if type(digest) is not bytes or len(digest) != 32:
             raise PersistedDataIntegrityError("Persisted capability digest is invalid")
         consumed_raw = row["consumed_at"]
         revoked_raw = row["revoked_at"]
+        try:
+            variant_raw = row["portal_variant"]
+        except IndexError:
+            variant_raw = None
+        try:
+            portal_variant = (
+                None
+                if variant_raw is None
+                else PortalVariant(_require_string(variant_raw, "capability portal variant"))
+            )
+        except ValueError as error:
+            raise PersistedDataIntegrityError(
+                "Persisted capability portal variant is invalid"
+            ) from error
         record = AuthorityCapabilityRecord(
             digest=digest,
             case_id=_require_string(row["case_id"], "capability case id"),
             role=_require_string(row["role"], "capability role"),
             purpose=_require_string(row["purpose"], "capability purpose"),
+            portal_variant=portal_variant,
             bound_case_version=_require_integer(
                 row["bound_case_version"],
                 "capability bound case version",
@@ -7925,8 +9372,10 @@ class SqliteCaseRepository:
                 record.digest,
                 record.role,
                 record.purpose,
+                record.portal_variant,
                 record.issued_at,
                 record.expires_at,
+                allow_legacy_human_variant=allow_legacy_human_variant,
             )
         except ValueError as error:
             raise PersistedDataIntegrityError("Persisted capability metadata is invalid") from error
