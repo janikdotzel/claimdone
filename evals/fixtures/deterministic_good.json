@@ -38,6 +38,14 @@
         {"field": "narrative", "value": "Another vehicle contacted the rear of the demo vehicle in Berlin.", "sourceRefs": ["synthetic-statement-de-a", "synthetic-images-rear-a"]},
         {"field": "attachments", "value": 3, "sourceRefs": ["synthetic-images-rear-a"]}
       ],
+      "portalAttachmentIdentity": {
+        "actualAttachmentIds": [
+          "staged-de-a-attachment-1",
+          "staged-de-a-attachment-2",
+          "staged-de-a-attachment-3"
+        ],
+        "modelReportedMatch": true
+      },
       "verificationState": "verified",
       "finalState": "review",
       "mismatchProbes": [
@@ -86,6 +94,14 @@
         {"field": "narrative", "value": "Another vehicle contacted the rear of the demo vehicle in Hamburg.", "sourceRefs": ["synthetic-transcript-en-b", "synthetic-images-rear-b"]},
         {"field": "attachments", "value": 3, "sourceRefs": ["synthetic-images-rear-b"]}
       ],
+      "portalAttachmentIdentity": {
+        "actualAttachmentIds": [
+          "staged-en-b-attachment-1",
+          "staged-en-b-attachment-2",
+          "staged-en-b-attachment-3"
+        ],
+        "modelReportedMatch": true
+      },
       "verificationState": "verified",
       "finalState": "review",
       "mismatchProbes": [],
@@ -123,6 +139,14 @@
         {"field": "narrative", "value": "Another vehicle contacted the rear of the demo vehicle in Cologne.", "sourceRefs": ["synthetic-statement-de-c", "synthetic-images-rear-c"]},
         {"field": "attachments", "value": 3, "sourceRefs": ["synthetic-images-rear-c"]}
       ],
+      "portalAttachmentIdentity": {
+        "actualAttachmentIds": [
+          "staged-unknown-counterparty-attachment-1",
+          "staged-unknown-counterparty-attachment-2",
+          "staged-unknown-counterparty-attachment-3"
+        ],
+        "modelReportedMatch": true
+      },
       "verificationState": "verified",
       "finalState": "review",
       "mismatchProbes": [],

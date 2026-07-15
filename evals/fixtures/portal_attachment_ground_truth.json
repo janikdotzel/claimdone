@@ -1,0 +1,29 @@
+{
+  "datasetVersion": "eval-v1-staged-observations-v1",
+  "cases": [
+    {
+      "evalId": "eval-happy-de-a",
+      "expectedAttachmentIds": [
+        "staged-de-a-attachment-1",
+        "staged-de-a-attachment-2",
+        "staged-de-a-attachment-3"
+      ]
+    },
+    {
+      "evalId": "eval-happy-en-b",
+      "expectedAttachmentIds": [
+        "staged-en-b-attachment-1",
+        "staged-en-b-attachment-2",
+        "staged-en-b-attachment-3"
+      ]
+    },
+    {
+      "evalId": "eval-happy-unknown-counterparty",
+      "expectedAttachmentIds": [
+        "staged-unknown-counterparty-attachment-1",
+        "staged-unknown-counterparty-attachment-2",
+        "staged-unknown-counterparty-attachment-3"
+      ]
+    }
+  ]
+}

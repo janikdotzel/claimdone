@@ -108,6 +108,13 @@ The graders cover:
 `fixtures/provenance_ground_truth.json` independently owns every source ID's kind and every allowed
 fact's exact source references. Graders never accept the observation's own `sourceCatalog` as that
 authority, and the manifest is part of the effective-corpus digest.
+`fixtures/portal_attachment_ground_truth.json` independently owns the exact ordered three
+attachment IDs for every portal-writing case. The canonical eval dataset's scalar `attachments`
+value remains a redundant count, while `portalAttachmentIdentity.actualAttachmentIds` records the
+fresh rendered IDs. Both ID lists reuse the V4 raw-exact, unique, exactly-three contract type; the
+runner binds count to list length and G7 compares the ordered tuples. A same-count wrong or reordered
+ID therefore blocks even when `modelReportedMatch` is true. The attachment authority is also part of
+the effective-corpus digest.
 `fixtures/deterministic_failures.json` names closed negative mutations and their exact expected
 metric, gate, and reason codes. The catalog must contain every named mutation exactly once in
 canonical order, and a negative run is accepted only when exactly that one check fails. Generic JSON

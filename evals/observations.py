@@ -39,6 +39,7 @@ from claimdone_api.contracts import (
     RequiredClaimField,
     VerificationState,
 )
+from claimdone_api.contracts.base import ExactlyThreeAttachmentIdentifiers
 
 _IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
 Identifier = Annotated[
@@ -62,6 +63,9 @@ FIXTURE_ROOT = Path(__file__).with_name("fixtures")
 GOOD_OBSERVATIONS_PATH = FIXTURE_ROOT / "deterministic_good.json"
 FAILURE_SAMPLES_PATH = FIXTURE_ROOT / "deterministic_failures.json"
 PROVENANCE_GROUND_TRUTH_PATH = FIXTURE_ROOT / "provenance_ground_truth.json"
+PORTAL_ATTACHMENT_GROUND_TRUTH_PATH = (
+    FIXTURE_ROOT / "portal_attachment_ground_truth.json"
+)
 EVAL_002_GATE_IDS = frozenset(
     {
         GateId.G2_OUTPUT_CONTRACT,
@@ -335,6 +339,30 @@ class ProvenanceGroundTruthSet(ObservationModel):
         return self
 
 
+class PortalAttachmentGroundTruthCase(ObservationModel):
+    """Independent exact ordered attachment identity for one portal-writing case."""
+
+    eval_id: Identifier
+    expected_attachment_ids: ExactlyThreeAttachmentIdentifiers
+
+
+class PortalAttachmentGroundTruthSet(ObservationModel):
+    """Versioned attachment authority kept separate from product observations."""
+
+    dataset_version: Identifier
+    cases: Annotated[
+        tuple[PortalAttachmentGroundTruthCase, ...],
+        Field(min_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def require_unique_eval_ids(self) -> Self:
+        eval_ids = tuple(case.eval_id for case in self.cases)
+        if len(set(eval_ids)) != len(eval_ids):
+            raise ValueError("Portal attachment ground-truth eval IDs must be unique")
+        return self
+
+
 class ObservedFact(ObservationModel):
     field: EvidenceField
     status: FactStatus
@@ -367,6 +395,13 @@ class ObservedPortalValue(ObservationModel):
     field: Identifier
     value: JsonScalar
     source_refs: tuple[Identifier, ...]
+
+
+class ObservedPortalAttachmentIdentity(ObservationModel):
+    """Fresh rendered attachment IDs, kept distinct from scalar portal values."""
+
+    actual_attachment_ids: ExactlyThreeAttachmentIdentifiers
+    model_reported_match: StrictBool
 
 
 class MismatchProbe(ObservationModel):
@@ -405,6 +440,7 @@ class EvalObservation(ObservationModel):
     tool_sequence: tuple[StrictStr, ...]
     gate_decisions: tuple[ObservedGateDecision, ...]
     portal_values: tuple[ObservedPortalValue, ...]
+    portal_attachment_identity: ObservedPortalAttachmentIdentity | None = None
     verification_state: VerificationState
     final_state: CaseState
     mismatch_probes: tuple[MismatchProbe, ...]
@@ -607,6 +643,19 @@ def load_provenance_ground_truth(
         ) from error
 
 
+def load_portal_attachment_ground_truth(
+    path: Path = PORTAL_ATTACHMENT_GROUND_TRUTH_PATH,
+) -> PortalAttachmentGroundTruthSet:
+    """Load exact attachment identity authority without trusting observations."""
+
+    try:
+        return PortalAttachmentGroundTruthSet.model_validate(_load_json(path))
+    except ValidationError as error:
+        raise ObservationValidationError(
+            f"Invalid portal attachment ground truth: {path.name}: {error}"
+        ) from error
+
+
 def observation_by_id(observations: ObservationSet, eval_id: str) -> EvalObservation:
     try:
         return next(item for item in observations.observations if item.eval_id == eval_id)
@@ -624,6 +673,13 @@ def provenance_by_id(
         raise ObservationValidationError(
             f"Missing provenance ground truth for eval ID: {eval_id}"
         ) from error
+
+
+def portal_attachment_ground_truth_by_id(
+    ground_truth: PortalAttachmentGroundTruthSet,
+    eval_id: str,
+) -> PortalAttachmentGroundTruthCase | None:
+    return next((item for item in ground_truth.cases if item.eval_id == eval_id), None)
 
 
 _SAFE_FIXTURE_NAME = re.compile(_IDENTIFIER_PATTERN)

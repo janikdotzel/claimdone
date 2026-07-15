@@ -36,6 +36,7 @@ from evals.observations import (
     ObservedFact,
     ObservedGateDecision,
     ObservedPortalValue,
+    PortalAttachmentGroundTruthCase,
     ProvenanceGroundTruthCase,
     ReceiptPhase,
     SchemaFixtureId,
@@ -465,7 +466,11 @@ def grade_tools(case: EvalCase, observation: EvalObservation) -> EvalCheckResult
     )
 
 
-def grade_portal_values(case: EvalCase, observation: EvalObservation) -> EvalCheckResult | None:
+def grade_portal_values(
+    case: EvalCase,
+    observation: EvalObservation,
+    attachment_ground_truth: PortalAttachmentGroundTruthCase | None,
+) -> EvalCheckResult | None:
     expected_values = case.expectation.expected_portal_values
     expected_gate = _expected_gate(case, GateId.G7_PORTAL_WRITE)
     observed_gate = _observed_gate(observation, GateId.G7_PORTAL_WRITE)
@@ -473,6 +478,8 @@ def grade_portal_values(case: EvalCase, observation: EvalObservation) -> EvalChe
     if (
         not expected_values
         and not observation.portal_values
+        and observation.portal_attachment_identity is None
+        and attachment_ground_truth is None
         and expected_gate is None
         and observed_gate is None
         and not state_reasons
@@ -501,6 +508,25 @@ def grade_portal_values(case: EvalCase, observation: EvalObservation) -> EvalChe
             continue
         if actual_value.source_refs != expected_value.source_refs:
             direct_reasons.append(GateReasonCode.G7_PROVENANCE_MISSING)
+    expected_attachment = expected.get(RequiredClaimField.ATTACHMENTS.value)
+    actual_attachment = actual.get(RequiredClaimField.ATTACHMENTS.value)
+    observed_identity = observation.portal_attachment_identity
+    if expected_attachment is None:
+        if observed_identity is not None or attachment_ground_truth is not None:
+            direct_reasons.append(GateReasonCode.G7_FIELD_NOT_ALLOWED)
+    elif (
+        attachment_ground_truth is None
+        or observed_identity is None
+        or type(expected_attachment.value) is not int
+        or expected_attachment.value
+        != len(attachment_ground_truth.expected_attachment_ids)
+        or actual_attachment is None
+        or type(actual_attachment.value) is not int
+        or actual_attachment.value != len(observed_identity.actual_attachment_ids)
+        or observed_identity.actual_attachment_ids
+        != attachment_ground_truth.expected_attachment_ids
+    ):
+        direct_reasons.append(GateReasonCode.G7_ATTACHMENT_MISMATCH)
     reasons = list(direct_reasons)
     reasons.extend(_gate_mismatch_reasons(case, observation, GateId.G7_PORTAL_WRITE))
     reasons.extend(state_reasons)
@@ -654,7 +680,8 @@ def grade_receipt(
 def grade_case(
     case: EvalCase,
     observation: EvalObservation,
-    ground_truth: ProvenanceGroundTruthCase,
+    provenance_ground_truth: ProvenanceGroundTruthCase,
+    portal_attachment_ground_truth: PortalAttachmentGroundTruthCase | None,
 ) -> tuple[EvalCheckResult, ...]:
     """Run every applicable deterministic grader in canonical metric order."""
 
@@ -666,7 +693,7 @@ def grade_case(
         EvalMetricId.PROVENANCE_COVERAGE: grade_provenance(
             case,
             observation,
-            ground_truth,
+            provenance_ground_truth,
         ),
         EvalMetricId.FORBIDDEN_FACTS: grade_forbidden_facts(case, observation),
         EvalMetricId.REQUIRED_FIELD_COMPLETION: grade_required_fields(case, observation),
@@ -675,7 +702,7 @@ def grade_case(
     }
     optional = (
         grade_safety(case, observation),
-        grade_portal_values(case, observation),
+        grade_portal_values(case, observation, portal_attachment_ground_truth),
         grade_approval(case, observation),
         grade_receipt(case, observation),
     )
@@ -776,12 +803,22 @@ def apply_failure_sample(
         )
         return observation.model_copy(update={"portal_values": values})
     if mutation is FailureMutation.PORTAL_ATTACHMENT_WRONG:
-        values = _replace_matching_portal_value(
-            observation.portal_values,
-            RequiredClaimField.ATTACHMENTS,
-            value=2,
+        identity = observation.portal_attachment_identity
+        if identity is None:
+            raise ObservationValidationError(
+                "Portal-attachment mutation requires rendered attachment identity"
+            )
+        changed_identity = identity.model_copy(
+            update={
+                "actual_attachment_ids": (
+                    *identity.actual_attachment_ids[:-1],
+                    "staged-wrong-attachment",
+                )
+            }
         )
-        return observation.model_copy(update={"portal_values": values})
+        return observation.model_copy(
+            update={"portal_attachment_identity": changed_identity}
+        )
     if mutation is FailureMutation.PORTAL_PROVENANCE_MISSING:
         current_sources = next(
             item.source_refs

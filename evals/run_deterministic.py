@@ -25,6 +25,7 @@ from claimdone_api.contracts import (
     EvalMetricStatus,
     EvalRunSummary,
     EvaluationMode,
+    RequiredClaimField,
 )
 from evals.deterministic_graders import apply_failure_sample, grade_case
 from evals.observations import (
@@ -33,11 +34,14 @@ from evals.observations import (
     FailureSample,
     ObservationSet,
     ObservationValidationError,
+    PortalAttachmentGroundTruthSet,
     ProvenanceGroundTruthSet,
     load_failure_samples,
     load_observations,
+    load_portal_attachment_ground_truth,
     load_provenance_ground_truth,
     observation_by_id,
+    portal_attachment_ground_truth_by_id,
     provenance_by_id,
 )
 from evals.validate_dataset import DATASET_PATH, load_dataset
@@ -77,13 +81,18 @@ def _effective_corpus_sha256(
     *,
     observations: ObservationSet,
     provenance_ground_truth: ProvenanceGroundTruthSet,
+    portal_attachment_ground_truth: PortalAttachmentGroundTruthSet,
 ) -> str:
-    """Bind the report to both ground truth and the exact staged observations."""
+    """Bind the report to all ground truth and exact staged observations."""
 
     corpus = {
         "dataset": _dataset_value(),
         "observations": observations.model_dump(mode="json", by_alias=True),
         "provenanceGroundTruth": provenance_ground_truth.model_dump(
+            mode="json",
+            by_alias=True,
+        ),
+        "portalAttachmentGroundTruth": portal_attachment_ground_truth.model_dump(
             mode="json",
             by_alias=True,
         ),
@@ -384,6 +393,60 @@ def _validate_provenance_ground_truth(
             )
 
 
+def _validate_portal_attachment_ground_truth(
+    *,
+    cases: Sequence[EvalCase],
+    observations: ObservationSet,
+    ground_truth: PortalAttachmentGroundTruthSet,
+) -> None:
+    """Bind exact ordered attachment IDs to every portal-writing dataset case."""
+
+    if ground_truth.dataset_version != observations.dataset_version:
+        raise DeterministicEvalError(
+            "Portal attachment ground truth and observations require the same datasetVersion"
+        )
+    expected_cases = tuple(
+        case
+        for case in cases
+        if any(
+            value.field is RequiredClaimField.ATTACHMENTS
+            for value in case.expectation.expected_portal_values
+        )
+    )
+    expected_ids = tuple(case.eval_id for case in expected_cases)
+    authority_ids = tuple(item.eval_id for item in ground_truth.cases)
+    observed_ids = tuple(
+        observation.eval_id
+        for observation in observations.observations
+        if observation.portal_attachment_identity is not None
+    )
+    if authority_ids != expected_ids:
+        raise DeterministicEvalError(
+            "Portal attachment ground truth requires exactly one ordered case per "
+            "portal attachment expectation"
+        )
+    if observed_ids != expected_ids:
+        raise DeterministicEvalError(
+            "Staged observations require exact attachment identity for every "
+            "portal attachment expectation"
+        )
+    for case in expected_cases:
+        authority = portal_attachment_ground_truth_by_id(ground_truth, case.eval_id)
+        assert authority is not None
+        expected_value = next(
+            value
+            for value in case.expectation.expected_portal_values
+            if value.field is RequiredClaimField.ATTACHMENTS
+        )
+        if (
+            type(expected_value.value) is not int
+            or expected_value.value != len(authority.expected_attachment_ids)
+        ):
+            raise DeterministicEvalError(
+                f"Portal attachment count does not match exact IDs for {case.eval_id}"
+            )
+
+
 def _replace_observation(
     observations: ObservationSet,
     replacement: EvalObservation,
@@ -478,12 +541,18 @@ def build_report(
     cases = load_dataset()
     observations = load_observations()
     provenance_ground_truth = load_provenance_ground_truth()
+    portal_attachment_ground_truth = load_portal_attachment_ground_truth()
     eval_ids = tuple(case.eval_id for case in cases)
     _validate_observation_coverage(eval_ids=eval_ids, observations=observations)
     _validate_provenance_ground_truth(
         cases=cases,
         observations=observations,
         ground_truth=provenance_ground_truth,
+    )
+    _validate_portal_attachment_ground_truth(
+        cases=cases,
+        observations=observations,
+        ground_truth=portal_attachment_ground_truth,
     )
 
     selected_failure: FailureSample | None = None
@@ -502,6 +571,10 @@ def build_report(
             case,
             observation,
             provenance_by_id(provenance_ground_truth, case.eval_id),
+            portal_attachment_ground_truth_by_id(
+                portal_attachment_ground_truth,
+                case.eval_id,
+            ),
         )
         deterministic_passed = all(check.passed for check in checks)
         result = EvalCaseResult.model_validate(
@@ -526,6 +599,7 @@ def build_report(
     corpus_sha = _effective_corpus_sha256(
         observations=observations,
         provenance_ground_truth=provenance_ground_truth,
+        portal_attachment_ground_truth=portal_attachment_ground_truth,
     )
     dataset_sha = _dataset_sha256()
     if (commit_sha is None) is not (source_tree_sha256 is None):

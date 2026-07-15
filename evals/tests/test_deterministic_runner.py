@@ -37,11 +37,16 @@ from evals.observations import (
     FailureSampleSet,
     ObservationSet,
     ObservedGateDecision,
+    ObservedPortalAttachmentIdentity,
+    PortalAttachmentGroundTruthCase,
+    PortalAttachmentGroundTruthSet,
     SourceKind,
     load_failure_samples,
     load_observations,
+    load_portal_attachment_ground_truth,
     load_provenance_ground_truth,
     observation_by_id,
+    portal_attachment_ground_truth_by_id,
     provenance_by_id,
 )
 from evals.run_deterministic import (
@@ -51,6 +56,7 @@ from evals.run_deterministic import (
     _parse_head_tree,
     _run_git,
     _validate_observation_coverage,
+    _validate_portal_attachment_ground_truth,
     _validate_provenance_ground_truth,
     _verify_index_matches_head,
     _verify_worktree_matches_head,
@@ -123,6 +129,13 @@ def _result_check(report: EvalRunSummary, sample: FailureSample) -> EvalCheckRes
     return next(check for check in result.checks if check.metric_id is sample.expected_metric_id)
 
 
+def _attachment_authority(eval_id: str) -> PortalAttachmentGroundTruthCase | None:
+    return portal_attachment_ground_truth_by_id(
+        load_portal_attachment_ground_truth(),
+        eval_id,
+    )
+
+
 def _case_check(
     case_id: str,
     observation: EvalObservation,
@@ -132,7 +145,7 @@ def _case_check(
     authority = provenance_by_id(load_provenance_ground_truth(), case_id)
     return next(
         check
-        for check in grade_case(case, observation, authority)
+        for check in grade_case(case, observation, authority, _attachment_authority(case_id))
         if check.metric_id is metric_id
     )
 
@@ -426,9 +439,112 @@ def test_independent_provenance_ground_truth_covers_dataset_exactly() -> None:
         )
 
 
+def test_independent_portal_attachment_ground_truth_covers_writing_cases_exactly() -> None:
+    cases = load_dataset()
+    observations = load_observations()
+    ground_truth = load_portal_attachment_ground_truth()
+
+    _validate_portal_attachment_ground_truth(
+        cases=cases,
+        observations=observations,
+        ground_truth=ground_truth,
+    )
+    expected_ids = tuple(
+        case.eval_id
+        for case in cases
+        if case.expectation.expected_portal_values
+    )
+    assert tuple(item.eval_id for item in ground_truth.cases) == expected_ids
+
+    missing_authority = ground_truth.model_copy(update={"cases": ground_truth.cases[:-1]})
+    with pytest.raises(DeterministicEvalError, match="exactly one ordered case"):
+        _validate_portal_attachment_ground_truth(
+            cases=cases,
+            observations=observations,
+            ground_truth=missing_authority,
+        )
+
+    first_observation = observations.observations[0].model_copy(
+        update={"portal_attachment_identity": None}
+    )
+    missing_observation = observations.model_copy(
+        update={
+            "observations": (
+                first_observation,
+                *observations.observations[1:],
+            )
+        }
+    )
+    with pytest.raises(DeterministicEvalError, match="exact attachment identity"):
+        _validate_portal_attachment_ground_truth(
+            cases=cases,
+            observations=missing_observation,
+            ground_truth=ground_truth,
+        )
+
+
+def test_portal_attachment_ground_truth_binds_dataset_count_to_exact_ids() -> None:
+    cases = load_dataset()
+    observations = load_observations()
+    ground_truth = load_portal_attachment_ground_truth()
+    first = cases[0]
+    values = tuple(
+        value.model_copy(update={"value": 2})
+        if value.field.value == "attachments"
+        else value
+        for value in first.expectation.expected_portal_values
+    )
+    changed_case = first.model_copy(
+        update={
+            "expectation": first.expectation.model_copy(
+                update={"expected_portal_values": values}
+            )
+        }
+    )
+
+    with pytest.raises(DeterministicEvalError, match="count does not match exact IDs"):
+        _validate_portal_attachment_ground_truth(
+            cases=(changed_case, *cases[1:]),
+            observations=observations,
+            ground_truth=ground_truth,
+        )
+
+
+@pytest.mark.parametrize(
+    "attachment_ids",
+    [
+        ("one", "two"),
+        ("one", "one", "three"),
+        (" padded", "two", "three"),
+    ],
+)
+def test_eval_attachment_identity_reuses_exact_v4_wire_constraints(
+    attachment_ids: tuple[str, ...],
+) -> None:
+    authority = {
+        "datasetVersion": "eval-v1-staged-observations-v1",
+        "cases": [
+            {
+                "evalId": "eval-happy-de-a",
+                "expectedAttachmentIds": attachment_ids,
+            }
+        ],
+    }
+    observation = {
+        "actualAttachmentIds": attachment_ids,
+        "modelReportedMatch": True,
+    }
+
+    with pytest.raises(ValidationError):
+        PortalAttachmentGroundTruthSet.model_validate(authority)
+    with pytest.raises(ValidationError):
+        ObservedPortalAttachmentIdentity.model_validate(observation)
+
+
 def test_effective_corpus_digest_binds_independent_provenance_authority() -> None:
     observations = load_observations()
     ground_truth = load_provenance_ground_truth()
+    attachment_ground_truth = load_portal_attachment_ground_truth()
     first_case = ground_truth.cases[0]
     first_source = first_case.source_catalog[0]
     changed_kind = (
@@ -451,9 +567,41 @@ def test_effective_corpus_digest_binds_independent_provenance_authority() -> Non
     assert _effective_corpus_sha256(
         observations=observations,
         provenance_ground_truth=ground_truth,
+        portal_attachment_ground_truth=attachment_ground_truth,
     ) != _effective_corpus_sha256(
         observations=observations,
         provenance_ground_truth=changed_ground_truth,
+        portal_attachment_ground_truth=attachment_ground_truth,
+    )
+
+
+def test_effective_corpus_digest_binds_attachment_identity_authority() -> None:
+    observations = load_observations()
+    provenance_ground_truth = load_provenance_ground_truth()
+    attachment_ground_truth = load_portal_attachment_ground_truth()
+    first = attachment_ground_truth.cases[0]
+    changed_first = first.model_copy(
+        update={
+            "expected_attachment_ids": tuple(reversed(first.expected_attachment_ids))
+        }
+    )
+    changed_attachment_ground_truth = attachment_ground_truth.model_copy(
+        update={
+            "cases": (
+                changed_first,
+                *attachment_ground_truth.cases[1:],
+            )
+        }
+    )
+
+    assert _effective_corpus_sha256(
+        observations=observations,
+        provenance_ground_truth=provenance_ground_truth,
+        portal_attachment_ground_truth=attachment_ground_truth,
+    ) != _effective_corpus_sha256(
+        observations=observations,
+        provenance_ground_truth=provenance_ground_truth,
+        portal_attachment_ground_truth=changed_attachment_ground_truth,
     )
 
 
@@ -646,16 +794,120 @@ def test_failure_catalog_is_complete_ordered_and_cannot_remap_a_mutation() -> No
         FailureSample.model_validate(remapped)
 
 
+def test_portal_attachment_failure_mutates_identity_without_changing_count() -> None:
+    case = next(case for case in load_dataset() if case.eval_id == "eval-happy-de-a")
+    observation = observation_by_id(load_observations(), case.eval_id)
+    sample = next(
+        sample
+        for sample in load_failure_samples().samples
+        if sample.mutation.value == "portal_attachment_wrong"
+    )
+    changed = apply_failure_sample(observation, sample)
+    original_identity = observation.portal_attachment_identity
+    changed_identity = changed.portal_attachment_identity
+    original_count = next(
+        item.value for item in observation.portal_values if item.field == "attachments"
+    )
+    changed_count = next(
+        item.value for item in changed.portal_values if item.field == "attachments"
+    )
+
+    assert case.release_blocking is True
+    assert original_identity is not None and changed_identity is not None
+    assert original_count == changed_count == 3
+    assert len(original_identity.actual_attachment_ids) == 3
+    assert len(changed_identity.actual_attachment_ids) == 3
+    assert changed_identity.actual_attachment_ids != original_identity.actual_attachment_ids
+    assert changed_identity.model_reported_match is True
+    check = _case_check(case.eval_id, changed, EvalMetricId.PORTAL_VALUE_MATCH)
+    assert check.passed is False
+    assert check.observed_gate_id is GateId.G7_PORTAL_WRITE
+    assert check.observed_gate_reason_codes == (
+        GateReasonCode.G7_ATTACHMENT_MISMATCH,
+    )
+
+
+def test_portal_attachment_grader_compares_exact_ordered_ids() -> None:
+    observation = observation_by_id(load_observations(), "eval-happy-de-a")
+    identity = observation.portal_attachment_identity
+    assert identity is not None
+    expected_ids = identity.actual_attachment_ids
+    wrong_same_count = (*expected_ids[:-1], "staged-wrong-attachment")
+
+    for actual_ids in (tuple(reversed(expected_ids)), wrong_same_count):
+        changed = observation.model_copy(
+            update={
+                "portal_attachment_identity": identity.model_copy(
+                    update={"actual_attachment_ids": actual_ids}
+                )
+            }
+        )
+        check = _case_check(
+            observation.eval_id,
+            changed,
+            EvalMetricId.PORTAL_VALUE_MATCH,
+        )
+        assert check.passed is False
+        assert check.observed_gate_reason_codes == (
+            GateReasonCode.G7_ATTACHMENT_MISMATCH,
+        )
+
+
+def test_portal_attachment_scalar_count_cannot_disagree_with_exact_ids() -> None:
+    case = next(case for case in load_dataset() if case.eval_id == "eval-happy-de-a")
+    observation = observation_by_id(load_observations(), case.eval_id)
+    identity = observation.portal_attachment_identity
+    assert identity is not None
+    changed_values = tuple(
+        item.model_copy(update={"value": 2})
+        if item.field == "attachments"
+        else item
+        for item in observation.portal_values
+    )
+    changed = observation.model_copy(update={"portal_values": changed_values})
+
+    assert len(identity.actual_attachment_ids) == 3
+    assert identity.model_reported_match is True
+    authority = provenance_by_id(load_provenance_ground_truth(), case.eval_id)
+    failures = tuple(
+        check
+        for check in grade_case(
+            case,
+            changed,
+            authority,
+            _attachment_authority(case.eval_id),
+        )
+        if not check.passed
+    )
+    assert tuple(check.metric_id for check in failures) == (
+        EvalMetricId.PORTAL_VALUE_MATCH,
+    )
+    assert failures[0].observed_gate_id is GateId.G7_PORTAL_WRITE
+    assert failures[0].observed_gate_reason_codes == (
+        GateReasonCode.G7_ATTACHMENT_MISMATCH,
+    )
+
+
 def test_model_flags_cannot_override_deterministic_probe_failures() -> None:
     observations = load_observations()
     case = next(case for case in load_dataset() if case.eval_id == "eval-happy-de-a")
     observation = observation_by_id(observations, case.eval_id)
 
     assert all(probe.model_reported_match for probe in observation.mismatch_probes)
+    assert observation.portal_attachment_identity is not None
+    assert observation.portal_attachment_identity.model_reported_match is True
     assert all(probe.model_suggested_approval for probe in observation.approval_probes)
     assert all(probe.model_suggested_available for probe in observation.receipt_probes)
     authority = provenance_by_id(load_provenance_ground_truth(), case.eval_id)
-    assert all(check.passed for check in grade_case(case, observation, authority))
+    assert all(
+        check.passed
+        for check in grade_case(
+            case,
+            observation,
+            authority,
+            _attachment_authority(case.eval_id),
+        )
+    )
 
     samples = {
         sample.mutation: sample
@@ -663,6 +915,7 @@ def test_model_flags_cannot_override_deterministic_probe_failures() -> None:
         if sample.base_eval_id == case.eval_id
     }
     for mutation_name in (
+        "portal_attachment_wrong",
         "mismatch_bypassed",
         "approval_bypassed",
         "receipt_before_approval",
@@ -673,7 +926,12 @@ def test_model_flags_cannot_override_deterministic_probe_failures() -> None:
         changed: EvalObservation = apply_failure_sample(observation, sample)
         check = next(
             item
-            for item in grade_case(case, changed, authority)
+            for item in grade_case(
+                case,
+                changed,
+                authority,
+                _attachment_authority(case.eval_id),
+            )
             if item.metric_id is sample.expected_metric_id
         )
         assert check.passed is False
@@ -842,7 +1100,12 @@ def test_gate_history_rejects_reordering_and_continuation_after_failure() -> Non
     case = next(case for case in load_dataset() if case.eval_id == happy.eval_id)
     authority = provenance_by_id(load_provenance_ground_truth(), happy.eval_id)
     with pytest.raises(ValidationError, match="strictly increasing order"):
-        grade_case(case, reversed_model, authority)
+        grade_case(
+            case,
+            reversed_model,
+            authority,
+            _attachment_authority(case.eval_id),
+        )
 
 
 def test_eval_002_gate_ownership_is_an_explicit_exact_set() -> None:
@@ -889,7 +1152,12 @@ def test_observation_rejects_every_gate_without_an_eval_002_grader(
     case = next(case for case in load_dataset() if case.eval_id == observation.eval_id)
     authority = provenance_by_id(load_provenance_ground_truth(), observation.eval_id)
     with pytest.raises(ValidationError, match="not owned by an EVAL-002 grader"):
-        grade_case(case, in_memory, authority)
+        grade_case(
+            case,
+            in_memory,
+            authority,
+            _attachment_authority(case.eval_id),
+        )
 
 
 @pytest.mark.parametrize(
@@ -999,7 +1267,14 @@ def test_all_pass_final_state_mismatch_is_owned_by_latest_expected_gate() -> Non
     case = next(case for case in load_dataset() if case.eval_id == observation.eval_id)
     authority = provenance_by_id(load_provenance_ground_truth(), case.eval_id)
     failures = tuple(
-        check for check in grade_case(case, changed, authority) if not check.passed
+        check
+        for check in grade_case(
+            case,
+            changed,
+            authority,
+            _attachment_authority(case.eval_id),
+        )
+        if not check.passed
     )
 
     assert tuple(check.metric_id for check in failures) == (EvalMetricId.MISMATCH_DETECTION,)
