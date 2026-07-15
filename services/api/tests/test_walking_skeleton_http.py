@@ -527,6 +527,98 @@ def test_content_length_and_streamed_body_limits_include_cors_on_413(
         assert response.headers["access-control-allow-origin"] == WEB_ORIGIN
 
 
+def test_body_replay_waits_for_disconnect_without_blocking_parallel_request() -> None:
+    async def run() -> None:
+        stream_receive_calls = 0
+        stream_waiting_for_disconnect = asyncio.Event()
+        release_disconnect = asyncio.Event()
+        health_messages: list[Message] = []
+
+        async def inner(scope: Scope, receive: Any, send: Any) -> None:
+            request = await receive()
+            assert request == {
+                "type": "http.request",
+                "body": b"",
+                "more_body": False,
+            }
+            if scope["path"] == "/events":
+                assert await receive() == {"type": "http.disconnect"}
+                return
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = RequestBodyLimitMiddleware(
+            inner,
+            global_limit=10,
+            intake_limit=20,
+        )
+
+        def scope(path: str) -> Scope:
+            return cast(
+                Scope,
+                {
+                    "type": "http",
+                    "asgi": {"version": "3.0", "spec_version": "2.3"},
+                    "http_version": "1.1",
+                    "method": "GET",
+                    "scheme": "http",
+                    "path": path,
+                    "raw_path": path.encode(),
+                    "query_string": b"",
+                    "headers": [],
+                    "client": ("127.0.0.1", 1),
+                    "server": ("127.0.0.1", 8000),
+                },
+            )
+
+        async def stream_receive() -> Message:
+            nonlocal stream_receive_calls
+            stream_receive_calls += 1
+            if stream_receive_calls == 1:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            stream_waiting_for_disconnect.set()
+            await release_disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def health_receive() -> Message:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def discard(_message: Message) -> None:
+            return None
+
+        async def record_health(message: Message) -> None:
+            health_messages.append(message)
+
+        stream_task = asyncio.create_task(
+            middleware(scope("/events"), stream_receive, discard)
+        )
+        waiting_task = asyncio.create_task(stream_waiting_for_disconnect.wait())
+        done, _pending = await asyncio.wait(
+            {stream_task, waiting_task},
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stream_task in done:
+            await stream_task
+        assert waiting_task in done
+        assert not stream_task.done()
+
+        await asyncio.wait_for(
+            middleware(scope("/health"), health_receive, record_health),
+            timeout=1,
+        )
+        assert health_messages == [
+            {"type": "http.response.start", "status": 200, "headers": []},
+            {"type": "http.response.body", "body": b"ok"},
+        ]
+
+        release_disconnect.set()
+        await asyncio.wait_for(stream_task, timeout=1)
+        assert stream_receive_calls == 2
+
+    asyncio.run(run())
+
+
 def test_malformed_and_duplicate_content_length_are_blocked_before_app() -> None:
     async def run(headers: list[tuple[bytes, bytes]]) -> list[Message]:
         async def inner(scope: Scope, receive: object, send: object) -> None:

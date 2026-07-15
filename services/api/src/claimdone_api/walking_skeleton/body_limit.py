@@ -60,7 +60,7 @@ class RequestBodyLimitMiddleware:
                 message = buffered[index]
                 index += 1
                 return message
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return await receive()
 
         await self._app(scope, replay_receive, send)
 
