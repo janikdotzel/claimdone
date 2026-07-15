@@ -1,13 +1,24 @@
 """Unwired FastAPI router factory for the Case API."""
 
-from typing import Annotated
+from collections.abc import Mapping
+from typing import Annotated, Protocol
 
 from fastapi import APIRouter, Body, Response, status
 from fastapi.responses import JSONResponse
+from pydantic import JsonValue
+
+from claimdone_api.persistence import CaseRecord
 
 from .errors import CaseNotFoundError, CaseVersionConflictError
 from .models import CaseView, CreateCaseRequest, ErrorEnvelope, error_envelope
-from .service import CaseService
+
+
+class CaseCrudService(Protocol):
+    def create_case(self, metadata: Mapping[str, JsonValue] | None = None) -> CaseRecord: ...
+
+    def get_case(self, case_id: str) -> CaseRecord: ...
+
+    def delete_case(self, case_id: str) -> None: ...
 
 
 def case_error_response(error: CaseNotFoundError | CaseVersionConflictError) -> JSONResponse:
@@ -29,7 +40,7 @@ def case_error_response(error: CaseNotFoundError | CaseVersionConflictError) -> 
     )
 
 
-def create_case_router(service: CaseService) -> APIRouter:
+def create_case_router(service: CaseCrudService) -> APIRouter:
     """Build a router without choosing a database path or touching the main app."""
 
     router = APIRouter(prefix="/api/cases", tags=["cases"])

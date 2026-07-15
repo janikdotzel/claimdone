@@ -5,6 +5,7 @@ from .ports import CaseResourceCleaner, NoOpCaseResourceCleaner
 from .reset import DemoResetService
 from .router import create_case_router
 from .service import CaseService
+from .workflow_router import create_workflow_router
 
 __all__ = [
     "CaseResourceCleaner",
@@ -14,4 +15,5 @@ __all__ = [
     "ErrorEnvelope",
     "NoOpCaseResourceCleaner",
     "create_case_router",
+    "create_workflow_router",
 ]

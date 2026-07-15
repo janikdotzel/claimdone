@@ -1,9 +1,11 @@
 """ClaimDone API composition root."""
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
@@ -12,19 +14,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from claimdone_api.cases import CaseService, create_case_router
-from claimdone_api.media import (
-    CaseMediaStore,
-    PersistentCaseMediaCleaner,
-)
+from claimdone_api.cases import CaseService, create_case_router, create_workflow_router
+from claimdone_api.cases.router import CaseCrudService
+from claimdone_api.media import PersistentCaseMediaCleaner
 from claimdone_api.persistence import SqliteCaseRepository
-from claimdone_api.walking_skeleton import (
-    HttpPortalPort,
-    PortalPort,
-    WalkingSkeletonService,
-    create_walking_skeleton_router,
-)
 from claimdone_api.walking_skeleton.body_limit import RequestBodyLimitMiddleware
+
+if TYPE_CHECKING:
+    from claimdone_api.walking_skeleton.legacy_boundary import (
+        LegacyWalkingRepository,
+    )
+    from claimdone_api.walking_skeleton.portal import PortalPort
 
 DEFAULT_GLOBAL_BODY_LIMIT = 1024 * 1024
 DEFAULT_INTAKE_BODY_LIMIT = 32 * 1024 * 1024
@@ -45,7 +45,7 @@ class ApiSettings:
             raise ValueError("Body limits must be positive and intake >= global")
 
     @classmethod
-    def from_environment(cls) -> "ApiSettings":
+    def from_environment(cls) -> ApiSettings:
         return cls(
             data_dir=Path(os.environ.get("CLAIMDONE_DATA_DIR", ".local/claimdone")),
             web_origin=os.environ.get(
@@ -68,19 +68,56 @@ def create_app(
     settings: ApiSettings | None = None,
     *,
     portal_port: PortalPort | None = None,
+    enable_legacy_walking_skeleton_for_dev: bool = False,
 ) -> FastAPI:
+    if type(enable_legacy_walking_skeleton_for_dev) is not bool:
+        raise TypeError("enable_legacy_walking_skeleton_for_dev must be a bool")
+    if portal_port is not None and not enable_legacy_walking_skeleton_for_dev:
+        raise ValueError(
+            "portal_port is only valid with the dev-only walking skeleton enabled"
+        )
     selected = settings or ApiSettings.from_environment()
-    repository = SqliteCaseRepository(selected.data_dir / "cases.db")
-    media_store = CaseMediaStore(selected.data_dir / "media")
+    repository: SqliteCaseRepository | LegacyWalkingRepository
+    case_service: CaseCrudService
+    canonical_repository: SqliteCaseRepository | None = None
+    if enable_legacy_walking_skeleton_for_dev:
+        from claimdone_api.walking_skeleton.legacy_boundary import (
+            LegacyWalkingCaseBoundary,
+            LegacyWalkingRepository,
+        )
+        from claimdone_api.walking_skeleton.portal import HttpPortalPort
+        from claimdone_api.walking_skeleton.router import create_walking_skeleton_router
+        from claimdone_api.walking_skeleton.service import WalkingSkeletonService
+
+        legacy_repository = LegacyWalkingRepository(
+            selected.data_dir / "cases.db",
+            media_root=selected.data_dir / "media",
+        )
+        repository = legacy_repository
+    else:
+        canonical_repository = SqliteCaseRepository(
+            selected.data_dir / "cases.db",
+            media_root=selected.data_dir / "media",
+        )
+        repository = canonical_repository
+    media_store = repository.media_store
     cleaner = PersistentCaseMediaCleaner(repository, media_store)
-    case_service = CaseService(repository, resource_cleaner=cleaner)
-    portal = portal_port or HttpPortalPort(selected.portal_origin)
-    walking_service = WalkingSkeletonService(
-        cases=case_service,
-        repository=repository,
-        media_store=media_store,
-        portal=portal,
-    )
+    if enable_legacy_walking_skeleton_for_dev:
+        case_service = LegacyWalkingCaseBoundary(
+            legacy_repository,
+            resource_cleaner=cleaner,
+        )
+        portal = portal_port or HttpPortalPort(selected.portal_origin)
+        walking_service = WalkingSkeletonService(
+            cases=case_service,
+            repository=legacy_repository,
+            media_store=media_store,
+            portal=portal,
+        )
+    else:
+        assert canonical_repository is not None
+        case_service = CaseService(canonical_repository, resource_cleaner=cleaner)
+        walking_service = None
 
     application = FastAPI(title="ClaimDone API", version="0.0.0")
     # Added before CORS so Starlette's reverse middleware build leaves the
@@ -95,10 +132,15 @@ def create_app(
         allow_origins=[selected.web_origin],
         allow_credentials=False,
         allow_methods=["DELETE", "GET", "OPTIONS", "POST", "PUT"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Last-Event-ID"],
     )
-    application.include_router(create_case_router(case_service))
-    application.include_router(create_walking_skeleton_router(walking_service))
+    if walking_service is not None:
+        application.include_router(create_case_router(case_service))
+    else:
+        assert isinstance(case_service, CaseService)
+        application.include_router(create_workflow_router(case_service))
+    if walking_service is not None:
+        application.include_router(create_walking_skeleton_router(walking_service))
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -138,7 +180,8 @@ def create_app(
     application.state.case_repository = repository
     application.state.case_service = case_service
     application.state.media_store = media_store
-    application.state.walking_skeleton_service = walking_service
+    if walking_service is not None:
+        application.state.walking_skeleton_service = walking_service
     return application
 
 

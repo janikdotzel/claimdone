@@ -17,8 +17,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.types import Message, Scope
 
+from claimdone_api.contracts import WorkflowSnapshot
 from claimdone_api.main import ApiSettings, create_app
 from claimdone_api.media import MAX_IMAGE_WIDTH, MAX_TEXT_BYTES
+from claimdone_api.persistence import SqliteCaseRepository
 from claimdone_api.walking_skeleton.body_limit import RequestBodyLimitMiddleware
 from claimdone_api.walking_skeleton.models import (
     PortalDraftFields,
@@ -129,6 +131,7 @@ def client_for(
             intake_body_limit=intake_limit,
         ),
         portal_port=selected_portal,
+        enable_legacy_walking_skeleton_for_dev=True,
     )
     return TestClient(app), selected_portal
 
@@ -137,6 +140,98 @@ def create_case(client: TestClient) -> dict[str, Any]:
     response = client.post("/api/cases", json={"metadata": {}})
     assert response.status_code == 201
     return cast(dict[str, Any], response.json())
+
+
+def test_invalid_portal_composition_is_rejected_before_local_state_is_created(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "must-not-exist"
+    settings = ApiSettings(
+        data_dir=data_dir,
+        web_origin=WEB_ORIGIN,
+        portal_origin=WEB_ORIGIN,
+    )
+
+    with pytest.raises(ValueError, match="dev-only"):
+        create_app(settings, portal_port=HttpTestPortal())
+
+    assert not data_dir.exists()
+
+
+def test_default_app_exposes_no_legacy_mutation_or_partial_commit(tmp_path: Path) -> None:
+    app = create_app(
+        ApiSettings(
+            data_dir=tmp_path / "default-state",
+            web_origin=WEB_ORIGIN,
+            portal_origin=WEB_ORIGIN,
+        )
+    )
+    repository = cast(SqliteCaseRepository, app.state.case_repository)
+    assert type(repository) is SqliteCaseRepository
+    assert "walking_skeleton_service" not in app.state._state
+    paths = set(app.openapi()["paths"])
+    assert "/api/cases/{case_id}/intake" not in paths
+    assert "/api/cases/{case_id}/clarifications/{clarification_id}/answer" not in paths
+    assert "/api/cases/{case_id}/events" in paths
+    assert "/api/cases/{case_id}/events/history" not in paths
+    assert "/api/cases/{case_id}/events/stream" not in paths
+    assert "/api/dev/reset" not in paths
+
+    with TestClient(app) as client:
+        created = create_case(client)
+        snapshot = WorkflowSnapshot.model_validate(created)
+        assert "redactedMetadata" not in created
+        assert "intakeSummary" not in created
+        assert "activeClarification" not in created
+        case_id = snapshot.case.case_id
+        before = repository.get_case(case_id)
+        assert before is not None
+        fetched = client.get(f"/api/cases/{case_id}")
+        response = client.post(f"/api/cases/{case_id}/intake")
+        reset = client.post("/api/dev/reset")
+
+    assert fetched.status_code == 200
+    assert WorkflowSnapshot.model_validate(fetched.json()).case.case_id == case_id
+    assert "redactedMetadata" not in cast(dict[str, Any], fetched.json())
+    assert response.status_code == 404
+    assert reset.status_code == 404
+    assert repository.get_case(case_id) == before
+    assert repository.list_audit_events(case_id) == ()
+    assert repository.list_gate_decisions(case_id) == ()
+    assert repository.list_workflow_events(case_id) == ()
+
+
+def test_canonical_event_route_is_unique_and_has_no_json_or_alias_shadow(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        ApiSettings(
+            data_dir=tmp_path / "event-limit-state",
+            web_origin=WEB_ORIGIN,
+            portal_origin=WEB_ORIGIN,
+        )
+    )
+    canonical_path = "/api/cases/{case_id}/events"
+    registered_routes: list[Any] = []
+    for route in app.routes:
+        included_router = getattr(route, "original_router", None)
+        registered_routes.extend(
+            getattr(included_router, "routes", (route,))
+            if included_router is not None
+            else (route,)
+        )
+    matching_routes = [
+        route
+        for route in registered_routes
+        if getattr(route, "path", None) == canonical_path
+        and "GET" in getattr(route, "methods", set())
+    ]
+
+    assert len(matching_routes) == 1
+    paths = set(app.openapi()["paths"])
+    assert canonical_path in paths
+    assert f"{canonical_path}/history" not in paths
+    assert f"{canonical_path}/stream" not in paths
 
 
 def test_real_multipart_happy_path_and_answer_survive_app_restart(tmp_path: Path) -> None:

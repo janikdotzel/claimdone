@@ -240,7 +240,7 @@ def _evaluate_field(
         values = {_strict_value_key(fact.value) for fact in supported_facts}
         if len(values) > 1:
             reasons.add(GateReasonCode.G4_CONFLICTING_SOURCES)
-        if not all(_same_value(fact.value, canonical_value) for fact in supported_facts):
+        elif not all(_same_value(fact.value, canonical_value) for fact in supported_facts):
             reasons.add(GateReasonCode.G4_FACT_NOT_WRITABLE)
 
     fact_sources = {source for fact in field_facts for source in fact.source_refs}

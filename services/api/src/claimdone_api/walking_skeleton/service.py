@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from claimdone_api.cases import CaseService, CaseView
+from claimdone_api.cases import CaseView
 from claimdone_api.cases.errors import CaseNotFoundError, CaseVersionConflictError
 from claimdone_api.contracts import (
     TERMINAL_CASE_STATES,
@@ -53,10 +53,11 @@ from claimdone_api.media import (
     store_transcript,
     validate_g0,
 )
-from claimdone_api.persistence import CaseRecord, SqliteCaseRepository
+from claimdone_api.persistence import CaseRecord
 
 from .errors import FlowError, PortalUnavailableError
 from .intake_state import PersistedIntake, persisted_intake
+from .legacy_boundary import LegacyWalkingCaseBoundary, LegacyWalkingRepository
 from .mock_extractor import StatementSource, deterministic_extraction
 from .models import (
     ClarificationView,
@@ -103,14 +104,22 @@ class WalkingSkeletonService:
     def __init__(
         self,
         *,
-        cases: CaseService,
-        repository: SqliteCaseRepository,
+        cases: LegacyWalkingCaseBoundary,
+        repository: LegacyWalkingRepository,
         media_store: CaseMediaStore,
         portal: PortalPort,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         request_id_factory: Callable[[], str] = lambda: f"request-{uuid4().hex}",
         clarification_id_factory: Callable[[], str] = (lambda: f"clarification-{uuid4().hex}"),
     ) -> None:
+        if repository.media_store is not media_store:
+            raise ValueError(
+                "Walking service must use the exact repository-owned media store"
+            )
+        if cases.repository is not repository:
+            raise ValueError(
+                "Walking service case boundary must use the exact repository"
+            )
         self._cases = cases
         self._repository = repository
         self._media_store = media_store
@@ -679,14 +688,11 @@ class WalkingSkeletonService:
         record: CaseRecord,
         decisions: tuple[GateDecision, ...],
     ) -> CaseRecord:
-        current = record
-        for decision in decisions:
-            current = self._cases.record_gate_decision(
-                current.case_id,
-                expected_version=current.version,
-                decision=decision,
-            )
-        return current
+        return self._cases.commit_gate_phase(
+            record.case_id,
+            expected_version=record.version,
+            decisions=decisions,
+        )
 
     def _require_version(self, case_id: str, expected_version: int) -> CaseRecord:
         try:

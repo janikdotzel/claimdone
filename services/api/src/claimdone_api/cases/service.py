@@ -1,48 +1,39 @@
 """Validated case workflow and persistence orchestration."""
 
-import hashlib
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue
 
-from claimdone_api.audit import (
-    build_gate_audit_event,
-    build_state_change_event,
-    redact_metadata,
-)
+from claimdone_api.audit import redact_metadata
 from claimdone_api.contracts import (
-    ActorType,
     CaseState,
-    ClaimPacket,
-    GateDecision,
-    PortalState,
     TranscriptConfirmationRequest,
+    WorkflowSnapshot,
     validate_case_transition,
 )
 from claimdone_api.contracts.state_machine import InvalidCaseTransition
+from claimdone_api.media import PersistentCaseMediaCleaner
 from claimdone_api.persistence import (
     AnalysisWorkflowCommand,
     AnalysisWorkflowResult,
     CaseRecord,
     CaseRecordNotFoundError,
     CaseRecordVersionConflictError,
-    CaseSnapshot,
+    IntakeDisclosureCommand,
     SequencedAuditEvent,
     SequencedGateDecision,
     SequencedWorkflowEvent,
     SqliteCaseRepository,
     TerminalProviderFailureCommand,
     TerminalProviderFailureResult,
+    TranscriptionOutcomeCommand,
+    TranscriptStateError,
     TranscriptTransitionResult,
     WorkflowAtomicityError,
-    portal_state_after_transition,
-    validate_portal_state,
 )
-from claimdone_api.persistence.models import JsonObject
 
 from .errors import (
     CaseNotFoundError,
@@ -50,11 +41,10 @@ from .errors import (
     CaseVersionConflictError,
     InvalidCaseStateTransitionError,
 )
-from .ports import CaseResourceCleaner, NoOpCaseResourceCleaner
 from .reset import DemoResetService
 
 _CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
+_SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 
 
 def _utc_now() -> datetime:
@@ -72,13 +62,27 @@ class CaseService:
         self,
         repository: SqliteCaseRepository,
         *,
-        resource_cleaner: CaseResourceCleaner | None = None,
+        resource_cleaner: PersistentCaseMediaCleaner | None = None,
         now: Callable[[], datetime] = _utc_now,
         case_id_factory: Callable[[], str] = _new_case_id,
     ) -> None:
+        if (
+            type(self) is not CaseService
+            or type(repository) is not SqliteCaseRepository
+            or repository.is_canonical_authority is not True
+        ):
+            raise TypeError("CaseService requires the exact canonical repository type")
+        cleaner = resource_cleaner or PersistentCaseMediaCleaner(
+            repository,
+            repository.media_store,
+        )
+        if cleaner.repository is not repository or cleaner.store is not repository.media_store:
+            raise TypeError(
+                "CaseService cleaner must be bound to its exact repository and media store"
+            )
         self._repository = repository
-        self._resource_cleaner = resource_cleaner or NoOpCaseResourceCleaner()
-        self._reset_service = DemoResetService(repository, self._resource_cleaner)
+        self._resource_cleaner = cleaner
+        self._reset_service = DemoResetService(repository, cleaner)
         self._now = now
         self._case_id_factory = case_id_factory
 
@@ -98,83 +102,28 @@ class CaseService:
             raise CaseNotFoundError(case_id)
         return record
 
-    def delete_case(self, case_id: str) -> None:
-        """Idempotently remove external data before the cascading database row."""
-
-        self._resource_cleaner.delete_case_resources(case_id)
-        self._repository.delete_case(case_id)
-
-    def transition_case(
+    def get_workflow_snapshot(
         self,
         case_id: str,
         *,
-        expected_version: int,
-        target: CaseState,
-        actor: ActorType = ActorType.SYSTEM,
-        claim_packet: ClaimPacket | None = None,
-    ) -> CaseRecord:
-        current = self._get_case_for_update(case_id, expected_version)
-        try:
-            validate_case_transition(current.state, target)
-        except InvalidCaseTransition as error:
-            raise InvalidCaseStateTransitionError(current.state, target) from error
+        request_id: str,
+    ) -> WorkflowSnapshot:
+        """Project only the closed canonical frontend workflow contract."""
 
-        snapshot = current.snapshot
-        if snapshot.claim_packet is not None and claim_packet is None:
-            raise CaseSnapshotValidationError(
-                "A state transition with a stored ClaimPacket requires its target-state snapshot"
-            )
-        if claim_packet is not None:
-            self._validate_claim_packet(case_id, target, claim_packet)
-            snapshot = replace(
-                snapshot,
-                portal_state=claim_packet.portal_state,
-                claim_packet=claim_packet,
-            )
-        else:
-            snapshot = replace(
-                snapshot,
-                portal_state=portal_state_after_transition(snapshot.portal_state, target),
-            )
-
-        occurred_at = self._aware_now()
-        event = build_state_change_event(
-            case_id=case_id,
-            current=current.state,
-            target=target,
-            actor=actor,
-            occurred_at=occurred_at,
-        )
+        if type(request_id) is not str or _CASE_ID_PATTERN.fullmatch(request_id) is None:
+            raise ValueError("request_id must be a canonical identifier")
         try:
-            if target is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION:
-                transcript_id, local_ref, digest = self._pending_transcript_identity(
-                    case_id,
-                    snapshot,
-                )
-                return self._repository.save_pending_transcript_and_transition(
-                    case_id=case_id,
-                    expected_case_version=expected_version,
-                    transcript_id=transcript_id,
-                    transcript_sha256=digest,
-                    local_ref=local_ref,
-                    snapshot=snapshot,
-                    event=event,
-                    updated_at=occurred_at,
-                ).case
-            return self._repository.transition_case(
-                case_id=case_id,
-                expected_version=expected_version,
-                target=target,
-                snapshot=snapshot,
-                event=event,
-                updated_at=occurred_at,
+            return self._repository.get_workflow_snapshot(
+                case_id,
+                request_id=request_id,
             )
         except CaseRecordNotFoundError as error:
             raise CaseNotFoundError(case_id) from error
-        except CaseRecordVersionConflictError as error:
-            raise self._version_conflict(error) from error
-        except InvalidCaseTransition as error:
-            raise InvalidCaseStateTransitionError(current.state, target) from error
+
+    def delete_case(self, case_id: str) -> None:
+        """Idempotently serialize intake, exact media cleanup, and row deletion."""
+
+        self._repository.delete_case_and_resources(case_id)
 
     def confirm_transcript(
         self,
@@ -201,157 +150,72 @@ class CaseService:
             validate_case_transition(current.state, target)
         except InvalidCaseTransition as error:
             raise InvalidCaseStateTransitionError(current.state, target) from error
-        snapshot = replace(
-            current.snapshot,
-            portal_state=portal_state_after_transition(
-                current.snapshot.portal_state,
-                target,
-            ),
-        )
         occurred_at = self._aware_now()
-        event = build_state_change_event(
-            case_id=case_id,
-            current=current.state,
-            target=target,
-            actor=ActorType.HUMAN,
-            occurred_at=occurred_at,
-        )
         try:
             return self._repository.confirm_transcript_and_transition(
                 case_id=case_id,
                 expected_case_version=expected_case_version,
                 transcript_id=confirmation.transcript_id,
                 transcript_sha256=confirmation.transcript_sha256,
-                snapshot=snapshot,
-                event=event,
                 updated_at=occurred_at,
             )
         except CaseRecordNotFoundError as error:
             raise CaseNotFoundError(case_id) from error
         except CaseRecordVersionConflictError as error:
             raise self._version_conflict(error) from error
-
-    def save_intake_summary(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        summary: Mapping[str, JsonValue] | None,
-    ) -> CaseRecord:
-        validated = self._validate_json_object(summary)
-        return self._replace_snapshot(
-            case_id,
-            expected_version=expected_version,
-            transform=lambda snapshot: replace(snapshot, intake_summary=validated),
-        )
-
-    def save_active_clarification(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        clarification: Mapping[str, JsonValue] | None,
-    ) -> CaseRecord:
-        validated = self._validate_json_object(clarification)
-        return self._replace_snapshot(
-            case_id,
-            expected_version=expected_version,
-            transform=lambda snapshot: replace(
-                snapshot,
-                active_clarification=validated,
-            ),
-        )
-
-    def replace_redacted_metadata(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        metadata: Mapping[str, JsonValue],
-    ) -> CaseRecord:
-        redacted = redact_metadata(metadata)
-        return self._replace_snapshot(
-            case_id,
-            expected_version=expected_version,
-            transform=lambda snapshot: replace(snapshot, redacted_metadata=redacted),
-        )
-
-    def save_claim_packet(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        claim_packet: ClaimPacket | None,
-    ) -> CaseRecord:
-        current = self._get_case_for_update(case_id, expected_version)
-        if claim_packet is not None:
-            self._validate_claim_packet(case_id, current.state, claim_packet)
-        snapshot = replace(
-            current.snapshot,
-            portal_state=(
-                current.snapshot.portal_state
-                if claim_packet is None
-                else claim_packet.portal_state
-            ),
-            claim_packet=claim_packet,
-        )
-        return self._replace_known_snapshot(
-            case_id,
-            expected_version=expected_version,
-            snapshot=snapshot,
-        )
-
-    def set_portal_state(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        portal_state: PortalState,
-    ) -> CaseRecord:
-        current = self._get_case_for_update(case_id, expected_version)
-        try:
-            validate_portal_state(current.state, portal_state)
-        except ValueError as error:
+        except TranscriptStateError as error:
             raise CaseSnapshotValidationError(str(error)) from error
-        if (
-            current.snapshot.claim_packet is not None
-            and current.snapshot.claim_packet.portal_state is not portal_state
-        ):
-            raise CaseSnapshotValidationError(
-                "PortalState cannot diverge from the stored ClaimPacket"
-            )
-        return self._replace_known_snapshot(
-            case_id,
-            expected_version=expected_version,
-            snapshot=replace(current.snapshot, portal_state=portal_state),
-        )
 
-    def record_gate_decision(
+    def commit_intake_disclosure(
+        self,
+        command: IntakeDisclosureCommand,
+    ) -> CaseRecord:
+        """Expose the only productive G0/G1 + media + disclosure writer."""
+
+        try:
+            return self._repository.commit_intake_disclosure(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except WorkflowAtomicityError as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def commit_transcription_outcome(
+        self,
+        command: TranscriptionOutcomeCommand,
+    ) -> TranscriptTransitionResult:
+        """Persist one authority-bound provider transcript atomically."""
+
+        try:
+            return self._repository.commit_transcription_outcome(command)
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(command.case_id) from error
+        except CaseRecordVersionConflictError as error:
+            raise self._version_conflict(error) from error
+        except (TranscriptStateError, WorkflowAtomicityError) as error:
+            raise CaseSnapshotValidationError(str(error)) from error
+
+    def begin_text_analysis(
         self,
         case_id: str,
         *,
         expected_version: int,
-        decision: GateDecision,
-        actor: ActorType = ActorType.SYSTEM,
     ) -> CaseRecord:
-        self._get_case_for_update(case_id, expected_version)
-        event = build_gate_audit_event(
-            case_id=case_id,
-            decision=decision,
-            actor=actor,
-        )
+        """Advance an authority-bound text intake without caller snapshot data."""
+
         try:
-            return self._repository.record_gate_decision(
+            return self._repository.begin_text_analysis(
                 case_id=case_id,
                 expected_version=expected_version,
-                decision=decision,
-                event=event,
                 updated_at=self._aware_now(),
             )
         except CaseRecordNotFoundError as error:
             raise CaseNotFoundError(case_id) from error
         except CaseRecordVersionConflictError as error:
             raise self._version_conflict(error) from error
+        except WorkflowAtomicityError as error:
+            raise CaseSnapshotValidationError(str(error)) from error
 
     def list_audit_events(
         self,
@@ -380,8 +244,14 @@ class CaseService:
         after: int = 0,
         limit: int = 100,
     ) -> tuple[SequencedWorkflowEvent, ...]:
-        self.get_case(case_id)
-        return self._repository.list_workflow_events(case_id, after=after, limit=limit)
+        try:
+            return self._repository.list_workflow_events(
+                case_id,
+                after=after,
+                limit=limit,
+            )
+        except CaseRecordNotFoundError as error:
+            raise CaseNotFoundError(case_id) from error
 
     def commit_analysis_workflow(
         self,
@@ -416,21 +286,15 @@ class CaseService:
     def reset_demo(self) -> int:
         return self._reset_service.reset()
 
-    def _replace_snapshot(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        transform: Callable[[CaseSnapshot], CaseSnapshot],
-    ) -> CaseRecord:
-        current = self._get_case_for_update(case_id, expected_version)
-        return self._replace_known_snapshot(
-            case_id,
-            expected_version=expected_version,
-            snapshot=transform(current.snapshot),
-        )
-
     def _get_case_for_update(self, case_id: str, expected_version: int) -> CaseRecord:
+        if (
+            type(expected_version) is not int
+            or expected_version < 1
+            or expected_version > _SQLITE_MAX_INTEGER
+        ):
+            raise TypeError(
+                "expected_version must be an exact positive SQLite int64 integer"
+            )
         current = self.get_case(case_id)
         if current.version != expected_version:
             raise CaseVersionConflictError(
@@ -440,89 +304,11 @@ class CaseService:
             )
         return current
 
-    def _replace_known_snapshot(
-        self,
-        case_id: str,
-        *,
-        expected_version: int,
-        snapshot: CaseSnapshot,
-    ) -> CaseRecord:
-        try:
-            return self._repository.replace_snapshot(
-                case_id=case_id,
-                expected_version=expected_version,
-                snapshot=snapshot,
-                updated_at=self._aware_now(),
-            )
-        except CaseRecordNotFoundError as error:
-            raise CaseNotFoundError(case_id) from error
-        except CaseRecordVersionConflictError as error:
-            raise self._version_conflict(error) from error
-
     def _aware_now(self) -> datetime:
         value = self._now()
         if value.utcoffset() is None:
             raise ValueError("CaseService clock must return timezone-aware timestamps")
         return value
-
-    @staticmethod
-    def _validate_claim_packet(
-        case_id: str,
-        state: CaseState,
-        claim_packet: ClaimPacket,
-    ) -> None:
-        if claim_packet.case_id != case_id:
-            raise CaseSnapshotValidationError("ClaimPacket caseId does not match the case")
-        if claim_packet.state is not state:
-            raise CaseSnapshotValidationError("ClaimPacket state does not match CaseState")
-
-    @staticmethod
-    def _validate_json_object(
-        value: Mapping[str, JsonValue] | None,
-    ) -> JsonObject | None:
-        if value is None:
-            return None
-        return _JSON_OBJECT_ADAPTER.validate_python(dict(value), strict=True)
-
-    @staticmethod
-    def _pending_transcript_identity(
-        case_id: str,
-        snapshot: CaseSnapshot,
-    ) -> tuple[str, str, str]:
-        summary = snapshot.intake_summary
-        statement = None if summary is None else summary.get("statement")
-        audio = None if summary is None else summary.get("audio")
-        text = None if summary is None else summary.get("text")
-        if not isinstance(statement, dict) or not isinstance(audio, dict) or text is not None:
-            raise CaseSnapshotValidationError(
-                "Transcript confirmation requires a persisted audio statement"
-            )
-        audio_ref = audio.get("fileId")
-        audio_media_type = audio.get("mediaType")
-        audio_digest = audio.get("sha256")
-        if (
-            not isinstance(audio_ref, str)
-            or not re.fullmatch(r"audio-[a-f0-9]{32}\.wav", audio_ref)
-            or audio_media_type != "audio/wav"
-            or not isinstance(audio_digest, str)
-            or not re.fullmatch(r"[a-f0-9]{64}", audio_digest)
-        ):
-            raise CaseSnapshotValidationError("Persisted audio reference is invalid")
-        local_ref = statement.get("fileId")
-        digest = statement.get("sha256")
-        media_type = statement.get("mediaType")
-        if (
-            not isinstance(local_ref, str)
-            or not re.fullmatch(r"transcript-[a-f0-9]{32}\.txt", local_ref)
-            or not isinstance(digest, str)
-            or not re.fullmatch(r"[a-f0-9]{64}", digest)
-            or media_type != "text/plain"
-        ):
-            raise CaseSnapshotValidationError("Persisted transcript reference is invalid")
-        identity = hashlib.sha256(
-            f"claimdone-transcript-v1\0{case_id}\0{local_ref}\0{digest}".encode()
-        ).hexdigest()
-        return f"transcript-{identity[:32]}", local_ref, digest
 
     @staticmethod
     def _version_conflict(error: CaseRecordVersionConflictError) -> CaseVersionConflictError:

@@ -1,6 +1,13 @@
 """Safe local intake and privacy-gate surface."""
 
-from .pipeline import MediaPreparationError, prepare_g1, start_intake, store_transcript
+from .pipeline import (
+    MediaPreparationError,
+    evaluate_g1,
+    expected_model_image_bytes,
+    prepare_g1,
+    start_intake,
+    store_transcript,
+)
 from .resources import PersistentCaseMediaCleaner
 from .storage import CaseMediaStore, MediaStorageError, UnsafeStoragePath
 from .types import (
@@ -67,6 +74,8 @@ __all__ = [
     "StoredAssetRef",
     "StoredImage",
     "UnsafeStoragePath",
+    "evaluate_g1",
+    "expected_model_image_bytes",
     "prepare_g1",
     "start_intake",
     "store_transcript",

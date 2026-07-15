@@ -14,7 +14,6 @@ from PIL import Image
 
 import claimdone_api.walking_skeleton.safety as walking_safety_module
 import claimdone_api.walking_skeleton.service as walking_service_module
-from claimdone_api.cases import CaseService
 from claimdone_api.contracts import (
     CaseState,
     GateId,
@@ -31,8 +30,11 @@ from claimdone_api.media import (
     MediaStorageError,
     PersistentCaseMediaCleaner,
 )
-from claimdone_api.persistence import SqliteCaseRepository
 from claimdone_api.walking_skeleton.errors import FlowError, PortalUnavailableError
+from claimdone_api.walking_skeleton.legacy_boundary import (
+    LegacyWalkingCaseBoundary,
+    LegacyWalkingRepository,
+)
 from claimdone_api.walking_skeleton.models import (
     FlowResponse,
     PortalDraftFields,
@@ -82,8 +84,8 @@ class RecordingPortal:
 @dataclass(frozen=True)
 class Harness:
     service: WalkingSkeletonService
-    cases: CaseService
-    repository: SqliteCaseRepository
+    cases: LegacyWalkingCaseBoundary
+    repository: LegacyWalkingRepository
     store: CaseMediaStore
     portal: RecordingPortal
     case_id: str
@@ -110,10 +112,13 @@ def intake_request(*, text: str = "An arbitrary staged note.") -> IntakeRequest:
 
 
 def make_harness(tmp_path: Path, portal: RecordingPortal | None = None) -> Harness:
-    repository = SqliteCaseRepository(tmp_path / "cases.db")
-    store = CaseMediaStore(tmp_path / "media")
+    repository = LegacyWalkingRepository(
+        tmp_path / "cases.db",
+        media_root=tmp_path / "media",
+    )
+    store = repository.media_store
     cleaner = PersistentCaseMediaCleaner(repository, store)
-    cases = CaseService(
+    cases = LegacyWalkingCaseBoundary(
         repository,
         resource_cleaner=cleaner,
         case_id_factory=lambda: "case-int001-001",
@@ -690,10 +695,16 @@ def test_media_mapping_survives_restart_and_delete_and_reset_clean_orphans(
     case_path = harness.store.root / storage_name
     assert case_path.is_dir()
 
-    restarted_repository = SqliteCaseRepository(tmp_path / "cases.db")
-    restarted_store = CaseMediaStore(tmp_path / "media")
+    restarted_repository = LegacyWalkingRepository(
+        tmp_path / "cases.db",
+        media_root=tmp_path / "media",
+    )
+    restarted_store = restarted_repository.media_store
     restarted_cleaner = PersistentCaseMediaCleaner(restarted_repository, restarted_store)
-    restarted_cases = CaseService(restarted_repository, resource_cleaner=restarted_cleaner)
+    restarted_cases = LegacyWalkingCaseBoundary(
+        restarted_repository,
+        resource_cleaner=restarted_cleaner,
+    )
     restarted_cases.delete_case(harness.case_id)
 
     assert not case_path.exists()

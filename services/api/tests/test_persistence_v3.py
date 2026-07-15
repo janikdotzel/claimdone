@@ -30,6 +30,7 @@ from claimdone_api.contracts import (
     SandboxReceipt,
     StateWorkflowEvent,
     TranscriptConfirmationRequest,
+    WorkflowEventEnvelope,
 )
 from claimdone_api.persistence import (
     CaseRecordVersionConflictError,
@@ -37,6 +38,11 @@ from claimdone_api.persistence import (
     PersistedDataIntegrityError,
     SqliteCaseRepository,
     TranscriptStateError,
+    WorkflowAtomicityError,
+)
+from claimdone_api.walking_skeleton.legacy_boundary import (
+    LegacyWalkingCaseBoundary,
+    LegacyWalkingRepository,
 )
 
 NOW = datetime(2026, 7, 14, 12, tzinfo=UTC)
@@ -107,6 +113,7 @@ def _create_literal_v2_database(
         connection.executescript(
             f"""
             PRAGMA foreign_keys = ON;
+            PRAGMA application_id = 1128549937;
             CREATE TABLE cases (
                 case_id TEXT PRIMARY KEY NOT NULL,
                 version INTEGER NOT NULL CHECK (version >= 1),
@@ -229,6 +236,18 @@ def _service(path: Path) -> tuple[CaseService, SqliteCaseRepository]:
     return service, repository
 
 
+def _legacy_service(
+    path: Path,
+) -> tuple[LegacyWalkingCaseBoundary, LegacyWalkingRepository]:
+    repository = LegacyWalkingRepository(path)
+    service = LegacyWalkingCaseBoundary(
+        repository,
+        now=lambda: NOW,
+        case_id_factory=lambda: "case-v3",
+    )
+    return service, repository
+
+
 def _pending_summary() -> dict[str, Any]:
     return {
         "images": [],
@@ -297,6 +316,25 @@ def _retry_event() -> RetryWorkflowEvent:
     )
 
 
+def _insert_provider_projection(
+    repository: SqliteCaseRepository,
+    case_id: str,
+    event: ProviderCallWorkflowEvent | RetryWorkflowEvent,
+    *,
+    occurred_at: datetime,
+) -> WorkflowEventEnvelope:
+    """Exercise the projection transaction without reopening the closed generic API."""
+
+    with repository._write_connection() as connection:
+        return repository._insert_redacted_workflow_event(
+            connection,
+            case_id=case_id,
+            event=event,
+            actor=ActorType.AGENT,
+            occurred_at=occurred_at,
+        )
+
+
 def _receipt(case_id: str) -> SandboxReceipt:
     return SandboxReceipt.model_validate(
         {
@@ -324,83 +362,33 @@ def _receipt(case_id: str) -> SandboxReceipt:
     )
 
 
-def test_literal_v2_migration_preserves_rows_cursors_fks_and_backfills_events(
+def test_literal_v2_unbound_authority_is_rejected_without_relabeling(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "v2.db"
     _create_literal_v2_database(database_path)
 
-    repository = SqliteCaseRepository(database_path)
+    with pytest.raises(IncompatiblePersistedContractError, match="make reset"):
+        SqliteCaseRepository(database_path)
 
-    record = repository.get_case("case-v2")
-    assert record is not None
-    assert (record.version, record.state) == (3, CaseState.DISCLOSED)
-    assert repository.get_case_media_handle("case-v2") == f"case-{'1' * 32}"
-    assert [item.sequence for item in repository.list_audit_events("case-v2")] == [7, 9]
-    assert [item.sequence for item in repository.list_gate_decisions("case-v2")] == [5]
-    replay = repository.list_workflow_events("case-v2")
-    assert [item.sequence for item in replay] == [7, 9]
-    assert [item.envelope.event.kind for item in replay] == ["state", "gate"]
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        cases_sql = str(
-            connection.execute(
-                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='cases'"
-            ).fetchone()[0]
-        )
-    assert "awaiting_transcript_confirmation" in cases_sql
-
-    appended = repository.append_workflow_event(
-        case_id="case-v2",
-        expected_case_version=3,
-        event=_clarification_event(),
-        actor=ActorType.SYSTEM,
-        occurred_at=NOW + timedelta(seconds=2),
-    )
-    assert appended.cursor > 9
-    assert [item.sequence for item in repository.list_audit_events("case-v2")] == [
-        7,
-        9,
-        appended.cursor,
-    ]
-
-    repository.delete_case("case-v2")
-    with sqlite3.connect(database_path) as connection:
-        for table in (
-            "audit_events",
-            "gate_decisions",
-            "case_media_handles",
-            "workflow_events",
-        ):
-            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT state, version FROM cases WHERE case_id='case-v2'"
+        ).fetchone() == ("disclosed", 3)
 
 
-def test_v2_pending_transcript_metadata_is_backfilled_without_content(
+def test_v2_pending_transcript_without_authority_is_rejected(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "v2-pending.db"
     _create_literal_v2_database(database_path, pending_transcript=True)
 
-    repository = SqliteCaseRepository(database_path)
-
-    case = repository.get_case("case-v2")
-    transcript = repository.get_transcript("case-v2")
-    assert case is not None
-    assert case.state is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
-    assert case.version == 4
-    assert transcript is not None
-    assert transcript.case_id == case.case_id
-    assert transcript.bound_case_version == case.version
-    assert transcript.transcript_sha256 == DIGEST
-    assert transcript.local_ref == f"transcript-{'3' * 32}.txt"
-    assert transcript.version == 1
-    assert transcript.confirmed is False
-    assert [item.sequence for item in repository.list_workflow_events(case.case_id)] == [
-        7,
-        9,
-        11,
-    ]
+    with pytest.raises(IncompatiblePersistedContractError, match="make reset"):
+        SqliteCaseRepository(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
 
 
 def test_legacy_contract_payload_aborts_without_schema_or_cursor_mutation(
@@ -549,53 +537,50 @@ def test_migration_late_ddl_fault_rolls_back_parent_rebuild_and_index(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_state_gate_generic_replay_and_provider_ledger_are_atomic_and_redacted(
+def test_closed_generic_events_and_provider_projection_are_atomic_and_redacted(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "events.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     record = service.create_case()
     record = service.transition_case(
         record.case_id,
         expected_version=record.version,
         target=CaseState.DISCLOSED,
     )
-    gate = _gate()
-    record = service.record_gate_decision(
-        record.case_id,
-        expected_version=record.version,
-        decision=gate,
-    )
     clarification = _clarification_event()
-    first_generic = repository.append_workflow_event(
-        case_id=record.case_id,
-        expected_case_version=record.version,
-        event=clarification,
-        actor=ActorType.SYSTEM,
-        occurred_at=NOW + timedelta(seconds=2),
-    )
     provider = _provider_event()
-    provider_envelope = repository.append_workflow_event(
-        case_id=record.case_id,
-        expected_case_version=record.version,
-        event=provider,
-        actor=ActorType.SYSTEM,
+    for closed in (clarification, provider, _retry_event()):
+        with pytest.raises(WorkflowAtomicityError, match="atomic command"):
+            repository.append_workflow_event(
+                case_id=record.case_id,
+                expected_case_version=record.version,
+                event=closed,
+                actor=ActorType.SYSTEM,
+                occurred_at=NOW + timedelta(seconds=2),
+            )
+    provider_envelope = _insert_provider_projection(
+        repository._backend,
+        record.case_id,
+        provider,
         occurred_at=NOW + timedelta(seconds=3),
     )
-    retry_envelope = repository.append_workflow_event(
-        case_id=record.case_id,
-        expected_case_version=record.version,
-        event=_retry_event(),
-        actor=ActorType.SYSTEM,
+    retry_envelope = _insert_provider_projection(
+        repository._backend,
+        record.case_id,
+        _retry_event(),
         occurred_at=NOW + timedelta(seconds=4),
     )
-    replay = repository.list_workflow_events(record.case_id, after=first_generic.cursor)
+    replay = repository.list_workflow_events(
+        record.case_id,
+        after=repository.list_workflow_events(record.case_id)[-3].sequence,
+    )
     assert tuple(item.envelope for item in replay) == (
         provider_envelope,
         retry_envelope,
     )
     assert service.get_case(record.case_id).version == record.version
-    reopened = SqliteCaseRepository(database_path)
+    reopened = LegacyWalkingRepository(database_path)
     usage = reopened.list_provider_usage(record.case_id)
     assert tuple(item.source_audit_sequence for item in usage) == (
         provider_envelope.cursor,
@@ -682,13 +667,13 @@ def test_projection_failure_rolls_back_case_audit_and_workflow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, repository = _service(tmp_path / "atomic.db")
+    service, repository = _legacy_service(tmp_path / "atomic.db")
     created = service.create_case()
 
     def fail_projection(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("injected projection failure")
 
-    monkeypatch.setattr(repository, "_insert_workflow_projection", fail_projection)
+    monkeypatch.setattr(repository._backend, "_insert_workflow_projection", fail_projection)
     with pytest.raises(RuntimeError, match="injected"):
         service.transition_case(
             created.case_id,
@@ -712,11 +697,10 @@ def test_ledger_insert_failure_rolls_back_audit_workflow_and_ledger(
 
     monkeypatch.setattr(repository, "_insert_provider_usage_projection", fail_ledger)
     with pytest.raises(RuntimeError, match="injected ledger"):
-        repository.append_workflow_event(
-            case_id=created.case_id,
-            expected_case_version=created.version,
-            event=_provider_event(),
-            actor=ActorType.SYSTEM,
+        _insert_provider_projection(
+            repository,
+            created.case_id,
+            _provider_event(),
             occurred_at=NOW,
         )
 
@@ -729,13 +713,12 @@ def test_provider_ledger_corruption_is_wrapped_as_integrity_error(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "ledger-corrupt.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     case = service.create_case()
-    repository.append_workflow_event(
-        case_id=case.case_id,
-        expected_case_version=case.version,
-        event=_provider_event(),
-        actor=ActorType.SYSTEM,
+    _insert_provider_projection(
+        repository._backend,
+        case.case_id,
+        _provider_event(),
         occurred_at=NOW,
     )
     with sqlite3.connect(database_path) as connection:
@@ -752,18 +735,17 @@ def test_reopen_rejects_provider_ledger_source_mismatches(
     tampering: str,
 ) -> None:
     database_path = tmp_path / f"ledger-source-{tampering}.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     case = service.create_case()
     case = service.transition_case(
         case.case_id,
         expected_version=case.version,
         target=CaseState.DISCLOSED,
     )
-    provider = repository.append_workflow_event(
-        case_id=case.case_id,
-        expected_case_version=case.version,
-        event=_provider_event(),
-        actor=ActorType.SYSTEM,
+    provider = _insert_provider_projection(
+        repository._backend,
+        case.case_id,
+        _provider_event(),
         occurred_at=NOW + timedelta(seconds=1),
     )
 
@@ -805,12 +787,12 @@ def test_reopen_rejects_provider_ledger_source_mismatches(
             )
 
     with pytest.raises(PersistedDataIntegrityError):
-        SqliteCaseRepository(database_path)
+        LegacyWalkingRepository(database_path)
 
 
 def test_workflow_corruption_is_wrapped_as_integrity_error(tmp_path: Path) -> None:
     database_path = tmp_path / "corrupt.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     record = service.create_case()
     service.transition_case(
         record.case_id,
@@ -833,19 +815,29 @@ def test_reopen_rejects_audit_projection_source_tampering(
     tampering: str,
 ) -> None:
     database_path = tmp_path / f"projection-source-{tampering}.db"
-    service, _repository = _service(database_path)
+    service, _repository = _legacy_service(database_path)
     case = service.create_case()
-    case = service.transition_case(
+    if tampering == "gate_id":
+        legacy_service = service
+        g0 = _gate()
+        g1_data = g0.model_dump(mode="json", by_alias=True)
+        g1_data.update(
+            {
+                "gateId": GateId.G1_PRIVACY,
+                "decidedAt": NOW + timedelta(seconds=1),
+            }
+        )
+        case = legacy_service.commit_gate_phase(
+            case.case_id,
+            expected_version=case.version,
+            decisions=(g0, GateDecision.model_validate(g1_data)),
+        )
+    transition_service = service
+    case = transition_service.transition_case(
         case.case_id,
         expected_version=case.version,
         target=CaseState.DISCLOSED,
     )
-    if tampering == "gate_id":
-        case = service.record_gate_decision(
-            case.case_id,
-            expected_version=case.version,
-            decision=_gate(),
-        )
 
     with sqlite3.connect(database_path) as connection:
         if tampering == "state_target":
@@ -864,7 +856,7 @@ def test_reopen_rejects_audit_projection_source_tampering(
             connection.execute("DELETE FROM workflow_events WHERE event_kind = 'state'")
 
     with pytest.raises(PersistedDataIntegrityError):
-        SqliteCaseRepository(database_path)
+        LegacyWalkingRepository(database_path)
 
 
 def test_transcript_confirmation_binds_case_id_version_hash_and_stores_no_text(
@@ -872,7 +864,7 @@ def test_transcript_confirmation_binds_case_id_version_hash_and_stores_no_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "transcript.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     record = service.create_case()
     record = service.transition_case(
         record.case_id,
@@ -995,7 +987,7 @@ def test_transcript_confirmation_binds_case_id_version_hash_and_stores_no_text(
     def fail_projection(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("injected transcript projection failure")
 
-    monkeypatch.setattr(repository, "_insert_workflow_projection", fail_projection)
+    monkeypatch.setattr(repository._backend, "_insert_workflow_projection", fail_projection)
     with pytest.raises(RuntimeError, match="transcript projection"):
         service.confirm_transcript(
             waiting.case_id,
@@ -1033,7 +1025,7 @@ def test_transcript_identity_is_derived_at_save_confirm_and_reopen(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "transcript-source-binding.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     case = service.create_case()
     case = service.transition_case(
         case.case_id,
@@ -1065,15 +1057,13 @@ def test_transcript_identity_is_derived_at_save_confirm_and_reopen(
         (derived_transcript_id, "b" * 64, transcript_ref),
         (derived_transcript_id, DIGEST, forged_ref),
     ):
-        with pytest.raises(TranscriptStateError, match="intake summary"):
+        with pytest.raises(TranscriptStateError, match="mismatched"):
             repository.save_pending_transcript_and_transition(
                 case_id=case.case_id,
                 expected_case_version=case.version,
                 transcript_id=transcript_id,
                 transcript_sha256=transcript_hash,
                 local_ref=local_ref,
-                snapshot=case.snapshot,
-                event=event,
                 updated_at=event.occurred_at,
             )
     assert service.get_case(case.case_id) == case
@@ -1102,14 +1092,14 @@ def test_transcript_identity_is_derived_at_save_confirm_and_reopen(
             ("b" * 64, case.case_id),
         )
 
-    with pytest.raises(TranscriptStateError, match="stale or mismatched"):
+    with pytest.raises(TranscriptStateError, match="stale"):
         service.confirm_transcript(
             case.case_id,
             expected_case_version=waiting.version,
             confirmation=confirmation,
         )
     with pytest.raises(PersistedDataIntegrityError):
-        SqliteCaseRepository(database_path)
+        LegacyWalkingRepository(database_path)
 
 
 @pytest.mark.parametrize("tampering", ("changed", "removed"))
@@ -1118,7 +1108,7 @@ def test_case_update_cannot_invalidate_bound_transcript_summary(
     tampering: str,
 ) -> None:
     database_path = tmp_path / f"transcript-write-binding-{tampering}.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     case = service.create_case()
     case = service.transition_case(
         case.case_id,
@@ -1154,7 +1144,7 @@ def test_case_update_cannot_invalidate_bound_transcript_summary(
 
     assert service.get_case(case.case_id) == waiting
     assert repository.get_transcript(case.case_id) == transcript
-    reopened = SqliteCaseRepository(database_path)
+    reopened = LegacyWalkingRepository(database_path)
     assert reopened.get_case(case.case_id) == waiting
     assert reopened.get_transcript(case.case_id) == transcript
 
@@ -1319,6 +1309,42 @@ def test_capability_consumption_after_expiry_is_rejected_but_late_revocation_is_
         SqliteCaseRepository(database_path)
 
 
+@pytest.mark.parametrize("tampering", ("future_version", "before_case"))
+def test_capability_authority_cannot_escape_case_version_or_lifetime(
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    database_path = tmp_path / f"capability-authority-{tampering}.db"
+    service, repository = _service(database_path)
+    case = service.create_case()
+    digest = hashlib.sha256(tampering.encode()).digest()
+    repository.issue_authority_capability(
+        case_id=case.case_id,
+        expected_case_version=case.version,
+        digest=digest,
+        role="agent",
+        purpose="portal_run",
+        issued_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    with sqlite3.connect(database_path) as connection:
+        if tampering == "future_version":
+            connection.execute(
+                "UPDATE authority_capabilities SET bound_case_version = ? "
+                "WHERE capability_digest = ?",
+                (case.version + 1, digest),
+            )
+        else:
+            connection.execute(
+                "UPDATE authority_capabilities SET issued_at = ? "
+                "WHERE capability_digest = ?",
+                ((NOW - timedelta(seconds=1)).isoformat(), digest),
+            )
+
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
+
+
 def test_receipt_surface_is_read_only_and_fails_closed_on_invalid_json(
     tmp_path: Path,
 ) -> None:
@@ -1376,9 +1402,31 @@ def test_receipt_surface_is_read_only_and_fails_closed_on_invalid_json(
         repository.get_sandbox_receipt(case.case_id)
 
 
+def test_canonical_receipt_must_bind_to_current_receipt_case_version(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "receipt-case-binding.db"
+    service, _repository = _service(database_path)
+    case = service.create_case()
+    receipt = _receipt(case.case_id)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO sandbox_receipts (case_id, receipt_json, created_at) "
+            "VALUES (?, ?, ?)",
+            (
+                case.case_id,
+                receipt.model_dump_json(by_alias=True),
+                receipt.rendered_at.isoformat(),
+            ),
+        )
+
+    with pytest.raises(PersistedDataIntegrityError):
+        SqliteCaseRepository(database_path)
+
+
 def test_case_delete_cascades_every_v3_child_projection(tmp_path: Path) -> None:
     database_path = tmp_path / "cascade.db"
-    service, repository = _service(database_path)
+    service, repository = _legacy_service(database_path)
     case = service.create_case()
     case = service.transition_case(
         case.case_id,
@@ -1395,11 +1443,10 @@ def test_case_delete_cascades_every_v3_child_projection(tmp_path: Path) -> None:
         expected_version=case.version,
         target=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
     )
-    repository.append_workflow_event(
-        case_id=case.case_id,
-        expected_case_version=case.version,
-        event=_provider_event(),
-        actor=ActorType.SYSTEM,
+    _insert_provider_projection(
+        repository._backend,
+        case.case_id,
+        _provider_event(),
         occurred_at=NOW,
     )
     repository.issue_authority_capability(

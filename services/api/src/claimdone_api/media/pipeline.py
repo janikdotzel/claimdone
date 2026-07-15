@@ -7,7 +7,7 @@ from io import BytesIO
 
 from PIL import Image
 
-from claimdone_api.contracts import GateId, GateReasonCode
+from claimdone_api.contracts import GateDecision, GateId, GateReasonCode
 from claimdone_api.gates.registry import make_gate_decision
 
 from .storage import CaseMediaStore
@@ -99,45 +99,26 @@ def prepare_g1(
 ) -> PrivacyResult:
     """Apply explicit EXIF choices and expose model paths only after G1 passes."""
 
-    reasons: set[GateReasonCode] = set()
-    expected_ids = tuple(image.input_id for image in session.images)
-    choices = tuple(review.exif_choices)
-    choices_are_typed = all(isinstance(choice, ExifChoice) for choice in choices)
-    supplied_ids = tuple(
-        choice.input_id for choice in choices if isinstance(choice, ExifChoice)
-    )
-    if (
-        len(expected_ids) != 3
-        or len(set(expected_ids)) != len(expected_ids)
-        or not choices_are_typed
-        or len(supplied_ids) != len(expected_ids)
-        or len(set(supplied_ids)) != len(supplied_ids)
-        or set(supplied_ids) != set(expected_ids)
-        or any(not isinstance(choice.decision, ExifDecision) for choice in choices)
-    ):
-        reasons.add(GateReasonCode.G1_EXIF_UNREVIEWED)
-    if review.model_copy_approved is not True:
-        reasons.add(GateReasonCode.G1_MODEL_COPY_NOT_APPROVED)
-    # Caller-provided event fields are never trusted. The pipeline emits its own
-    # fixed, value-free SafeAuditSummary after approval.
-    if review.audit_fields:
-        reasons.add(GateReasonCode.G1_SENSITIVE_LOG_DATA)
-
-    decision = make_gate_decision(
-        GateId.G1_PRIVACY,
-        deterministic_reasons=tuple(reasons),
-        decided_at=decided_at,
-    )
-    if reasons:
+    decision = evaluate_g1(session, review, decided_at=decided_at)
+    if not decision.passed:
         return PrivacyResult(decision=decision, prepared=None)
 
+    choices = tuple(review.exif_choices)
+    expected_ids = tuple(image.input_id for image in session.images)
     choice_by_id = {choice.input_id: choice.decision for choice in choices}
     normalized: list[tuple[StoredImage, bytes]] = []
     for image in session.images:
         source = store.read_bytes(session.handle, image.source)
-        if choice_by_id[image.input_id] is ExifDecision.STRIP:
-            source = _strip_image_metadata(source, image.image_format.value)
-        normalized.append((image, source))
+        normalized.append(
+            (
+                image,
+                expected_model_image_bytes(
+                    source,
+                    image_format=image.image_format.value,
+                    decision=choice_by_id[image.input_id],
+                ),
+            )
+        )
 
     text = (
         store.read_bytes(session.handle, session.text).decode("utf-8")
@@ -197,6 +178,61 @@ def prepare_g1(
             ),
         ),
     )
+
+
+def evaluate_g1(
+    session: IntakeSession,
+    review: PrivacyReview,
+    *,
+    decided_at: datetime | None = None,
+) -> GateDecision:
+    """Evaluate the privacy policy without reading or writing media bytes."""
+
+    reasons: set[GateReasonCode] = set()
+    expected_ids = tuple(image.input_id for image in session.images)
+    choices = tuple(review.exif_choices)
+    choices_are_typed = all(isinstance(choice, ExifChoice) for choice in choices)
+    supplied_ids = tuple(
+        choice.input_id for choice in choices if isinstance(choice, ExifChoice)
+    )
+    if (
+        len(expected_ids) != 3
+        or len(set(expected_ids)) != len(expected_ids)
+        or not choices_are_typed
+        or len(supplied_ids) != len(expected_ids)
+        or len(set(supplied_ids)) != len(supplied_ids)
+        or set(supplied_ids) != set(expected_ids)
+        or any(not isinstance(choice.decision, ExifDecision) for choice in choices)
+    ):
+        reasons.add(GateReasonCode.G1_EXIF_UNREVIEWED)
+    if review.model_copy_approved is not True:
+        reasons.add(GateReasonCode.G1_MODEL_COPY_NOT_APPROVED)
+    # Caller-provided event fields are never trusted. The pipeline emits its own
+    # fixed, value-free SafeAuditSummary after approval.
+    if review.audit_fields:
+        reasons.add(GateReasonCode.G1_SENSITIVE_LOG_DATA)
+
+    decision = make_gate_decision(
+        GateId.G1_PRIVACY,
+        deterministic_reasons=tuple(reasons),
+        decided_at=decided_at,
+    )
+    return decision
+
+
+def expected_model_image_bytes(
+    source: bytes,
+    *,
+    image_format: str,
+    decision: ExifDecision,
+) -> bytes:
+    """Derive expected provider-visible bytes without storage side effects."""
+
+    if decision is ExifDecision.RETAIN:
+        return source
+    if decision is ExifDecision.STRIP:
+        return _strip_image_metadata(source, image_format)
+    raise TypeError("decision must be an ExifDecision")
 
 
 def store_transcript(

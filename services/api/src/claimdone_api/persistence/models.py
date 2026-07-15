@@ -1,8 +1,11 @@
 """Immutable values exchanged with the SQLite repository."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
@@ -10,8 +13,10 @@ from claimdone_api.contracts import (
     AuditEvent,
     CaseState,
     ClaimPacket,
+    ClarificationAnswerRequest,
     ClarificationView,
     ClarificationWorkflowEvent,
+    EvidenceItem,
     GateDecision,
     OperationalFailureWorkflowEvent,
     PlanStepWorkflowEvent,
@@ -24,6 +29,11 @@ from claimdone_api.contracts import (
     WorkflowEventEnvelope,
     WorkflowOperation,
 )
+from claimdone_api.gates import ModelOutputEnvelope, SafetyInput
+
+if TYPE_CHECKING:
+    from claimdone_api.ai import TranscriptionSuccess
+    from claimdone_api.media.types import IntakeRequest, PrivacyReview
 
 type JsonObject = dict[str, JsonValue]
 type AnalysisProviderWorkflowEvent = (
@@ -108,6 +118,38 @@ class ProviderWorkflowEmission:
 
 
 @dataclass(frozen=True, slots=True)
+class OutputContractAttempt:
+    """One raw, non-persisted model response with its deterministic decision time."""
+
+    envelope: ModelOutputEnvelope = field(repr=False)
+    decided_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IntakeDisclosureCommand:
+    """Raw intake inputs staged and committed by the canonical repository only."""
+
+    case_id: str
+    expected_version: int
+    request: IntakeRequest = field(repr=False)
+    privacy_review: PrivacyReview = field(repr=False)
+    g0_decided_at: datetime
+    g1_decided_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionOutcomeCommand:
+    """One provider transcript bound to a prior canonical audio authority."""
+
+    case_id: str
+    expected_version: int
+    outcome: TranscriptionSuccess = field(repr=False)
+    occurred_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisWorkflowCommand:
     """Closed analysis outcome committed as one case-version mutation.
 
@@ -122,6 +164,10 @@ class AnalysisWorkflowCommand:
     target: CaseState
     claim_packet: ClaimPacket | None
     active_clarification: ClarificationView | None
+    clarification_answer: ClarificationAnswerRequest | None
+    approved_evidence: tuple[EvidenceItem, ...]
+    g2_attempts: tuple[OutputContractAttempt, ...]
+    safety_input: SafetyInput | None
     gate_decisions: tuple[GateDecision, ...]
     provider_events: tuple[ProviderWorkflowEmission, ...]
     plan_steps: tuple[PlanStepWorkflowEvent, ...]
@@ -145,6 +191,8 @@ class TerminalProviderFailureCommand:
     expected_version: int
     event: OperationalFailureWorkflowEvent
     provider_events: tuple[ProviderWorkflowEmission, ...]
+    approved_evidence: tuple[EvidenceItem, ...]
+    g2_attempts: tuple[OutputContractAttempt, ...]
     claim_packet: ClaimPacket | None
     occurred_at: datetime
 

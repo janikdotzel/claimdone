@@ -1,20 +1,26 @@
 """Dependency-free, optimistic-concurrency SQLite case repository."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Iterator
-from contextlib import closing, contextmanager
-from dataclasses import replace
-from datetime import datetime, timedelta
+from contextlib import closing, contextmanager, suppress
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from threading import Lock
+from time import monotonic, sleep
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
+from claimdone_api.ai.core import NarrativeInput, compose_neutral_narrative
 from claimdone_api.audit import (
     build_gate_audit_event,
     build_state_change_event,
@@ -29,9 +35,15 @@ from claimdone_api.contracts import (
     AuditEventType,
     CaseState,
     ClaimPacket,
+    ClarificationAnswerRequest,
     ClarificationStatus,
     ClarificationView,
     ClarificationWorkflowEvent,
+    CounterpartyKnown,
+    EvidenceField,
+    EvidenceItem,
+    EvidenceKind,
+    FactStatus,
     GateDecision,
     GateId,
     GateReasonCode,
@@ -40,20 +52,43 @@ from claimdone_api.contracts import (
     PlanStepWorkflowEvent,
     PortalFillWorkflowEvent,
     PortalState,
+    ProvenanceRef,
     ProviderCallWorkflowEvent,
     ProviderFailureCategory,
     ProviderModelId,
+    RequiredClaimField,
     RetryWorkflowEvent,
     SandboxReceipt,
     StateWorkflowEvent,
     ToolCallWorkflowEvent,
+    TranscriptConfirmationView,
     VerificationState,
     VerificationWorkflowEvent,
     WorkflowEventEnvelope,
     WorkflowEventKind,
     WorkflowOperation,
+    WorkflowSnapshot,
     validate_case_transition,
     validate_workflow_event_order,
+)
+from claimdone_api.gates import (
+    MAX_CLARIFICATION_ROUNDS,
+    AdviceCategory,
+    ClarificationQuestion,
+    CompletenessResult,
+    ModelExtraction,
+    ModelOutputEnvelope,
+    ModelSafetySignal,
+    OutputContractResult,
+    OutputContractRun,
+    ProvenanceResult,
+    RequestedAction,
+    SafetyInput,
+    compute_missing_required_fields,
+    evaluate_g2,
+    evaluate_g3,
+    evaluate_g4,
+    evaluate_g5,
 )
 
 from .models import (
@@ -62,7 +97,9 @@ from .models import (
     AuthorityCapabilityRecord,
     CaseRecord,
     CaseSnapshot,
+    IntakeDisclosureCommand,
     JsonObject,
+    OutputContractAttempt,
     ProviderUsageLedgerRecord,
     ProviderWorkflowEmission,
     SandboxReceiptRecord,
@@ -71,14 +108,56 @@ from .models import (
     SequencedWorkflowEvent,
     TerminalProviderFailureCommand,
     TerminalProviderFailureResult,
+    TranscriptionOutcomeCommand,
     TranscriptRecord,
     TranscriptTransitionResult,
     validate_portal_state,
 )
 
-SCHEMA_VERSION = 3
+if TYPE_CHECKING:
+    from claimdone_api.media import CaseMediaStore
+
+SCHEMA_VERSION = 5
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
+SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
+CANONICAL_AUTHORITY_APPLICATION_ID = 0x43444E31
+LEGACY_AUTHORITY_APPLICATION_ID = 0x43444C31
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
+_GATE_DECISIONS_ADAPTER: TypeAdapter[tuple[GateDecision, ...]] = TypeAdapter(
+    tuple[GateDecision, ...]
+)
+
+
+@dataclass(slots=True)
+class _InitializationLockEntry:
+    lock: Lock
+    users: int = 0
+
+
+_INITIALIZATION_LOCKS_GUARD = Lock()
+_INITIALIZATION_LOCKS: dict[Path, _InitializationLockEntry] = {}
+
+
+@contextmanager
+def _repository_initialization_lock(path: Path) -> Iterator[None]:
+    """Serialize same-process identity checks and schema/WAL initialization per DB."""
+
+    key = path.resolve(strict=False)
+    with _INITIALIZATION_LOCKS_GUARD:
+        entry = _INITIALIZATION_LOCKS.setdefault(
+            key,
+            _InitializationLockEntry(lock=Lock()),
+        )
+        entry.users += 1
+    entry.lock.acquire()
+    try:
+        yield
+    finally:
+        entry.lock.release()
+        with _INITIALIZATION_LOCKS_GUARD:
+            entry.users -= 1
+            if entry.users == 0 and _INITIALIZATION_LOCKS.get(key) is entry:
+                del _INITIALIZATION_LOCKS[key]
 
 type AppendableWorkflowEvent = (
     ClarificationWorkflowEvent
@@ -142,6 +221,10 @@ class WorkflowAtomicityError(PersistenceError):
     """Raised when a critical workflow sequence is incomplete or cross-bound incorrectly."""
 
 
+class AuthorityModeMismatchError(PersistenceError):
+    """Refuse to open a database created by a different authority boundary."""
+
+
 def _enum_sql_values(values: type[StrEnum]) -> str:
     return ", ".join(f"'{value.value}'" for value in values)
 
@@ -161,6 +244,24 @@ _ANALYSIS_GATE_SEQUENCE = (
     GateId.G3_SAFETY_SCOPE,
     GateId.G4_PROVENANCE,
     GateId.G5_COMPLETENESS,
+)
+_CANONICAL_PACKET_REQUIRED_STATES = frozenset(
+    {
+        CaseState.AWAITING_CLARIFICATION,
+        CaseState.READY_TO_FILL,
+        CaseState.FILLING,
+        CaseState.VERIFYING,
+        CaseState.REVIEW,
+        CaseState.HUMAN_APPROVED,
+    }
+)
+_CANONICAL_PACKET_FORBIDDEN_STATES = frozenset(
+    {
+        CaseState.CREATED,
+        CaseState.DISCLOSED,
+        CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+        CaseState.RECEIPT,
+    }
 )
 _AWAITING_CLARIFICATION_PLAN = (
     (
@@ -193,10 +294,20 @@ _READY_TO_FILL_PLAN = (
         "Verify rendered fields before human review",
     ),
 )
+_QUESTION_BY_FIELD = {
+    RequiredClaimField.INCIDENT_DATE: "An welchem Datum ereignete sich der Vorfall?",
+    RequiredClaimField.INCIDENT_TIME: "Wann ereignete sich der Vorfall?",
+    RequiredClaimField.LOCATION: "Wo ereignete sich der Vorfall?",
+    RequiredClaimField.CLAIMANT_NAME: "Wie lautet der Name der anspruchstellenden Person?",
+    RequiredClaimField.POLICY_REFERENCE: "Wie lautet die Demo-Policennummer?",
+    RequiredClaimField.VEHICLE_REGISTRATION: "Wie lautet das Demo-Kennzeichen?",
+    RequiredClaimField.COUNTERPARTY_KNOWN: "Ist eine Gegenpartei bekannt?",
+}
+_TEXT_CLARIFIABLE_FIELDS = frozenset(_QUESTION_BY_FIELD)
 _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE = {
     event_type: kind for kind, event_type in AUDIT_EVENT_TYPE_BY_WORKFLOW_KIND.items()
 }
-_REQUIRED_V3_TABLES = (
+_REQUIRED_SCHEMA_TABLES = (
     "cases",
     "audit_events",
     "gate_decisions",
@@ -206,7 +317,32 @@ _REQUIRED_V3_TABLES = (
     "provider_usage_ledger",
     "authority_capabilities",
     "sandbox_receipts",
+    "case_intake_authority",
+    "case_transcript_authority",
+    "case_packet_authority",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalysisAuthority:
+    """Repository-derived authority used to validate one atomic command."""
+
+    effective_gates: tuple[GateDecision, ...]
+    provenance: ProvenanceResult | None
+    completeness: CompletenessResult | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpectedPacketAuthority:
+    """Replay-derived immutable packet shape at one case version."""
+
+    bound_version: int
+    created_at: datetime
+    state: CaseState
+    plan_events: tuple[tuple[int, AllowedTool], ...]
+    safe_plan: tuple[tuple[AllowedTool, str], ...]
+    clarification_close: ClarificationWorkflowEvent | None = None
+
 
 _MIGRATION_1 = (
     f"""
@@ -451,6 +587,82 @@ _MIGRATION_3 = (
     """,
 )
 
+_MIGRATION_4 = (
+    """
+    CREATE TABLE case_intake_authority (
+        case_id TEXT PRIMARY KEY NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        bound_case_version INTEGER NOT NULL CHECK (bound_case_version >= 2),
+        storage_name TEXT NOT NULL UNIQUE
+            REFERENCES case_media_handles(storage_name) ON DELETE CASCADE,
+        manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+        manifest_sha256 TEXT NOT NULL
+            CHECK (
+                length(manifest_sha256) = 64
+                AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        g0_gate_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        g1_gate_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES gate_decisions(sequence) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        CHECK (g0_gate_sequence < g1_gate_sequence)
+    )
+    """,
+    """
+    CREATE TABLE case_transcript_authority (
+        case_id TEXT PRIMARY KEY NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        bound_case_version INTEGER NOT NULL CHECK (bound_case_version >= 3),
+        intake_manifest_sha256 TEXT NOT NULL
+            CHECK (
+                length(intake_manifest_sha256) = 64
+                AND intake_manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        transcript_id TEXT NOT NULL UNIQUE,
+        transcript_local_ref TEXT NOT NULL UNIQUE,
+        transcript_sha256 TEXT NOT NULL
+            CHECK (
+                length(transcript_sha256) = 64
+                AND transcript_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        provider_source_audit_sequence INTEGER NOT NULL UNIQUE
+            REFERENCES workflow_events(source_audit_sequence) ON DELETE CASCADE,
+        manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+        manifest_sha256 TEXT NOT NULL
+            CHECK (
+                length(manifest_sha256) = 64
+                AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        created_at TEXT NOT NULL
+    )
+    """,
+)
+
+_MIGRATION_5 = (
+    """
+    CREATE TABLE case_packet_authority (
+        case_id TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
+        bound_case_version INTEGER NOT NULL CHECK (bound_case_version >= 2),
+        authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+        packet_json TEXT NOT NULL CHECK (json_valid(packet_json)),
+        packet_sha256 TEXT NOT NULL
+            CHECK (
+                length(packet_sha256) = 64
+                AND packet_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        effective_gates_json TEXT NOT NULL CHECK (json_valid(effective_gates_json)),
+        effective_gates_sha256 TEXT NOT NULL
+            CHECK (
+                length(effective_gates_sha256) = 64
+                AND effective_gates_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (case_id, bound_case_version)
+    )
+    """,
+)
+
 _MEDIA_STORAGE_NAME = re.compile(r"^case-[a-f0-9]{32}$")
 _AUDIO_LOCAL_REF = re.compile(r"^audio-[a-f0-9]{32}\.wav$")
 _TRANSCRIPT_LOCAL_REF = re.compile(r"^transcript-[a-f0-9]{32}\.txt$")
@@ -497,6 +709,16 @@ def _transcript_identity_from_summary(
 
 
 def _dump_json_object(value: JsonObject | dict[str, str]) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _dump_json_value(value: JsonValue) -> str:
     return json.dumps(
         value,
         allow_nan=False,
@@ -653,13 +875,118 @@ class SqliteCaseRepository:
         self,
         database_path: str | Path,
         *,
+        media_root: str | Path | None = None,
         busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> None:
+        if type(self) is not SqliteCaseRepository:
+            raise TypeError("SqliteCaseRepository cannot be subclassed")
+        self._configure(
+            database_path,
+            media_root=media_root,
+            busy_timeout_ms=busy_timeout_ms,
+            authority_application_id=CANONICAL_AUTHORITY_APPLICATION_ID,
+        )
+
+    @classmethod
+    def _open_legacy_backend(
+        cls,
+        database_path: str | Path,
+        *,
+        media_root: str | Path | None = None,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> SqliteCaseRepository:
+        """Construct the exact backend type for the isolated dev-only wrapper."""
+
+        if cls is not SqliteCaseRepository:
+            raise TypeError("Legacy backend construction requires the exact repository type")
+        instance = object.__new__(cls)
+        instance._configure(
+            database_path,
+            media_root=media_root,
+            busy_timeout_ms=busy_timeout_ms,
+            authority_application_id=LEGACY_AUTHORITY_APPLICATION_ID,
+        )
+        return instance
+
+    def _configure(
+        self,
+        database_path: str | Path,
+        *,
+        media_root: str | Path | None,
+        busy_timeout_ms: int,
+        authority_application_id: int,
     ) -> None:
         if busy_timeout_ms < 1:
             raise ValueError("busy_timeout_ms must be positive")
         self.database_path = Path(database_path)
         self.busy_timeout_ms = busy_timeout_ms
+        self._authority_application_id = authority_application_id
+        selected_media_root = (
+            Path(media_root)
+            if media_root is not None
+            else self.database_path.parent / f"{self.database_path.stem}-media"
+        )
         self.initialize()
+        if self._has_persisted_intake_authority():
+            self._require_existing_media_root(selected_media_root)
+        from claimdone_api.media import CaseMediaStore
+
+        self.__media_store = CaseMediaStore(selected_media_root)
+        if self.is_canonical_authority:
+            with closing(self._connect()) as connection:
+                self._preflight_canonical_payloads(
+                    connection,
+                    legacy=False,
+                    verify_media=True,
+                )
+
+    def _has_persisted_intake_authority(self) -> bool:
+        with closing(self._connect()) as connection:
+            if not self._table_exists(connection, "case_intake_authority"):
+                return False
+            return (
+                connection.execute(
+                    "SELECT 1 FROM case_intake_authority LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+
+    @staticmethod
+    def _require_existing_media_root(root: Path) -> None:
+        """Reject missing/unowned roots without claiming them during failed reopen."""
+
+        marker = root / ".claimdone-media-root-v1"
+        try:
+            if (
+                root.is_symlink()
+                or not root.is_dir()
+                or marker.is_symlink()
+                or not marker.is_file()
+                or marker.read_bytes() != b"ClaimDone temporary media root v1\n"
+            ):
+                raise PersistedDataIntegrityError(
+                    "Persisted intake authority has no existing owned media root"
+                )
+        except OSError as error:
+            raise PersistedDataIntegrityError(
+                "Persisted intake authority media root cannot be validated"
+            ) from error
+
+    @property
+    def is_canonical_authority(self) -> bool:
+        return self._authority_application_id == CANONICAL_AUTHORITY_APPLICATION_ID
+
+    @property
+    def media_store(self) -> CaseMediaStore:
+        """Return the exact repository-owned store selected by composition."""
+
+        return self.__media_store
+
+    def _require_canonical_authority_mode(self) -> None:
+        if self.is_canonical_authority is not True:
+            raise AuthorityModeMismatchError(
+                "Canonical workflow authority is unavailable in legacy mode"
+            )
 
     def _connect(self, *, foreign_keys: bool = True) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -673,6 +1000,28 @@ class SqliteCaseRepository:
         connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         return connection
 
+    def _execute_initialization_statement(
+        self,
+        connection: sqlite3.Connection,
+        statement: str,
+    ) -> sqlite3.Cursor:
+        """Retry transient SQLite lock errors only during repository initialization."""
+
+        deadline = monotonic() + max((self.busy_timeout_ms / 1_000) * 2, 0.1)
+        while True:
+            try:
+                return connection.execute(statement)
+            except sqlite3.OperationalError as error:
+                code = getattr(error, "sqlite_errorcode", None)
+                base_code = None if code is None else int(code) & 0xFF
+                locked = base_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or any(
+                    marker in str(error).lower() for marker in ("busy", "locked")
+                )
+                remaining = deadline - monotonic()
+                if not locked or remaining <= 0:
+                    raise
+                sleep(min(0.01, remaining))
+
     @contextmanager
     def _write_connection(self) -> Iterator[sqlite3.Connection]:
         with closing(self._connect()) as connection:
@@ -685,19 +1034,53 @@ class SqliteCaseRepository:
             else:
                 connection.commit()
 
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Hold one WAL snapshot across a composite canonical read."""
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            try:
+                yield connection
+            finally:
+                connection.rollback()
+
     def initialize(self) -> None:
         """Create or atomically migrate the schema and validate canonical payloads."""
 
+        with _repository_initialization_lock(self.database_path):
+            self._initialize_locked()
+
+    def _initialize_locked(self) -> None:
+        """Initialize while holding the process-local lock for this database path."""
+
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_application_id = self._authority_application_id
+        fresh_unmarked = False
         with closing(self._connect()) as connection:
-            journal_mode_row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
-            if journal_mode_row is None or str(journal_mode_row[0]).lower() != "wal":
-                raise PersistenceError("SQLite database could not enter WAL mode")
-            connection.execute("PRAGMA synchronous = NORMAL")
-            version_row = connection.execute("PRAGMA user_version").fetchone()
-            if version_row is None:
-                raise PersistenceError("SQLite did not report a schema version")
-            version = int(version_row[0])
+            application_id_row = self._execute_initialization_statement(
+                connection,
+                "PRAGMA application_id",
+            ).fetchone()
+            version_row = self._execute_initialization_statement(
+                connection,
+                "PRAGMA user_version",
+            ).fetchone()
+            if application_id_row is None or version_row is None:
+                raise PersistenceError("SQLite did not report repository identity")
+            application_id = int(application_id_row[0])
+            existing_version = int(version_row[0])
+            if application_id == 0:
+                if existing_version != 0 or not self._user_schema_is_empty(connection):
+                    raise AuthorityModeMismatchError(
+                        "An existing unmarked database cannot be adopted as repository authority"
+                    )
+                fresh_unmarked = True
+            elif application_id != expected_application_id:
+                raise AuthorityModeMismatchError(
+                    "Repository authority mode does not match the persisted database"
+                )
+            version = existing_version
             if version > SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(
                     f"Database schema {version} is newer than supported version {SCHEMA_VERSION}"
@@ -707,8 +1090,10 @@ class SqliteCaseRepository:
                 self._preflight_canonical_payloads(
                     connection,
                     legacy=version < SCHEMA_VERSION,
+                    verify_media=False,
                 )
             if version == SCHEMA_VERSION:
+                self._enable_wal(connection)
                 return
 
         # SQLite ignores PRAGMA foreign_keys changes inside a transaction. The
@@ -718,17 +1103,48 @@ class SqliteCaseRepository:
             mode = connection.execute("PRAGMA foreign_keys").fetchone()
             if mode is None or int(mode[0]) != 0:
                 raise PersistenceError("SQLite foreign keys could not be disabled for migration")
-            connection.execute("BEGIN IMMEDIATE")
+            self._execute_initialization_statement(
+                connection,
+                "BEGIN EXCLUSIVE",
+            )
             try:
-                row = connection.execute("PRAGMA user_version").fetchone()
-                version = int(row[0]) if row is not None else -1
+                application_row = connection.execute("PRAGMA application_id").fetchone()
+                version_row = connection.execute("PRAGMA user_version").fetchone()
+                if application_row is None or version_row is None:
+                    raise PersistenceError("SQLite lost its repository identity")
+                application_id = int(application_row[0])
+                version = int(version_row[0])
+                if fresh_unmarked:
+                    if (
+                        application_id == expected_application_id
+                        and version == SCHEMA_VERSION
+                    ):
+                        # A different process completed the same authority claim
+                        # while this opener waited for the exclusive lock.
+                        fresh_unmarked = False
+                    elif (
+                        application_id != 0
+                        or version != 0
+                        or not self._user_schema_is_empty(connection)
+                    ):
+                        raise AuthorityModeMismatchError(
+                            "Fresh repository identity changed before initialization"
+                        )
+                elif application_id != expected_application_id:
+                    raise AuthorityModeMismatchError(
+                        "Repository authority mode changed during initialization"
+                    )
                 if version > SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(
                         f"Database schema {version} is newer than supported version "
                         f"{SCHEMA_VERSION}"
                     )
                 if version > 0:
-                    self._preflight_canonical_payloads(connection, legacy=True)
+                    self._preflight_canonical_payloads(
+                        connection,
+                        legacy=True,
+                        verify_media=False,
+                    )
                 if version == 0:
                     for statement in _MIGRATION_1:
                         connection.execute(statement)
@@ -743,12 +1159,32 @@ class SqliteCaseRepository:
                     self._migrate_v2_to_v3(connection)
                     version = 3
                     connection.execute("PRAGMA user_version = 3")
+                if version == 3:
+                    self._migrate_v3_to_v4(connection)
+                    version = 4
+                    connection.execute("PRAGMA user_version = 4")
+                if version == 4:
+                    self._migrate_v4_to_v5(connection)
+                    version = 5
+                    connection.execute("PRAGMA user_version = 5")
                 if version != SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(f"Unsupported database schema: {version}")
                 self._require_no_foreign_key_violations(connection)
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()
                 if integrity is None or str(integrity[0]).lower() != "ok":
                     raise PersistenceError("SQLite integrity check failed during migration")
+                if fresh_unmarked:
+                    connection.execute(
+                        f"PRAGMA application_id = {expected_application_id}"
+                    )
+                # Validate the fully migrated view before committing any DDL,
+                # schema version, or fresh authority identity.  A rejected
+                # legacy payload must leave the source database untouched.
+                self._preflight_canonical_payloads(
+                    connection,
+                    legacy=False,
+                    verify_media=False,
+                )
             except BaseException:
                 connection.rollback()
                 raise
@@ -758,8 +1194,45 @@ class SqliteCaseRepository:
                 connection.execute("PRAGMA foreign_keys = ON")
 
         with closing(self._connect()) as connection:
+            application_row = connection.execute("PRAGMA application_id").fetchone()
+            if (
+                application_row is None
+                or int(application_row[0]) != expected_application_id
+            ):
+                raise AuthorityModeMismatchError(
+                    "Repository authority identity did not survive initialization"
+                )
             self._require_no_foreign_key_violations(connection)
-            self._preflight_canonical_payloads(connection, legacy=False)
+            self._preflight_canonical_payloads(
+                connection,
+                legacy=False,
+                verify_media=False,
+            )
+            self._enable_wal(connection)
+
+    def _enable_wal(self, connection: sqlite3.Connection) -> None:
+        """Enable the persistent journal mode only after all rejectable validation."""
+
+        journal_mode_row = self._execute_initialization_statement(
+            connection,
+            "PRAGMA journal_mode = WAL",
+        ).fetchone()
+        if journal_mode_row is None or str(journal_mode_row[0]).lower() != "wal":
+            raise PersistenceError("SQLite database could not enter WAL mode")
+        connection.execute("PRAGMA synchronous = NORMAL")
+
+    @staticmethod
+    def _user_schema_is_empty(connection: sqlite3.Connection) -> bool:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_schema
+            WHERE name NOT LIKE 'sqlite_%'
+              AND type IN ('table', 'index', 'trigger', 'view')
+            LIMIT 1
+            """
+        ).fetchone()
+        return row is None
 
     @staticmethod
     def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -780,6 +1253,7 @@ class SqliteCaseRepository:
         connection: sqlite3.Connection,
         *,
         legacy: bool,
+        verify_media: bool,
     ) -> None:
         """Validate every canonical JSON root without rewriting its version."""
 
@@ -787,7 +1261,7 @@ class SqliteCaseRepository:
             if not legacy:
                 missing_tables = tuple(
                     table
-                    for table in _REQUIRED_V3_TABLES
+                    for table in _REQUIRED_SCHEMA_TABLES
                     if not self._table_exists(connection, table)
                 )
                 if missing_tables:
@@ -800,6 +1274,7 @@ class SqliteCaseRepository:
             gate_decisions_by_case: dict[str, list[GateDecision]] = {}
             workflows_by_sequence: dict[int, WorkflowEventEnvelope] = {}
             transcripts: list[TranscriptRecord] = []
+            capabilities: list[AuthorityCapabilityRecord] = []
             provider_usage_by_sequence: dict[int, ProviderUsageLedgerRecord] = {}
             workflow_table_exists = self._table_exists(connection, "workflow_events")
             transcript_table_exists = self._table_exists(connection, "case_transcripts")
@@ -903,17 +1378,45 @@ class SqliteCaseRepository:
                 for row in connection.execute(
                     "SELECT * FROM authority_capabilities ORDER BY case_id, purpose"
                 ):
-                    self._row_to_capability(row)
+                    capability = self._row_to_capability(row)
+                    capabilities.append(capability)
+                    if not self.is_canonical_authority:
+                        bound_case = cases_by_id.get(capability.case_id)
+                        if (
+                            bound_case is None
+                            or capability.bound_case_version > bound_case.version
+                            or capability.issued_at < bound_case.created_at
+                        ):
+                            raise PersistedDataIntegrityError(
+                                "Persisted capability is not bound to an existing case version"
+                            )
             if self._table_exists(connection, "sandbox_receipts"):
                 for row in connection.execute("SELECT * FROM sandbox_receipts ORDER BY case_id"):
                     receipt = SandboxReceipt.model_validate_json(
                         _require_string(row["receipt_json"], "sandbox receipt")
                     )
-                    if receipt.case_id != _require_string(row["case_id"], "receipt case id"):
-                        raise PersistedDataIntegrityError(
-                            "Persisted receipt case identity is invalid"
+                    receipt_case_id = _require_string(row["case_id"], "receipt case id")
+                    receipt_created_at = _parse_datetime(
+                        _require_string(row["created_at"], "receipt created_at")
+                    )
+                    bound_case = cases_by_id.get(receipt_case_id)
+                    if (
+                        receipt.case_id != receipt_case_id
+                        or (
+                            self.is_canonical_authority
+                            and (
+                                bound_case is None
+                                or bound_case.state is not CaseState.RECEIPT
+                                or receipt.version != bound_case.version
+                                or receipt_created_at != bound_case.updated_at
+                                or receipt.approved_at < bound_case.created_at
+                                or receipt.rendered_at != receipt_created_at
+                            )
                         )
-                    _parse_datetime(_require_string(row["created_at"], "receipt created_at"))
+                    ):
+                        raise PersistedDataIntegrityError(
+                            "Persisted receipt case authority is invalid"
+                        )
 
             if workflow_table_exists:
                 for sequence, audit in audits_by_sequence.items():
@@ -949,6 +1452,29 @@ class SqliteCaseRepository:
                         "Persisted provider usage has no workflow event"
                     )
 
+                replayed_states = {
+                    case_id: CaseState.CREATED for case_id in cases_by_id
+                }
+                for sequence in sorted(workflows_by_sequence):
+                    envelope = workflows_by_sequence[sequence]
+                    event = envelope.event
+                    if not isinstance(event, StateWorkflowEvent):
+                        continue
+                    replayed = replayed_states.get(envelope.case_id)
+                    if replayed is None or event.from_state is not replayed:
+                        raise PersistedDataIntegrityError(
+                            "Persisted state workflow history is not contiguous"
+                        )
+                    validate_case_transition(replayed, event.to_state)
+                    replayed_states[envelope.case_id] = event.to_state
+                if any(
+                    replayed_states[case_id] is not case.state
+                    for case_id, case in cases_by_id.items()
+                ):
+                    raise PersistedDataIntegrityError(
+                        "Persisted case state disagrees with replayed workflow history"
+                    )
+
             transcripts_by_case = {
                 transcript.case_id: transcript for transcript in transcripts
             }
@@ -978,8 +1504,157 @@ class SqliteCaseRepository:
                 raise PersistedDataIntegrityError(
                     "Case awaiting transcript confirmation has no bound transcript"
                 )
+
+            canonical_authority_tables_exist = self._table_exists(
+                connection,
+                "case_intake_authority",
+            )
+            if self.is_canonical_authority and (
+                not legacy or canonical_authority_tables_exist
+            ):
+                version_origins_by_case: dict[str, dict[int, datetime]] = {}
+                for case in cases_by_id.values():
+                    self._validate_canonical_case_snapshot(case)
+                    version_origins_by_case[case.case_id] = self._validate_canonical_case_replay(
+                        connection,
+                        case,
+                        tuple(
+                            workflows_by_sequence[sequence]
+                            for sequence in sorted(workflows_by_sequence)
+                            if workflows_by_sequence[sequence].case_id == case.case_id
+                        ),
+                        audits_by_sequence=audits_by_sequence,
+                    )
+                    history = tuple(gate_decisions_by_case.get(case.case_id, ()))
+                    if case.state is CaseState.CREATED:
+                        if history:
+                            raise WorkflowAtomicityError(
+                                "A created canonical case cannot have gate history"
+                            )
+                    elif case.state in {
+                        CaseState.DISCLOSED,
+                        CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+                    }:
+                        self._require_passed_g0_g1_history(connection, case)
+                    elif case.state in {
+                        CaseState.ANALYZING,
+                        CaseState.AWAITING_CLARIFICATION,
+                    }:
+                        self._validate_analysis_history(case, history)
+                for capability in capabilities:
+                    bound_case = cases_by_id.get(capability.case_id)
+                    if bound_case is None:
+                        raise PersistedDataIntegrityError(
+                            "Persisted capability has no bound case"
+                        )
+                    self._validate_capability_case_binding(
+                        capability,
+                        version_origins=version_origins_by_case[capability.case_id],
+                    )
+                authority_case_ids = {
+                    _require_string(row["case_id"], "intake authority case id")
+                    for row in connection.execute(
+                        "SELECT case_id FROM case_intake_authority"
+                    )
+                }
+                handle_created_at_by_case: dict[str, datetime] = {}
+                for row in connection.execute(
+                    "SELECT case_id, created_at FROM case_media_handles"
+                ):
+                    handle_case_id = _require_string(
+                        row["case_id"],
+                        "media handle case id",
+                    )
+                    handle_created_at_by_case[handle_case_id] = _parse_datetime(
+                        _require_string(row["created_at"], "media handle created_at")
+                    )
+                handle_case_ids = set(handle_created_at_by_case)
+                required_authority_case_ids = {
+                    case.case_id
+                    for case in cases_by_id.values()
+                    if case.state is not CaseState.CREATED
+                    or case.snapshot.intake_summary is not None
+                }
+                if (
+                    authority_case_ids != handle_case_ids
+                    or not required_authority_case_ids.issubset(authority_case_ids)
+                ):
+                    raise PersistedDataIntegrityError(
+                        "Canonical cases lost their intake authority binding"
+                    )
+                transcript_authority_case_ids = {
+                    _require_string(row["case_id"], "transcript authority case id")
+                    for row in connection.execute(
+                        "SELECT case_id FROM case_transcript_authority"
+                    )
+                }
+                if transcript_authority_case_ids != set(transcripts_by_case):
+                    raise PersistedDataIntegrityError(
+                        "Canonical transcripts lost their authority binding"
+                    )
+                for case_id in sorted(authority_case_ids):
+                    bound_case = cases_by_id.get(case_id)
+                    if bound_case is None:
+                        raise PersistedDataIntegrityError(
+                            "Intake authority has no bound case"
+                        )
+                    manifest, manifest_digest = self._require_intake_authority(
+                        connection,
+                        bound_case,
+                        verify_media=verify_media,
+                    )
+                    handle_created_at = handle_created_at_by_case[case_id]
+                    if not (
+                        bound_case.created_at
+                        <= handle_created_at
+                        <= bound_case.updated_at
+                    ):
+                        raise PersistedDataIntegrityError(
+                            "Media handle timestamp falls outside its case lifetime"
+                        )
+                    has_transcript = case_id in transcript_authority_case_ids
+                    statement = bound_case.snapshot.intake_summary
+                    statement_value = (
+                        None if statement is None else statement.get("statement")
+                    )
+                    if (
+                        manifest.get("inputMode") == "audio"
+                        and statement_value is not None
+                        and not has_transcript
+                    ):
+                        raise PersistedDataIntegrityError(
+                            "Audio statement lost its transcript authority"
+                        )
+                    if has_transcript:
+                        if manifest.get("inputMode") != "audio":
+                            raise PersistedDataIntegrityError(
+                                "Transcript authority is not bound to audio intake"
+                            )
+                        transcript = self._require_transcript_authority(
+                            connection,
+                            bound_case,
+                            intake_manifest_digest=manifest_digest,
+                            verify_media=verify_media,
+                        )
+                        self._validate_transcript_case_binding(
+                            connection,
+                            bound_case,
+                            transcript,
+                        )
+                if self._table_exists(connection, "case_packet_authority"):
+                    for case in cases_by_id.values():
+                        self._require_current_packet_authority(connection, case)
+                elif any(
+                    case.snapshot.claim_packet is not None
+                    for case in cases_by_id.values()
+                ):
+                    raise WorkflowAtomicityError(
+                        "Pre-v5 canonical data cannot retain mutable ClaimPackets"
+                    )
         except (
             PersistedDataIntegrityError,
+            TranscriptStateError,
+            WorkflowAtomicityError,
             ValidationError,
             ValueError,
             TypeError,
@@ -1011,6 +1686,54 @@ class SqliteCaseRepository:
             connection.execute(statement)
         self._backfill_v3_workflow_events(connection)
         self._backfill_v3_pending_transcripts(connection)
+
+    def _migrate_v3_to_v4(self, connection: sqlite3.Connection) -> None:
+        """Add authority storage without blessing unbound canonical intake data."""
+
+        if self.is_canonical_authority:
+            unsafe_case = connection.execute(
+                """
+                SELECT 1
+                FROM cases
+                WHERE state <> ?
+                   OR intake_summary_json IS NOT NULL
+                   OR claim_packet_json IS NOT NULL
+                   OR active_clarification_json IS NOT NULL
+                LIMIT 1
+                """,
+                (CaseState.CREATED.value,),
+            ).fetchone()
+            authority_child_tables = (
+                "audit_events",
+                "gate_decisions",
+                "case_media_handles",
+                "workflow_events",
+                "case_transcripts",
+                "provider_usage_ledger",
+                "authority_capabilities",
+                "sandbox_receipts",
+            )
+            populated_child = any(
+                connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                is not None
+                for table in authority_child_tables
+            )
+            if unsafe_case is not None or populated_child:
+                raise IncompatiblePersistedContractError()
+        for statement in _MIGRATION_4:
+            connection.execute(statement)
+
+    def _migrate_v4_to_v5(self, connection: sqlite3.Connection) -> None:
+        """Add packet authority without adopting mutable historical packets."""
+
+        if self.is_canonical_authority:
+            packet = connection.execute(
+                "SELECT 1 FROM cases WHERE claim_packet_json IS NOT NULL LIMIT 1"
+            ).fetchone()
+            if packet is not None:
+                raise IncompatiblePersistedContractError()
+        for statement in _MIGRATION_5:
+            connection.execute(statement)
 
     def _backfill_v3_workflow_events(self, connection: sqlite3.Connection) -> None:
         decisions_by_case: dict[str, list[GateDecision]] = {}
@@ -1124,8 +1847,12 @@ class SqliteCaseRepository:
         storage_name: str,
         created_at: datetime,
     ) -> None:
-        """Persist one opaque owned media handle for a case exactly once."""
+        """Legacy-only split writer; canonical intake binds ownership atomically."""
 
+        if self.is_canonical_authority:
+            raise WorkflowAtomicityError(
+                "Canonical media handles require commit_intake_disclosure"
+            )
         if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
             raise ValueError("Media storage name is not an owned canonical handle")
         timestamp = _dump_aware_datetime(created_at, "media handle created_at")
@@ -1157,8 +1884,12 @@ class SqliteCaseRepository:
         return storage_name
 
     def unbind_case_media_handle(self, case_id: str, storage_name: str) -> bool:
-        """Remove only the exact opaque mapping selected by the caller."""
+        """Legacy-only split cleanup for the isolated dev boundary."""
 
+        if self.is_canonical_authority:
+            raise WorkflowAtomicityError(
+                "Canonical media authority cannot be removed independently"
+            )
         if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
             raise ValueError("Media storage name is not an owned canonical handle")
         with self._write_connection() as connection:
@@ -1236,47 +1967,800 @@ class SqliteCaseRepository:
             ).fetchone()
         return None if row is None else self._row_to_case(row)
 
-    def replace_snapshot(
+    def get_workflow_snapshot(
+        self,
+        case_id: str,
+        *,
+        request_id: str,
+    ) -> WorkflowSnapshot:
+        """Read every canonical snapshot component from one WAL snapshot."""
+
+        self._require_canonical_authority_mode()
+        if type(request_id) is not str or _IDENTIFIER.fullmatch(request_id) is None:
+            raise ValueError("request_id must be a canonical identifier")
+        with self._read_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+            if row is None:
+                raise CaseRecordNotFoundError(case_id)
+            current = self._row_to_case(row)
+            transcript = self._get_transcript_confirmation_view_in_connection(
+                connection,
+                current,
+            )
+            receipt_record = self._get_sandbox_receipt_in_connection(
+                connection,
+                case_id,
+            )
+            return WorkflowSnapshot.model_validate(
+                {
+                    "contractVersion": CONTRACT_VERSION,
+                    "requestId": request_id,
+                    "case": {
+                        "contractVersion": CONTRACT_VERSION,
+                        "caseId": current.case_id,
+                        "state": current.state,
+                        "version": current.version,
+                        "createdAt": current.created_at,
+                        "updatedAt": current.updated_at,
+                    },
+                    "claimPacket": current.snapshot.claim_packet,
+                    "transcriptConfirmation": transcript,
+                    "clarification": current.snapshot.active_clarification,
+                    "portalSession": None,
+                    "verificationAttempts": None,
+                    "receipt": None if receipt_record is None else receipt_record.receipt,
+                }
+            )
+
+    def commit_intake_disclosure(
+        self,
+        command: IntakeDisclosureCommand,
+    ) -> CaseRecord:
+        """Stage media, recompute G0/G1, and bind all authority in one CAS."""
+
+        self._require_canonical_authority_mode()
+        from claimdone_api.media import (
+            IntakeRequest,
+            PrivacyReview,
+            prepare_g1,
+            start_intake,
+        )
+
+        if type(command) is not IntakeDisclosureCommand:
+            raise TypeError("command must be an IntakeDisclosureCommand")
+        if (
+            type(command.case_id) is not str
+            or _IDENTIFIER.fullmatch(command.case_id) is None
+        ):
+            raise TypeError("Intake case_id must be an exact canonical identifier")
+        if type(command.expected_version) is not int or command.expected_version < 1:
+            raise TypeError("Intake expected_version must be an exact positive integer")
+        if type(command.request) is not IntakeRequest:
+            raise TypeError("Intake request must use the exact canonical type")
+        if type(command.privacy_review) is not PrivacyReview:
+            raise TypeError("Privacy review must use the exact canonical type")
+        timestamps = (
+            command.g0_decided_at,
+            command.g1_decided_at,
+            command.updated_at,
+        )
+        if any(type(value) is not datetime for value in timestamps):
+            raise TypeError("Intake timestamps must use exact datetime values")
+        if any(value.utcoffset() is None for value in timestamps):
+            raise WorkflowAtomicityError("Intake timestamps must include a timezone")
+        if tuple(sorted(timestamps)) != timestamps:
+            raise WorkflowAtomicityError("Intake timestamps must be monotonic")
+
+        with closing(self._connect()) as connection:
+            preliminary = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_version,
+            )
+            if preliminary.state is not CaseState.CREATED:
+                raise WorkflowAtomicityError(
+                    "Canonical intake requires a pristine CREATED case"
+                )
+            if command.g0_decided_at < preliminary.updated_at:
+                raise WorkflowAtomicityError(
+                    "G0 cannot be decided before the current case version exists"
+                )
+
+        start = start_intake(
+            self.__media_store,
+            command.request,
+            decided_at=command.g0_decided_at,
+        )
+        if not start.decision.passed or start.session is None:
+            raise WorkflowAtomicityError("Canonical intake cannot commit a failed G0")
+        session = start.session
+        try:
+            privacy = prepare_g1(
+                self.__media_store,
+                session,
+                command.privacy_review,
+                decided_at=command.g1_decided_at,
+            )
+            if not privacy.decision.passed or privacy.prepared is None:
+                raise WorkflowAtomicityError("Canonical intake cannot commit a failed G1")
+        except BaseException:
+            with suppress(Exception):
+                self.__media_store.delete_case(session.handle)
+            raise
+        try:
+            return self._commit_staged_intake_disclosure(
+                command=command,
+                session=session,
+                prepared=privacy.prepared,
+                statement=session.text,
+                staged_g0=start.decision,
+                staged_g1=privacy.decision,
+            )
+        except Exception as error:
+            # The random handle belongs solely to this attempt until its DB
+            # transaction succeeds. Preserve it on uncertain SQLite commit errors.
+            if not isinstance(error, sqlite3.Error):
+                with suppress(Exception):
+                    self.__media_store.delete_case(session.handle)
+            raise
+
+    def _commit_staged_intake_disclosure(
         self,
         *,
-        case_id: str,
-        expected_version: int,
-        snapshot: CaseSnapshot,
-        updated_at: datetime,
+        command: IntakeDisclosureCommand,
+        session: object,
+        prepared: object,
+        statement: object | None,
+        staged_g0: GateDecision,
+        staged_g1: GateDecision,
     ) -> CaseRecord:
+        from claimdone_api.media import (
+            IntakeSession,
+            PreparedMedia,
+            StoredAssetRef,
+            evaluate_g1,
+            validate_g0,
+        )
+
+        if (
+            type(session) is not IntakeSession
+            or type(prepared) is not PreparedMedia
+            or (statement is not None and type(statement) is not StoredAssetRef)
+        ):
+            raise TypeError("Staged intake values must use exact canonical media types")
         with self._write_connection() as connection:
-            current = self._require_current(connection, case_id, expected_version)
-            _validate_snapshot(case_id, current.state, snapshot)
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_version,
+            )
+            if command.g0_decided_at < current.updated_at:
+                raise WorkflowAtomicityError(
+                    "G0 cannot be decided before the current case version exists"
+                )
+            if (
+                current.state is not CaseState.CREATED
+                or current.snapshot.intake_summary is not None
+                or current.snapshot.claim_packet is not None
+                or current.snapshot.active_clarification is not None
+                or current.snapshot.portal_state is not PortalState.DRAFT
+                or self._read_gate_decisions(connection, case_id=current.case_id)
+                or connection.execute(
+                    "SELECT 1 FROM case_media_handles WHERE case_id = ?",
+                    (current.case_id,),
+                ).fetchone()
+                is not None
+                or connection.execute(
+                    "SELECT 1 FROM case_intake_authority WHERE case_id = ?",
+                    (current.case_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise WorkflowAtomicityError(
+                    "Canonical intake requires a pristine CREATED case"
+                )
+
+            recomputed_g0 = validate_g0(
+                command.request,
+                decided_at=command.g0_decided_at,
+            )
+            recomputed_g1 = evaluate_g1(
+                session,
+                command.privacy_review,
+                decided_at=command.g1_decided_at,
+            )
+            if (
+                recomputed_g0.validated is None
+                or not recomputed_g0.decision.passed
+                or recomputed_g0.decision != staged_g0
+                or not recomputed_g1.passed
+                or recomputed_g1 != staged_g1
+            ):
+                raise WorkflowAtomicityError(
+                    "Staged intake disagrees with canonical G0/G1 recomputation"
+                )
+            summary, manifest = self._verified_intake_manifest(
+                case_id=current.case_id,
+                bound_case_version=current.version + 1,
+                request=command.request,
+                review=command.privacy_review,
+                validated=recomputed_g0.validated,
+                session=session,
+                prepared=prepared,
+                statement=statement,
+            )
+            manifest_json = _dump_json_object(manifest)
+            manifest_digest = hashlib.sha256(
+                b"claimdone-intake-authority-v1\0" + manifest_json.encode("utf-8")
+            ).hexdigest()
+            snapshot = replace(current.snapshot, intake_summary=summary)
+            target = CaseState.DISCLOSED
+            _validate_snapshot(current.case_id, target, snapshot)
+            connection.execute(
+                """
+                INSERT INTO case_media_handles (case_id, storage_name, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    current.case_id,
+                    session.handle.storage_name,
+                    _dump_aware_datetime(command.updated_at, "media handle created_at"),
+                ),
+            )
             self._update_case_row(
                 connection,
                 current=current,
-                state=current.state,
+                state=target,
                 snapshot=snapshot,
-                updated_at=updated_at,
+                updated_at=command.updated_at,
             )
-        return self._require_case(case_id)
+            gate_sequences: list[int] = []
+            for decision in (recomputed_g0.decision, recomputed_g1):
+                gate_sequences.append(
+                    self._insert_gate_decision_row(
+                        connection,
+                        case_id=current.case_id,
+                        decision=decision,
+                    )
+                )
+                audit = build_gate_audit_event(
+                    case_id=current.case_id,
+                    decision=decision,
+                    actor=ActorType.SYSTEM,
+                )
+                audit_sequence = self._insert_audit_event(connection, audit)
+                self._insert_workflow_projection(
+                    connection,
+                    audit_sequence=audit_sequence,
+                    audit=audit,
+                    event=GateWorkflowEvent.model_validate(
+                        {"kind": WorkflowEventKind.GATE, "decision": decision}
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO case_intake_authority (
+                    case_id, authority_version, bound_case_version, storage_name,
+                    manifest_json, manifest_sha256, g0_gate_sequence,
+                    g1_gate_sequence, created_at
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    current.case_id,
+                    current.version + 1,
+                    session.handle.storage_name,
+                    manifest_json,
+                    manifest_digest,
+                    gate_sequences[0],
+                    gate_sequences[1],
+                    _dump_aware_datetime(command.updated_at, "intake authority created_at"),
+                ),
+            )
+            event = build_state_change_event(
+                case_id=current.case_id,
+                current=current.state,
+                target=target,
+                actor=ActorType.HUMAN,
+                occurred_at=command.updated_at,
+            )
+            audit_sequence = self._insert_audit_event(connection, event)
+            self._insert_workflow_projection(
+                connection,
+                audit_sequence=audit_sequence,
+                audit=event,
+                event=StateWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.STATE,
+                        "actor": ActorType.HUMAN,
+                        "fromState": current.state,
+                        "toState": target,
+                    }
+                ),
+            )
+            return self._require_current(
+                connection,
+                current.case_id,
+                current.version + 1,
+            )
 
-    def transition_case(
+    def _verified_intake_manifest(
+        self,
+        *,
+        case_id: str,
+        bound_case_version: int,
+        request: object,
+        review: object,
+        validated: object,
+        session: object,
+        prepared: object,
+        statement: object | None,
+    ) -> tuple[JsonObject, JsonObject]:
+        """Verify every staged byte and derive the only canonical manifest."""
+
+        from claimdone_api.media import (
+            ExifDecision,
+            IntakeRequest,
+            IntakeSession,
+            PreparedMedia,
+            PrivacyReview,
+            StoredAssetRef,
+            expected_model_image_bytes,
+        )
+        from claimdone_api.media.types import ValidatedIntake
+
+        if (
+            type(request) is not IntakeRequest
+            or type(review) is not PrivacyReview
+            or type(validated) is not ValidatedIntake
+            or type(session) is not IntakeSession
+            or type(prepared) is not PreparedMedia
+            or (statement is not None and type(statement) is not StoredAssetRef)
+        ):
+            raise TypeError("Canonical intake manifest received a non-canonical value")
+        if (
+            session.handle != prepared.handle
+            or _MEDIA_STORAGE_NAME.fullmatch(session.handle.storage_name) is None
+            or len(session.images) != 3
+            or len(prepared.model_images) != 3
+        ):
+            raise WorkflowAtomicityError("Staged media shape is invalid")
+
+        choice_by_id = {
+            choice.input_id: choice.decision for choice in review.exif_choices
+        }
+
+        def asset_json(asset: StoredAssetRef) -> dict[str, str]:
+            return {
+                "fileId": asset.file_id,
+                "mediaType": asset.media_type,
+                "sha256": asset.sha256,
+            }
+
+        images: list[JsonObject] = []
+        summary_images: list[JsonObject] = []
+        for validated_image, stored_image, model_asset in zip(
+            validated.images,
+            session.images,
+            prepared.model_images,
+            strict=True,
+        ):
+            if (
+                stored_image.input_id != validated_image.input_id
+                or stored_image.image_format is not validated_image.image_format
+                or stored_image.source.media_type != validated_image.media_type
+                or stored_image.source.sha256 != validated_image.sha256
+                or not isinstance(
+                    choice_by_id.get(stored_image.input_id),
+                    ExifDecision,
+                )
+                or model_asset.media_type != stored_image.source.media_type
+            ):
+                raise WorkflowAtomicityError("Staged image metadata is not G0/G1-bound")
+            source_bytes = self.__media_store.read_bytes(
+                session.handle,
+                stored_image.source,
+            )
+            if source_bytes != validated_image.content:
+                raise WorkflowAtomicityError("Staged source image bytes changed after G0")
+            model_ref = StoredAssetRef(
+                file_id=model_asset.local_ref,
+                media_type=model_asset.media_type,
+                sha256=model_asset.sha256,
+            )
+            if self.__media_store.path_for(session.handle, model_ref) != model_asset.path:
+                raise WorkflowAtomicityError("Model image path is not store-owned")
+            expected = expected_model_image_bytes(
+                source_bytes,
+                image_format=validated_image.image_format.value,
+                decision=choice_by_id[stored_image.input_id],
+            )
+            if self.__media_store.read_bytes(session.handle, model_ref) != expected:
+                raise WorkflowAtomicityError("Provider-visible image bytes violate G1")
+            source_json = asset_json(stored_image.source)
+            model_json = asset_json(model_ref)
+            images.append(
+                cast(
+                    JsonObject,
+                    {
+                        "inputId": stored_image.input_id,
+                        "imageFormat": stored_image.image_format.value,
+                        "source": source_json,
+                        "model": model_json,
+                    },
+                )
+            )
+            summary_images.append(
+                cast(
+                    JsonObject,
+                    {
+                        "inputId": stored_image.input_id,
+                        "source": model_json,
+                        "imageFormat": stored_image.image_format.value,
+                    },
+                )
+            )
+
+        text_json: dict[str, str] | None = None
+        audio_json: dict[str, str] | None = None
+        if validated.normalized_text is not None:
+            if session.text is None or session.audio is not None or prepared.audio is not None:
+                raise WorkflowAtomicityError("Text intake mode changed after G0")
+            text_bytes = self.__media_store.read_bytes(session.handle, session.text)
+            if text_bytes != validated.normalized_text.encode("utf-8"):
+                raise WorkflowAtomicityError("Stored text changed after G0")
+            if statement != session.text or prepared.text != validated.normalized_text:
+                raise WorkflowAtomicityError("Statement is not the exact G0 text")
+            text_json = asset_json(session.text)
+            statement_json: dict[str, str] | None = asset_json(session.text)
+            transcript_state = "not_applicable"
+            input_mode = "text"
+        else:
+            if validated.audio is None or session.audio is None or session.text is not None:
+                raise WorkflowAtomicityError("Audio intake mode changed after G0")
+            audio_bytes = self.__media_store.read_bytes(session.handle, session.audio)
+            if (
+                audio_bytes != validated.audio.content
+                or prepared.audio is None
+                or prepared.audio.local_ref != session.audio.file_id
+                or prepared.audio.media_type != session.audio.media_type
+                or prepared.audio.sha256 != session.audio.sha256
+                or self.__media_store.path_for(session.handle, session.audio)
+                != prepared.audio.path
+            ):
+                raise WorkflowAtomicityError("Stored audio changed after G0/G1")
+            audio_json = asset_json(session.audio)
+            if statement is not None or prepared.text is not None:
+                raise WorkflowAtomicityError(
+                    "Audio intake cannot carry transcript content before transcription"
+                )
+            statement_json = None
+            transcript_state = "awaiting_transcription"
+            input_mode = "audio"
+
+        choices = [
+            cast(
+                JsonObject,
+                {"inputId": image.input_id, "decision": choice_by_id[image.input_id].value},
+            )
+            for image in session.images
+        ]
+        duration = session.audio_duration_seconds
+        summary = cast(
+            JsonObject,
+            {
+                "images": summary_images,
+                "text": text_json,
+                "audio": audio_json,
+                "statement": statement_json,
+                "exifDecisions": [choice["decision"] for choice in choices],
+                "audioDurationNumerator": None if duration is None else duration.numerator,
+                "audioDurationDenominator": None if duration is None else duration.denominator,
+            },
+        )
+        manifest = cast(
+            JsonObject,
+            {
+                "authorityVersion": 1,
+                "caseId": case_id,
+                "boundCaseVersion": bound_case_version,
+                "storageName": session.handle.storage_name,
+                "inputOrder": [image.input_id for image in session.images],
+                "images": images,
+                "inputMode": input_mode,
+                "consents": {
+                    "sandboxAcknowledged": request.consents.sandbox_acknowledged,
+                    "imageRightsConfirmed": request.consents.image_rights_confirmed,
+                    "dataProcessingApproved": request.consents.data_processing_approved,
+                },
+                "text": text_json,
+                "audio": audio_json,
+                "statement": statement_json,
+                "exifChoices": choices,
+                "modelCopyApproved": review.model_copy_approved,
+                "transcriptState": transcript_state,
+                "intakeSummary": summary,
+            },
+        )
+        return summary, manifest
+
+    def commit_transcription_outcome(
+        self,
+        command: TranscriptionOutcomeCommand,
+    ) -> TranscriptTransitionResult:
+        """Bind one successful provider transcript to audio authority atomically."""
+
+        self._require_canonical_authority_mode()
+        from claimdone_api.ai import TranscriptionSuccess
+        from claimdone_api.media import CaseHandle
+
+        if type(command) is not TranscriptionOutcomeCommand:
+            raise TypeError("command must be a TranscriptionOutcomeCommand")
+        if (
+            type(command.case_id) is not str
+            or _IDENTIFIER.fullmatch(command.case_id) is None
+        ):
+            raise TypeError("Transcription case_id must be an exact canonical identifier")
+        if type(command.expected_version) is not int or command.expected_version < 1:
+            raise TypeError(
+                "Transcription expected_version must be an exact positive integer"
+            )
+        if (
+            type(command.occurred_at) is not datetime
+            or type(command.updated_at) is not datetime
+        ):
+            raise TypeError("Transcription timestamps must use exact datetime values")
+        if type(command.outcome) is not TranscriptionSuccess:
+            raise TypeError("Transcription outcome must use the exact canonical type")
+        transcript_text = command.outcome.transcript
+        if type(transcript_text) is not str:
+            raise TypeError("Transcript output must be exact text")
+        normalized = re.sub(
+            r"\s+",
+            " ",
+            unicodedata.normalize("NFC", transcript_text),
+        ).strip()
+        if (
+            not normalized
+            or normalized != transcript_text
+            or len(normalized) > 4_000
+        ):
+            raise WorkflowAtomicityError("Transcript output is not canonically normalized")
+        event = command.outcome.telemetry.to_success_event()
+        self._require_canonical_contract(event, "ProviderCallWorkflowEvent")
+        if (
+            type(event) is not ProviderCallWorkflowEvent
+            or event.operation is not WorkflowOperation.TRANSCRIPTION
+            or event.retry_attempt != 0
+            or event.call_sequence != 1
+            or command.occurred_at.utcoffset() is None
+            or command.updated_at.utcoffset() is None
+            or command.occurred_at > command.updated_at
+        ):
+            raise WorkflowAtomicityError(
+                "Transcription outcome requires one successful transcription provider event"
+            )
+
+        with closing(self._connect()) as connection:
+            current = self._require_current(
+                connection,
+                command.case_id,
+                command.expected_version,
+            )
+            manifest, intake_digest = self._require_intake_authority(connection, current)
+            if (
+                current.state is not CaseState.DISCLOSED
+                or manifest.get("inputMode") != "audio"
+                or command.occurred_at < current.updated_at
+            ):
+                raise WorkflowAtomicityError(
+                    "Transcription requires a disclosed canonical audio intake"
+                )
+            storage_name = cast(str, manifest["storageName"])
+        handle = CaseHandle(storage_name=storage_name)
+        transcript_ref = self.__media_store.write_bytes(
+            handle,
+            normalized.encode("utf-8"),
+            role="transcript",
+            suffix=".txt",
+            media_type="text/plain",
+        )
+        try:
+            with self._write_connection() as connection:
+                current = self._require_current(
+                    connection,
+                    command.case_id,
+                    command.expected_version,
+                )
+                manifest, current_intake_digest = self._require_intake_authority(
+                    connection,
+                    current,
+                )
+                if (
+                    current.state is not CaseState.DISCLOSED
+                    or manifest.get("inputMode") != "audio"
+                    or current_intake_digest != intake_digest
+                    or manifest.get("storageName") != storage_name
+                    or connection.execute(
+                        "SELECT 1 FROM case_transcripts WHERE case_id = ?",
+                        (current.case_id,),
+                    ).fetchone()
+                    is not None
+                    or connection.execute(
+                        "SELECT 1 FROM case_transcript_authority WHERE case_id = ?",
+                        (current.case_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise WorkflowAtomicityError(
+                        "Transcription authority is stale or already consumed"
+                    )
+                if (
+                    self.__media_store.read_bytes(handle, transcript_ref)
+                    != normalized.encode("utf-8")
+                ):
+                    raise WorkflowAtomicityError("Stored transcript bytes changed")
+                summary = current.snapshot.intake_summary
+                if summary is None:
+                    raise WorkflowAtomicityError("Audio intake summary is missing")
+                statement_json: JsonObject = cast(
+                    JsonObject,
+                    {
+                        "fileId": transcript_ref.file_id,
+                        "mediaType": transcript_ref.media_type,
+                        "sha256": transcript_ref.sha256,
+                    },
+                )
+                next_summary = dict(summary)
+                next_summary["statement"] = statement_json
+                transcript_id, local_ref, digest = _transcript_identity_from_summary(
+                    current.case_id,
+                    next_summary,
+                )
+                target = CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
+                snapshot = replace(current.snapshot, intake_summary=next_summary)
+                _validate_snapshot(current.case_id, target, snapshot)
+                self._update_case_row(
+                    connection,
+                    current=current,
+                    state=target,
+                    snapshot=snapshot,
+                    updated_at=command.updated_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO case_transcripts (
+                        transcript_id, case_id, version, bound_case_version,
+                        transcript_sha256, local_ref, confirmed, created_at, confirmed_at
+                    ) VALUES (?, ?, 1, ?, ?, ?, 0, ?, NULL)
+                    """,
+                    (
+                        transcript_id,
+                        current.case_id,
+                        current.version + 1,
+                        digest,
+                        local_ref,
+                        _dump_aware_datetime(command.updated_at, "transcript created_at"),
+                    ),
+                )
+                provider_envelope = self._insert_redacted_workflow_event(
+                    connection,
+                    case_id=current.case_id,
+                    event=event,
+                    actor=ActorType.AGENT,
+                    occurred_at=command.occurred_at,
+                )
+                transcript_manifest = cast(
+                    JsonObject,
+                    {
+                        "authorityVersion": 1,
+                        "caseId": current.case_id,
+                        "boundCaseVersion": current.version + 1,
+                        "storageName": storage_name,
+                        "intakeManifestSha256": intake_digest,
+                        "transcriptId": transcript_id,
+                        "transcript": statement_json,
+                        "providerSourceAuditSequence": provider_envelope.source_audit_sequence,
+                    },
+                )
+                transcript_manifest_json = _dump_json_object(transcript_manifest)
+                transcript_manifest_digest = hashlib.sha256(
+                    b"claimdone-transcript-authority-v1\0"
+                    + transcript_manifest_json.encode("utf-8")
+                ).hexdigest()
+                connection.execute(
+                    """
+                    INSERT INTO case_transcript_authority (
+                        case_id, authority_version, bound_case_version,
+                        intake_manifest_sha256, transcript_id, transcript_local_ref,
+                        transcript_sha256, provider_source_audit_sequence,
+                        manifest_json, manifest_sha256, created_at
+                    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        current.case_id,
+                        current.version + 1,
+                        intake_digest,
+                        transcript_id,
+                        local_ref,
+                        digest,
+                        provider_envelope.source_audit_sequence,
+                        transcript_manifest_json,
+                        transcript_manifest_digest,
+                        _dump_aware_datetime(
+                            command.updated_at,
+                            "transcript authority created_at",
+                        ),
+                    ),
+                )
+                state_event = build_state_change_event(
+                    case_id=current.case_id,
+                    current=current.state,
+                    target=target,
+                    actor=ActorType.SYSTEM,
+                    occurred_at=command.updated_at,
+                )
+                audit_sequence = self._insert_audit_event(connection, state_event)
+                self._insert_workflow_projection(
+                    connection,
+                    audit_sequence=audit_sequence,
+                    audit=state_event,
+                    event=StateWorkflowEvent.model_validate(
+                        {
+                            "kind": WorkflowEventKind.STATE,
+                            "actor": ActorType.SYSTEM,
+                            "fromState": current.state,
+                            "toState": target,
+                        }
+                    ),
+                )
+                case = self._require_current(
+                    connection,
+                    current.case_id,
+                    current.version + 1,
+                )
+                transcript = self._require_transcript(connection, current.case_id)
+            return TranscriptTransitionResult(case=case, transcript=transcript)
+        except Exception as error:
+            # A SQLite error may mean COMMIT outcome is unknown; in that case
+            # retain bytes so a committed authority never points at a missing file.
+            if not isinstance(error, sqlite3.Error):
+                with suppress(Exception):
+                    self.__media_store.delete_asset(handle, transcript_ref)
+            raise
+
+    def begin_text_analysis(
         self,
         *,
         case_id: str,
         expected_version: int,
-        target: CaseState,
-        snapshot: CaseSnapshot,
-        event: AuditEvent,
         updated_at: datetime,
     ) -> CaseRecord:
+        """Enter analysis only for an authority-bound text intake, without deltas."""
+
+        self._require_canonical_authority_mode()
+        self._require_expected_version(
+            expected_version,
+            "Text analysis expected_version",
+        )
+        target = CaseState.ANALYZING
         with self._write_connection() as connection:
             current = self._require_current(connection, case_id, expected_version)
-            if target is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION or (
-                current.state is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
-                and target is CaseState.ANALYZING
+            manifest, _digest = self._require_intake_authority(connection, current)
+            self._require_passed_g0_g1_history(connection, current)
+            if (
+                current.state is not CaseState.DISCLOSED
+                or manifest.get("inputMode") != "text"
+                or updated_at.utcoffset() is None
+                or updated_at < current.updated_at
             ):
-                raise TranscriptStateError(
-                    "Transcript state transitions require the atomic transcript methods"
+                raise WorkflowAtomicityError(
+                    "Text analysis requires a disclosed canonical text intake"
                 )
             validate_case_transition(current.state, target)
-            self._validate_state_event(event, current=current, target=target)
+            snapshot = current.snapshot
             _validate_snapshot(case_id, target, snapshot)
             self._update_case_row(
                 connection,
@@ -1285,71 +2769,28 @@ class SqliteCaseRepository:
                 snapshot=snapshot,
                 updated_at=updated_at,
             )
-            audit_sequence = self._insert_audit_event(connection, event)
-            state_event = StateWorkflowEvent.model_validate(
-                {
-                    "kind": WorkflowEventKind.STATE,
-                    "actor": event.actor,
-                    "fromState": current.state,
-                    "toState": target,
-                }
+            event = build_state_change_event(
+                case_id=case_id,
+                current=current.state,
+                target=target,
+                actor=ActorType.SYSTEM,
+                occurred_at=updated_at,
             )
+            audit_sequence = self._insert_audit_event(connection, event)
             self._insert_workflow_projection(
                 connection,
                 audit_sequence=audit_sequence,
                 audit=event,
-                event=state_event,
-            )
-        return self._require_case(case_id)
-
-    def record_gate_decision(
-        self,
-        *,
-        case_id: str,
-        expected_version: int,
-        decision: GateDecision,
-        event: AuditEvent,
-        updated_at: datetime,
-    ) -> CaseRecord:
-        with self._write_connection() as connection:
-            current = self._require_current(connection, case_id, expected_version)
-            if event.case_id != case_id or event.event_type is not AuditEventType.GATE_DECISION:
-                raise ValueError("Gate audit event must belong to the mutated case")
-            if event.occurred_at != decision.decided_at:
-                raise ValueError("Gate audit event timestamp must match GateDecision")
-            if event.reason_codes != decision.reason_codes:
-                raise ValueError("Gate audit reasonCodes must match GateDecision")
-            self._update_case_row(
-                connection,
-                current=current,
-                state=current.state,
-                snapshot=current.snapshot,
-                updated_at=updated_at,
-            )
-            connection.execute(
-                """
-                INSERT INTO gate_decisions (
-                    case_id, gate_id, decided_at, decision_json
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (
-                    case_id,
-                    decision.gate_id.value,
-                    decision.decided_at.isoformat(),
-                    decision.model_dump_json(by_alias=True),
+                event=StateWorkflowEvent.model_validate(
+                    {
+                        "kind": WorkflowEventKind.STATE,
+                        "actor": ActorType.SYSTEM,
+                        "fromState": current.state,
+                        "toState": target,
+                    }
                 ),
             )
-            audit_sequence = self._insert_audit_event(connection, event)
-            gate_event = GateWorkflowEvent.model_validate(
-                {"kind": WorkflowEventKind.GATE, "decision": decision}
-            )
-            self._insert_workflow_projection(
-                connection,
-                audit_sequence=audit_sequence,
-                audit=event,
-                event=gate_event,
-            )
-        return self._require_case(case_id)
+            return self._require_current(connection, case_id, current.version + 1)
 
     def commit_analysis_workflow(
         self,
@@ -1363,6 +2804,7 @@ class SqliteCaseRepository:
         clarification round never forges a self-transition event.
         """
 
+        self._require_canonical_authority_mode()
         if not isinstance(command, AnalysisWorkflowCommand):
             raise TypeError("command must be an AnalysisWorkflowCommand")
         self._validate_analysis_command_shape(command)
@@ -1372,11 +2814,23 @@ class SqliteCaseRepository:
                 command.case_id,
                 command.expected_version,
             )
+            intake_manifest, intake_digest = self._require_intake_authority(
+                connection,
+                current,
+            )
+            if intake_manifest.get("inputMode") == "audio":
+                self._require_transcript_authority(
+                    connection,
+                    current,
+                    intake_manifest_digest=intake_digest,
+                )
+            self._require_current_packet_authority(connection, current)
             existing_gates = self._read_gate_decisions(
                 connection,
                 case_id=command.case_id,
             )
             snapshot = self._validate_analysis_command(
+                connection,
                 current,
                 command,
                 existing_gates=existing_gates,
@@ -1443,6 +2897,15 @@ class SqliteCaseRepository:
                     )
                 )
 
+            if command.claim_packet is not None:
+                self._insert_packet_authority(
+                    connection,
+                    case_id=command.case_id,
+                    bound_case_version=current.version + 1,
+                    packet=command.claim_packet,
+                    created_at=command.updated_at,
+                )
+
             if current.state is not command.target:
                 state_audit = build_state_change_event(
                     case_id=command.case_id,
@@ -1485,6 +2948,7 @@ class SqliteCaseRepository:
         is generated by this boundary.
         """
 
+        self._require_canonical_authority_mode()
         if not isinstance(command, TerminalProviderFailureCommand):
             raise TypeError("command must be a TerminalProviderFailureCommand")
         self._validate_terminal_provider_command_shape(command)
@@ -1495,7 +2959,26 @@ class SqliteCaseRepository:
                 command.case_id,
                 command.expected_version,
             )
-            snapshot = self._validate_terminal_provider_failure(current, command)
+            intake_manifest, intake_digest = self._require_intake_authority(
+                connection,
+                current,
+            )
+            if intake_manifest.get("inputMode") == "audio" and not (
+                current.state is CaseState.DISCLOSED
+                and command.event.operation is WorkflowOperation.TRANSCRIPTION
+            ):
+                self._require_transcript_authority(
+                    connection,
+                    current,
+                    intake_manifest_digest=intake_digest,
+                )
+            self._require_current_packet_authority(connection, current)
+            snapshot = self._validate_terminal_provider_failure(
+                connection,
+                current,
+                command,
+                intake_manifest=intake_manifest,
+            )
             self._update_case_row(
                 connection,
                 current=current,
@@ -1523,6 +3006,14 @@ class SqliteCaseRepository:
                     occurred_at=command.occurred_at,
                 )
             )
+            if snapshot.claim_packet is not None:
+                self._insert_packet_authority(
+                    connection,
+                    case_id=command.case_id,
+                    bound_case_version=current.version + 1,
+                    packet=snapshot.claim_packet,
+                    created_at=command.occurred_at,
+                )
             state_audit = build_state_change_event(
                 case_id=command.case_id,
                 current=current.state,
@@ -1565,38 +3056,25 @@ class SqliteCaseRepository:
         actor: ActorType,
         occurred_at: datetime,
     ) -> WorkflowEventEnvelope:
-        """Append redacted audit truth and its projection without authorizing state."""
+        """Reject split workflow truth; dedicated commands own every event append."""
 
+        self._require_expected_version(
+            expected_case_version,
+            "Workflow event expected_case_version",
+        )
         _dump_aware_datetime(occurred_at, "workflow occurred_at")
         if event.kind in {WorkflowEventKind.STATE, WorkflowEventKind.GATE}:
             raise ValueError(
                 "State and gate workflow projections require their atomic mutation paths"
             )
-        if isinstance(event, OperationalFailureWorkflowEvent):
-            raise WorkflowAtomicityError(
-                "Operational failures require the atomic terminal provider-failure command"
-            )
         with self._write_connection() as connection:
             current = self._require_current(connection, case_id, expected_case_version)
-            if current.state in {
-                CaseState.ANALYZING,
-                CaseState.AWAITING_CLARIFICATION,
-            } and isinstance(
-                event,
-                ProviderCallWorkflowEvent
-                | RetryWorkflowEvent
-                | PlanStepWorkflowEvent
-                | ClarificationWorkflowEvent,
-            ):
+            if occurred_at < current.updated_at:
                 raise WorkflowAtomicityError(
-                    "Analysis events require the atomic analysis workflow command"
+                    "Generic workflow event timestamps cannot predate the case version"
                 )
-            return self._insert_redacted_workflow_event(
-                connection,
-                case_id=case_id,
-                event=event,
-                actor=actor,
-                occurred_at=occurred_at,
+            raise WorkflowAtomicityError(
+                "Generic workflow event appends are closed; use a dedicated atomic command"
             )
 
     def list_audit_events(
@@ -1667,17 +3145,18 @@ class SqliteCaseRepository:
         """Replay completed redacted events after a database-owned cursor."""
 
         self._validate_page(after, limit)
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """
-                SELECT source_audit_sequence, event_json
-                FROM workflow_events
-                WHERE case_id = ? AND source_audit_sequence > ?
-                ORDER BY source_audit_sequence ASC
-                LIMIT ?
-                """,
-                (case_id, after, limit),
-            ).fetchall()
+        with self._read_connection() as connection:
+            if connection.execute(
+                "SELECT 1 FROM cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone() is None:
+                raise CaseRecordNotFoundError(case_id)
+            rows = self._read_workflow_event_rows(
+                connection,
+                case_id=case_id,
+                after=after,
+                limit=limit,
+            )
         try:
             result = tuple(
                 SequencedWorkflowEvent(
@@ -1699,6 +3178,27 @@ class SqliteCaseRepository:
             raise PersistedDataIntegrityError(
                 "Persisted workflow event projection is invalid"
             ) from error
+
+    def _read_workflow_event_rows(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        after: int,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Read event rows from an already case-bound read transaction."""
+
+        return connection.execute(
+            """
+            SELECT source_audit_sequence, event_json
+            FROM workflow_events
+            WHERE case_id = ? AND source_audit_sequence > ?
+            ORDER BY source_audit_sequence ASC
+            LIMIT ?
+            """,
+            (case_id, after, limit),
+        ).fetchall()
 
     def list_provider_usage(
         self,
@@ -1726,89 +3226,6 @@ class SqliteCaseRepository:
                 "Persisted provider usage telemetry is invalid"
             ) from error
 
-    def save_pending_transcript_and_transition(
-        self,
-        *,
-        case_id: str,
-        expected_case_version: int,
-        transcript_id: str,
-        transcript_sha256: str,
-        local_ref: str,
-        snapshot: CaseSnapshot,
-        event: AuditEvent,
-        updated_at: datetime,
-    ) -> TranscriptTransitionResult:
-        """Atomically bind content-free transcript metadata and enter confirmation."""
-
-        self._validate_transcript_identity(transcript_id, transcript_sha256, local_ref)
-        if snapshot.intake_summary is None:
-            raise TranscriptStateError("Pending transcript requires an intake summary")
-        try:
-            derived_id, derived_ref, derived_hash = _transcript_identity_from_summary(
-                case_id,
-                snapshot.intake_summary,
-            )
-        except ValueError as error:
-            raise TranscriptStateError(
-                "Pending transcript is not bound to a canonical audio intake summary"
-            ) from error
-        if (
-            transcript_id != derived_id
-            or local_ref != derived_ref
-            or transcript_sha256 != derived_hash
-        ):
-            raise TranscriptStateError(
-                "Pending transcript identity does not match its intake summary"
-            )
-        target = CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
-        with self._write_connection() as connection:
-            current = self._require_current(connection, case_id, expected_case_version)
-            if current.state is not CaseState.DISCLOSED:
-                raise TranscriptStateError("Pending transcripts require a disclosed case")
-            validate_case_transition(current.state, target)
-            self._validate_state_event(event, current=current, target=target)
-            _validate_snapshot(case_id, target, snapshot)
-            self._update_case_row(
-                connection,
-                current=current,
-                state=target,
-                snapshot=snapshot,
-                updated_at=updated_at,
-            )
-            connection.execute(
-                """
-                INSERT INTO case_transcripts (
-                    transcript_id, case_id, version, bound_case_version,
-                    transcript_sha256, local_ref, confirmed, created_at, confirmed_at
-                ) VALUES (?, ?, 1, ?, ?, ?, 0, ?, NULL)
-                """,
-                (
-                    transcript_id,
-                    case_id,
-                    current.version + 1,
-                    transcript_sha256,
-                    local_ref,
-                    _dump_aware_datetime(updated_at, "transcript created_at"),
-                ),
-            )
-            audit_sequence = self._insert_audit_event(connection, event)
-            self._insert_workflow_projection(
-                connection,
-                audit_sequence=audit_sequence,
-                audit=event,
-                event=StateWorkflowEvent.model_validate(
-                    {
-                        "kind": WorkflowEventKind.STATE,
-                        "actor": event.actor,
-                        "fromState": current.state,
-                        "toState": target,
-                    }
-                ),
-            )
-            case = self._require_current(connection, case_id, current.version + 1)
-            transcript = self._require_transcript(connection, case_id)
-        return TranscriptTransitionResult(case=case, transcript=transcript)
-
     def confirm_transcript_and_transition(
         self,
         *,
@@ -1816,12 +3233,15 @@ class SqliteCaseRepository:
         expected_case_version: int,
         transcript_id: str,
         transcript_sha256: str,
-        snapshot: CaseSnapshot,
-        event: AuditEvent,
         updated_at: datetime,
     ) -> TranscriptTransitionResult:
         """Confirm exactly the displayed transcript and enter analyzing once."""
 
+        self._require_canonical_authority_mode()
+        self._require_expected_version(
+            expected_case_version,
+            "Transcript confirmation expected_case_version",
+        )
         if _IDENTIFIER.fullmatch(transcript_id) is None:
             raise ValueError("transcript_id is invalid")
         if _SHA256.fullmatch(transcript_sha256) is None:
@@ -1831,26 +3251,28 @@ class SqliteCaseRepository:
             current = self._require_current(connection, case_id, expected_case_version)
             if current.state is not CaseState.AWAITING_TRANSCRIPT_CONFIRMATION:
                 raise TranscriptStateError("Case is not awaiting transcript confirmation")
-            if current.snapshot.intake_summary is None or snapshot.intake_summary is None:
-                raise TranscriptStateError("Transcript confirmation requires an intake summary")
+            self._require_passed_g0_g1_history(connection, current)
+            self._validate_transcript_snapshot_authority(current)
+            _manifest, intake_digest = self._require_intake_authority(
+                connection,
+                current,
+            )
+            transcript = self._require_transcript_authority(
+                connection,
+                current,
+                intake_manifest_digest=intake_digest,
+            )
+            summary = current.snapshot.intake_summary
+            assert summary is not None
             try:
                 derived_id, derived_ref, derived_hash = _transcript_identity_from_summary(
                     case_id,
-                    current.snapshot.intake_summary,
-                )
-                next_identity = _transcript_identity_from_summary(
-                    case_id,
-                    snapshot.intake_summary,
+                    summary,
                 )
             except ValueError as error:
                 raise TranscriptStateError(
                     "Transcript confirmation is not bound to a canonical audio intake summary"
                 ) from error
-            if next_identity != (derived_id, derived_ref, derived_hash):
-                raise TranscriptStateError(
-                    "Transcript confirmation cannot replace the bound transcript identity"
-                )
-            transcript = self._require_transcript(connection, case_id)
             if (
                 transcript.transcript_id != derived_id
                 or transcript.local_ref != derived_ref
@@ -1860,10 +3282,18 @@ class SqliteCaseRepository:
                 or transcript.version != 1
                 or transcript.bound_case_version != current.version
                 or transcript.confirmed
+                or updated_at < current.updated_at
             ):
                 raise TranscriptStateError("Transcript confirmation is stale or mismatched")
             validate_case_transition(current.state, target)
-            self._validate_state_event(event, current=current, target=target)
+            event = build_state_change_event(
+                case_id=case_id,
+                current=current.state,
+                target=target,
+                actor=ActorType.HUMAN,
+                occurred_at=updated_at,
+            )
+            snapshot = current.snapshot
             _validate_snapshot(case_id, target, snapshot)
             cursor = connection.execute(
                 """
@@ -1912,6 +3342,72 @@ class SqliteCaseRepository:
             ).fetchone()
         return None if row is None else self._row_to_transcript(row)
 
+    def get_transcript_confirmation_view(
+        self,
+        case_id: str,
+    ) -> TranscriptConfirmationView | None:
+        """Return only authority-checked transcript content shown to a human."""
+
+        self._require_canonical_authority_mode()
+        with self._read_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+            if row is None:
+                raise CaseRecordNotFoundError(case_id)
+            current = self._row_to_case(row)
+            return self._get_transcript_confirmation_view_in_connection(
+                connection,
+                current,
+            )
+
+    def _get_transcript_confirmation_view_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+    ) -> TranscriptConfirmationView | None:
+        """Project transcript authority using the caller's established read view."""
+
+        if current.state is not CaseState.AWAITING_TRANSCRIPT_CONFIRMATION:
+            return None
+        from claimdone_api.media import CaseHandle, StoredAssetRef
+
+        manifest, intake_digest = self._require_intake_authority(
+            connection,
+            current,
+        )
+        transcript = self._require_transcript_authority(
+            connection,
+            current,
+            intake_manifest_digest=intake_digest,
+        )
+        summary = current.snapshot.intake_summary
+        assert summary is not None
+        statement = summary.get("statement")
+        if type(statement) is not dict:
+            raise TranscriptStateError("Active transcript statement is invalid")
+        ref = StoredAssetRef(
+            file_id=cast(str, statement.get("fileId")),
+            media_type=cast(str, statement.get("mediaType")),
+            sha256=cast(str, statement.get("sha256")),
+        )
+        text = self.__media_store.read_bytes(
+            CaseHandle(storage_name=cast(str, manifest["storageName"])),
+            ref,
+        ).decode("utf-8")
+        return TranscriptConfirmationView.model_validate(
+            {
+                "contractVersion": CONTRACT_VERSION,
+                "caseId": current.case_id,
+                "transcriptId": transcript.transcript_id,
+                "transcriptSha256": transcript.transcript_sha256,
+                "text": text,
+                "version": current.version,
+                "confirmed": False,
+            }
+        )
+
     def issue_authority_capability(
         self,
         *,
@@ -1925,11 +3421,23 @@ class SqliteCaseRepository:
     ) -> AuthorityCapabilityRecord:
         """Persist only a 32-byte verifier and revoke older open peers."""
 
+        self._require_expected_version(
+            expected_case_version,
+            "Capability expected_case_version",
+        )
         self._validate_capability_values(digest, role, purpose, issued_at, expires_at)
         issued = _dump_aware_datetime(issued_at, "capability issued_at")
         expires = _dump_aware_datetime(expires_at, "capability expires_at")
         with self._write_connection() as connection:
-            self._require_current(connection, case_id, expected_case_version)
+            bound_case = self._require_current(
+                connection,
+                case_id,
+                expected_case_version,
+            )
+            if issued_at < bound_case.updated_at:
+                raise ValueError(
+                    "Capability issued_at cannot predate its bound case version"
+                )
             for row in connection.execute(
                 """
                 SELECT * FROM authority_capabilities
@@ -2010,11 +3518,18 @@ class SqliteCaseRepository:
     def get_sandbox_receipt(self, case_id: str) -> SandboxReceiptRecord | None:
         """Read only; AUTH owns the later atomic receipt insertion path."""
 
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT receipt_json, created_at FROM sandbox_receipts WHERE case_id = ?",
-                (case_id,),
-            ).fetchone()
+        with self._read_connection() as connection:
+            return self._get_sandbox_receipt_in_connection(connection, case_id)
+
+    @staticmethod
+    def _get_sandbox_receipt_in_connection(
+        connection: sqlite3.Connection,
+        case_id: str,
+    ) -> SandboxReceiptRecord | None:
+        row = connection.execute(
+            "SELECT receipt_json, created_at FROM sandbox_receipts WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
         if row is None:
             return None
         try:
@@ -2029,13 +3544,61 @@ class SqliteCaseRepository:
         return SandboxReceiptRecord(receipt=receipt, created_at=created_at)
 
     def delete_case(self, case_id: str) -> bool:
+        if self.is_canonical_authority:
+            raise AuthorityModeMismatchError(
+                "Canonical deletion requires delete_case_and_resources"
+            )
         with self._write_connection() as connection:
             cursor = connection.execute("DELETE FROM cases WHERE case_id = ?", (case_id,))
             return cursor.rowcount > 0
 
+    def delete_case_and_resources(self, case_id: str) -> bool:
+        """Serialize canonical deletion with intake and remove the exact owned handle."""
+
+        self._require_canonical_authority_mode()
+        with self._write_connection() as connection:
+            return self._delete_case_and_resources_in_connection(connection, case_id)
+
+    def _delete_case_and_resources_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        case_id: str,
+    ) -> bool:
+        case_row = connection.execute(
+            "SELECT 1 FROM cases WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if case_row is None:
+            return False
+        handle_row = connection.execute(
+            "SELECT storage_name FROM case_media_handles WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if handle_row is not None:
+            from claimdone_api.media import CaseHandle
+
+            storage_name = _require_string(
+                handle_row["storage_name"],
+                "media storage name",
+            )
+            if _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None:
+                raise PersistedDataIntegrityError("Persisted media handle is invalid")
+            self.__media_store.delete_case(CaseHandle(storage_name=storage_name))
+        cursor = connection.execute(
+            "DELETE FROM cases WHERE case_id = ?",
+            (case_id,),
+        )
+        if cursor.rowcount != 1:
+            raise PersistenceError("Reserved case deletion lost its database row")
+        return True
+
     def reset_cases(self) -> int:
         """Delete cases without resetting AUTOINCREMENT history cursors."""
 
+        if self.is_canonical_authority:
+            raise AuthorityModeMismatchError(
+                "Canonical reset cannot bypass exact media cleanup"
+            )
         with self._write_connection() as connection:
             count_row = connection.execute("SELECT COUNT(*) FROM cases").fetchone()
             count = int(count_row[0]) if count_row is not None else 0
@@ -2054,6 +3617,7 @@ class SqliteCaseRepository:
         case_id: str,
         expected_version: int,
     ) -> CaseRecord:
+        self._require_expected_version(expected_version, "expected_version")
         row = connection.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
         if row is None:
             raise CaseRecordNotFoundError(case_id)
@@ -2062,9 +3626,1759 @@ class SqliteCaseRepository:
             raise CaseRecordVersionConflictError(case_id, expected_version, current.version)
         return current
 
+    @staticmethod
+    def _require_expected_version(value: object, label: str) -> int:
+        if type(value) is not int:
+            raise TypeError(
+                f"{label} must be an exact positive SQLite int64 integer"
+            )
+        exact = value
+        if exact < 1 or exact > SQLITE_MAX_INTEGER:
+            raise TypeError(
+                f"{label} must be an exact positive SQLite int64 integer"
+            )
+        return exact
+
+    @staticmethod
+    def _validate_canonical_case_snapshot(current: CaseRecord) -> None:
+        """Bind every persisted snapshot payload to its canonical case state/version."""
+
+        snapshot = current.snapshot
+        if current.state is CaseState.CREATED:
+            if snapshot.intake_summary is not None:
+                raise WorkflowAtomicityError(
+                    "A created canonical case cannot expose persisted intake"
+                )
+        elif snapshot.intake_summary is None:
+            raise WorkflowAtomicityError(
+                "A non-created canonical case requires persisted intake"
+            )
+
+        if (
+            current.state in _CANONICAL_PACKET_REQUIRED_STATES
+            and snapshot.claim_packet is None
+        ):
+            raise WorkflowAtomicityError(
+                f"{current.state.value} requires a canonical ClaimPacket"
+            )
+        if (
+            current.state in _CANONICAL_PACKET_FORBIDDEN_STATES
+            and snapshot.claim_packet is not None
+        ):
+            raise WorkflowAtomicityError(
+                f"{current.state.value} cannot retain a ClaimPacket"
+            )
+
+        active_payload = snapshot.active_clarification
+        if current.state is not CaseState.AWAITING_CLARIFICATION:
+            if active_payload is not None:
+                raise WorkflowAtomicityError(
+                    "Only awaiting_clarification may retain an active clarification"
+                )
+            return
+        if active_payload is None:
+            raise WorkflowAtomicityError(
+                "awaiting_clarification requires an active clarification"
+            )
+        try:
+            active = ClarificationView.model_validate(active_payload)
+        except (ValidationError, ValueError, TypeError) as error:
+            raise WorkflowAtomicityError(
+                "Persisted active clarification is not canonical"
+            ) from error
+        if (
+            active.case_id != current.case_id
+            or active.expected_version != current.version
+            or active.requested_at != current.updated_at
+            or not current.created_at <= active.requested_at <= current.updated_at
+        ):
+            raise WorkflowAtomicityError(
+                "Active clarification is not bound to the current case version"
+            )
+
+    def _validate_canonical_case_replay(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        workflows: tuple[WorkflowEventEnvelope, ...],
+        *,
+        audits_by_sequence: dict[int, AuditEvent],
+    ) -> dict[int, datetime]:
+        """Derive every authorized case mutation and authority boundary from history."""
+
+        replayed_state = CaseState.CREATED
+        replayed_version = 1
+        version_origins = {1: current.created_at}
+        intake_mode = self._replay_intake_mode(connection, current)
+        last_event_at = current.created_at
+        last_mutation_at = current.created_at
+        pending_clarification: ClarificationWorkflowEvent | None = None
+        pending_clarification_close: ClarificationWorkflowEvent | None = None
+        pending_requested_at: datetime | None = None
+        last_clarification_round = 0
+        clarification_closed = False
+        pending_plan: list[PlanStepWorkflowEvent] = []
+        pending_plan_at: datetime | None = None
+        pending_clarification_at: datetime | None = None
+        pending_provider: list[
+            tuple[
+                ProviderCallWorkflowEvent
+                | RetryWorkflowEvent
+                | OperationalFailureWorkflowEvent,
+                datetime,
+            ]
+        ] = []
+        pending_intake_gates: list[GateDecision] = []
+        boundary_stage = 0
+        expected_packet_authorities: list[_ExpectedPacketAuthority] = []
+        last_plan_events: tuple[tuple[int, AllowedTool], ...] | None = None
+        last_safe_plan: tuple[tuple[AllowedTool, str], ...] | None = None
+        analysis_targets = {
+            CaseState.AWAITING_CLARIFICATION,
+            CaseState.READY_TO_FILL,
+            CaseState.BLOCKED,
+            CaseState.EMERGENCY_STOPPED,
+        }
+
+        for index, envelope in enumerate(workflows):
+            occurred_at = envelope.occurred_at
+            if (
+                occurred_at < current.created_at
+                or occurred_at > current.updated_at
+                or occurred_at < last_event_at
+                or occurred_at < last_mutation_at
+            ):
+                raise WorkflowAtomicityError(
+                    "Canonical workflow chronology falls outside its case version"
+                )
+            last_event_at = occurred_at
+            event = envelope.event
+            audit = audits_by_sequence.get(envelope.source_audit_sequence)
+            if audit is None:
+                raise WorkflowAtomicityError(
+                    "Workflow replay lost its source audit authority"
+                )
+            self._validate_replay_actor(event, audit.actor)
+            if isinstance(event, GateWorkflowEvent):
+                allowed_state = (
+                    replayed_state is CaseState.CREATED
+                    if event.decision.gate_id in {GateId.G0_INTAKE, GateId.G1_PRIVACY}
+                    else replayed_state
+                    in {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                )
+                if not allowed_state:
+                    raise WorkflowAtomicityError(
+                        "Persisted gate was not authorized by the replayed case state"
+                    )
+                if boundary_stage > 1:
+                    raise WorkflowAtomicityError(
+                        "Gate event appears after its atomic boundary stage"
+                    )
+                boundary_stage = 1
+                if replayed_state is CaseState.CREATED:
+                    pending_intake_gates.append(event.decision)
+                continue
+
+            if isinstance(
+                event,
+                ProviderCallWorkflowEvent
+                | RetryWorkflowEvent
+                | OperationalFailureWorkflowEvent,
+            ):
+                required_state = {
+                    WorkflowOperation.TRANSCRIPTION: CaseState.DISCLOSED,
+                    WorkflowOperation.EXTRACTION: CaseState.ANALYZING,
+                    WorkflowOperation.COMPUTER_USE: CaseState.FILLING,
+                    WorkflowOperation.VERIFICATION: CaseState.VERIFYING,
+                }[event.operation]
+                if replayed_state is not required_state:
+                    raise WorkflowAtomicityError(
+                        "Provider telemetry was not authorized by the replayed case state"
+                    )
+                if boundary_stage != 0:
+                    raise WorkflowAtomicityError(
+                        "Provider telemetry appears after gates or plan events"
+                    )
+                pending_provider.append((event, occurred_at))
+                if isinstance(event, OperationalFailureWorkflowEvent):
+                    next_envelope = (
+                        None if index + 1 == len(workflows) else workflows[index + 1]
+                    )
+                    if (
+                        next_envelope is None
+                        or next_envelope.occurred_at != occurred_at
+                        or not isinstance(next_envelope.event, StateWorkflowEvent)
+                        or next_envelope.event.from_state is not replayed_state
+                        or next_envelope.event.to_state is not CaseState.FAILED
+                    ):
+                        raise WorkflowAtomicityError(
+                            "Operational failure must be immediately closed by FAILED"
+                        )
+                    boundary_stage = 4
+                continue
+
+            if isinstance(
+                event,
+                ToolCallWorkflowEvent
+                | PortalFillWorkflowEvent
+                | VerificationWorkflowEvent,
+            ):
+                raise WorkflowAtomicityError(
+                    "Workflow event has no canonical atomic writer"
+                )
+
+            if isinstance(event, PlanStepWorkflowEvent):
+                if replayed_state not in {
+                    CaseState.ANALYZING,
+                    CaseState.AWAITING_CLARIFICATION,
+                }:
+                    raise WorkflowAtomicityError(
+                        "Plan event was not authorized by the replayed case state"
+                    )
+                if boundary_stage not in {1, 2}:
+                    raise WorkflowAtomicityError(
+                        "Plan events require the completed gate stage"
+                    )
+                if (
+                    event.sequence != len(pending_plan) + 1
+                    or (
+                        pending_plan_at is not None
+                        and occurred_at != pending_plan_at
+                    )
+                ):
+                    raise WorkflowAtomicityError(
+                        "Plan events are not one exact atomic sequence"
+                    )
+                pending_plan.append(event)
+                pending_plan_at = occurred_at
+                boundary_stage = 2
+                continue
+
+            if isinstance(event, ClarificationWorkflowEvent):
+                if replayed_state not in {
+                    CaseState.ANALYZING,
+                    CaseState.AWAITING_CLARIFICATION,
+                }:
+                    raise WorkflowAtomicityError(
+                        "Clarification event was not authorized by the replayed case state"
+                    )
+                if boundary_stage not in {2, 3}:
+                    raise WorkflowAtomicityError(
+                        "Clarification events require the completed plan stage"
+                    )
+                if (
+                    pending_clarification_at is not None
+                    and occurred_at != pending_clarification_at
+                ):
+                    raise WorkflowAtomicityError(
+                        "Clarification lifecycle events are not one atomic timestamp"
+                    )
+                pending_clarification_at = occurred_at
+                boundary_stage = 3
+                if clarification_closed:
+                    raise WorkflowAtomicityError(
+                        "Clarification lifecycle continued after it was closed"
+                    )
+                if event.status is ClarificationStatus.REQUESTED:
+                    if (
+                        pending_clarification is not None
+                        or event.round != last_clarification_round + 1
+                    ):
+                        raise WorkflowAtomicityError(
+                            "Clarification requests are not contiguous"
+                        )
+                    pending_clarification = event
+                    pending_requested_at = occurred_at
+                    last_clarification_round = event.round
+                    next_event = (
+                        None
+                        if index + 1 == len(workflows)
+                        else workflows[index + 1].event
+                    )
+                    initial_transition = (
+                        isinstance(next_event, StateWorkflowEvent)
+                        and next_event.from_state is replayed_state
+                        and next_event.to_state is CaseState.AWAITING_CLARIFICATION
+                    )
+                    if not initial_transition:
+                        if replayed_state is not CaseState.AWAITING_CLARIFICATION:
+                            raise WorkflowAtomicityError(
+                                "Initial clarification request requires its state transition"
+                            )
+                        self._validate_provider_replay_batch(
+                            replayed_state,
+                            replayed_state,
+                            tuple(pending_provider),
+                            mutation_at=occurred_at,
+                        )
+                        if (
+                            pending_plan_at != occurred_at
+                            or pending_clarification_at != occurred_at
+                        ):
+                            raise WorkflowAtomicityError(
+                                "Clarification packet mutation timestamps are not exact"
+                            )
+                        plan_events, safe_plan = self._consume_replayed_plan(
+                            pending_plan,
+                            target=CaseState.AWAITING_CLARIFICATION,
+                        )
+                        replayed_version += 1
+                        version_origins[replayed_version] = occurred_at
+                        last_mutation_at = occurred_at
+                        expected_packet_authorities.append(
+                            _ExpectedPacketAuthority(
+                                bound_version=replayed_version,
+                                created_at=occurred_at,
+                                state=CaseState.AWAITING_CLARIFICATION,
+                                plan_events=plan_events,
+                                safe_plan=safe_plan,
+                                clarification_close=pending_clarification_close,
+                            )
+                        )
+                        last_plan_events = plan_events
+                        last_safe_plan = safe_plan
+                        pending_plan.clear()
+                        pending_plan_at = None
+                        pending_clarification_at = None
+                        pending_clarification_close = None
+                        pending_provider.clear()
+                        boundary_stage = 0
+                else:
+                    if (
+                        pending_clarification is None
+                        or event.round != pending_clarification.round
+                        or event.field is not pending_clarification.field
+                    ):
+                        raise WorkflowAtomicityError(
+                            "Clarification close event has no exact requested predecessor"
+                        )
+                    pending_clarification = None
+                    pending_requested_at = None
+                    pending_clarification_close = event
+                    if event.status is ClarificationStatus.EXHAUSTED:
+                        clarification_closed = True
+                continue
+
+            if isinstance(event, StateWorkflowEvent):
+                if event.from_state is not replayed_state:
+                    raise WorkflowAtomicityError(
+                        "State history is not contiguous during version replay"
+                    )
+                if (
+                    event.from_state is CaseState.CREATED
+                    and event.to_state is CaseState.DISCLOSED
+                ):
+                    self._validate_replayed_intake_gate_boundary(
+                        connection,
+                        current=current,
+                        decisions=tuple(pending_intake_gates),
+                    )
+                self._validate_state_replay_boundary(
+                    event,
+                    actor=audit.actor,
+                    boundary_stage=boundary_stage,
+                    intake_mode=intake_mode,
+                )
+                self._validate_provider_replay_batch(
+                    event.from_state,
+                    event.to_state,
+                    tuple(pending_provider),
+                    mutation_at=occurred_at,
+                )
+                if pending_plan_at is not None and pending_plan_at != occurred_at:
+                    raise WorkflowAtomicityError(
+                        "Plan events do not share their packet mutation timestamp"
+                    )
+                if (
+                    pending_clarification_at is not None
+                    and pending_clarification_at != occurred_at
+                ):
+                    raise WorkflowAtomicityError(
+                        "Clarification events do not share their state mutation timestamp"
+                    )
+                replayed_version += 1
+                version_origins[replayed_version] = occurred_at
+                last_mutation_at = occurred_at
+                creates_analysis_packet = bool(pending_plan) and (
+                    event.from_state
+                    in {CaseState.ANALYZING, CaseState.AWAITING_CLARIFICATION}
+                    and event.to_state in analysis_targets
+                )
+                if creates_analysis_packet:
+                    plan_events, safe_plan = self._consume_replayed_plan(
+                        pending_plan,
+                        target=event.to_state,
+                    )
+                    expected_packet_authorities.append(
+                        _ExpectedPacketAuthority(
+                            bound_version=replayed_version,
+                            created_at=occurred_at,
+                            state=event.to_state,
+                            plan_events=plan_events,
+                            safe_plan=safe_plan,
+                            clarification_close=pending_clarification_close,
+                        )
+                    )
+                    last_plan_events = plan_events
+                    last_safe_plan = safe_plan
+                elif event.from_state is CaseState.AWAITING_CLARIFICATION or (
+                    event.from_state is CaseState.ANALYZING
+                    and event.to_state
+                    in {
+                        CaseState.AWAITING_CLARIFICATION,
+                        CaseState.READY_TO_FILL,
+                        CaseState.EMERGENCY_STOPPED,
+                    }
+                ):
+                    raise WorkflowAtomicityError(
+                        "Packet-producing analysis mutation has no exact plan events"
+                    )
+                elif pending_plan:
+                    raise WorkflowAtomicityError(
+                        "Plan events were not consumed by an analysis packet mutation"
+                    )
+                elif (
+                    event.from_state in {CaseState.FILLING, CaseState.VERIFYING}
+                    and event.to_state is CaseState.FAILED
+                ):
+                    if last_plan_events is None or last_safe_plan is None:
+                        raise WorkflowAtomicityError(
+                            "Terminal packet mutation has no prior packet plan authority"
+                        )
+                    expected_packet_authorities.append(
+                        _ExpectedPacketAuthority(
+                            bound_version=replayed_version,
+                            created_at=occurred_at,
+                            state=CaseState.FAILED,
+                            plan_events=last_plan_events,
+                            safe_plan=last_safe_plan,
+                        )
+                    )
+                pending_plan.clear()
+                pending_plan_at = None
+                pending_clarification_at = None
+                pending_clarification_close = None
+                pending_provider.clear()
+                pending_intake_gates.clear()
+                boundary_stage = 0
+                replayed_state = event.to_state
+
+        if (
+            pending_plan
+            or pending_provider
+            or pending_intake_gates
+            or pending_clarification_at is not None
+            or pending_clarification_close is not None
+            or boundary_stage != 0
+        ):
+            raise WorkflowAtomicityError(
+                "Workflow events were not consumed by a complete atomic mutation"
+            )
+
+        if (
+            replayed_state is not current.state
+            or replayed_version != current.version
+            or last_mutation_at != current.updated_at
+        ):
+            raise WorkflowAtomicityError(
+                "Case version or updated_at disagrees with replayed mutations"
+            )
+
+        active_payload = current.snapshot.active_clarification
+        if current.state is CaseState.AWAITING_CLARIFICATION:
+            if pending_clarification is None or pending_requested_at is None:
+                raise WorkflowAtomicityError(
+                    "Active clarification has no persisted requested lifecycle event"
+                )
+            active = ClarificationView.model_validate(active_payload)
+            if (
+                pending_clarification.round != active.round
+                or pending_clarification.field is not active.field
+                or pending_requested_at != active.requested_at
+            ):
+                raise WorkflowAtomicityError(
+                    "Active clarification disagrees with its requested event"
+                )
+        elif pending_clarification is not None:
+            raise WorkflowAtomicityError(
+                "Closed case state retains an open clarification lifecycle"
+            )
+
+        if self._table_exists(connection, "case_packet_authority"):
+            rows = connection.execute(
+                """
+                SELECT bound_case_version, created_at, packet_json
+                FROM case_packet_authority
+                WHERE case_id = ?
+                ORDER BY bound_case_version
+                """,
+                (current.case_id,),
+            ).fetchall()
+            if len(rows) != len(expected_packet_authorities):
+                raise WorkflowAtomicityError(
+                    "Packet authority versions disagree with replayed packet mutations"
+                )
+            for row, expected in zip(rows, expected_packet_authorities, strict=True):
+                stored_packet = ClaimPacket.model_validate_json(
+                    _require_string(row["packet_json"], "packet authority JSON")
+                )
+                packet_plan_events = tuple(
+                    (step.sequence, step.tool) for step in stored_packet.plan.steps
+                )
+                packet_safe_plan = tuple(
+                    (step.tool, step.reason) for step in stored_packet.plan.steps
+                )
+                if (
+                    _require_integer(
+                        row["bound_case_version"],
+                        "packet bound version",
+                    )
+                    != expected.bound_version
+                    or _parse_datetime(
+                        _require_string(
+                            row["created_at"],
+                            "packet authority created_at",
+                        )
+                    )
+                    != expected.created_at
+                    or stored_packet.case_id != current.case_id
+                    or stored_packet.state is not expected.state
+                    or packet_plan_events != expected.plan_events
+                    or packet_safe_plan != expected.safe_plan
+                ):
+                    raise WorkflowAtomicityError(
+                        "Historical packet content disagrees with replayed authority"
+                    )
+                self._validate_replayed_clarification_close(
+                    expected.clarification_close,
+                    target=expected.state,
+                    packet=stored_packet,
+                )
+        return version_origins
+
+    @classmethod
+    def _validate_replayed_clarification_close(
+        cls,
+        close: ClarificationWorkflowEvent | None,
+        *,
+        target: CaseState,
+        packet: ClaimPacket,
+    ) -> None:
+        if close is None:
+            return
+        manual_handoff = False
+        gates = packet.gate_decisions
+        if gates and gates[-1].gate_id is GateId.G5_COMPLETENESS:
+            if len(gates) < 2 or gates[-2].gate_id is not GateId.G4_PROVENANCE:
+                raise WorkflowAtomicityError(
+                    "Clarification close lost its deterministic G4/G5 boundary"
+                )
+            g4, g5 = gates[-2:]
+            provenance = evaluate_g4(packet, decided_at=g4.decided_at)
+            completeness = cls._derive_completeness(
+                provenance,
+                completed_rounds=close.round,
+                decided_at=g5.decided_at,
+            )
+            if provenance.decision != g4 or completeness.decision != g5:
+                raise WorkflowAtomicityError(
+                    "Clarification close disagrees with deterministic G4/G5 authority"
+                )
+            manual_handoff = completeness.manual_handoff
+        expected_status = ClarificationStatus.CONFIRMED
+        if (
+            target is CaseState.BLOCKED
+            and manual_handoff
+            and close.round == MAX_CLARIFICATION_ROUNDS
+        ):
+            expected_status = ClarificationStatus.EXHAUSTED
+        if close.status is not expected_status:
+            raise WorkflowAtomicityError(
+                "Clarification close status disagrees with its deterministic target"
+            )
+
+    @staticmethod
+    def _validate_replayed_intake_gate_boundary(
+        connection: sqlite3.Connection,
+        *,
+        current: CaseRecord,
+        decisions: tuple[GateDecision, ...],
+    ) -> None:
+        if (
+            tuple(decision.gate_id for decision in decisions)
+            != (GateId.G0_INTAKE, GateId.G1_PRIVACY)
+            or any(not decision.passed for decision in decisions)
+        ):
+            raise WorkflowAtomicityError(
+                "CREATED to DISCLOSED requires exactly the passed G0/G1 pair"
+            )
+        authority = connection.execute(
+            """
+            SELECT g0_gate_sequence, g1_gate_sequence
+            FROM case_intake_authority
+            WHERE case_id = ?
+            """,
+            (current.case_id,),
+        ).fetchone()
+        if authority is None:
+            raise WorkflowAtomicityError(
+                "Intake gate replay has no immutable intake authority"
+            )
+        sequences = (
+            _require_integer(authority["g0_gate_sequence"], "G0 sequence"),
+            _require_integer(authority["g1_gate_sequence"], "G1 sequence"),
+        )
+        rows = connection.execute(
+            """
+            SELECT sequence, decision_json
+            FROM gate_decisions
+            WHERE case_id = ? AND sequence IN (?, ?)
+            ORDER BY sequence
+            """,
+            (current.case_id, *sequences),
+        ).fetchall()
+        referenced = tuple(
+            GateDecision.model_validate_json(
+                _require_string(row["decision_json"], "intake gate decision")
+            )
+            for row in rows
+        )
+        if (
+            tuple(
+                _require_integer(row["sequence"], "intake gate sequence")
+                for row in rows
+            )
+            != sequences
+            or referenced != decisions
+        ):
+            raise WorkflowAtomicityError(
+                "Replayed G0/G1 pair disagrees with immutable intake authority"
+            )
+
+    @staticmethod
+    def _replay_intake_mode(
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+    ) -> str | None:
+        row = connection.execute(
+            "SELECT manifest_json FROM case_intake_authority WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if row is None:
+            if current.state is CaseState.CREATED:
+                return None
+            raise WorkflowAtomicityError(
+                "Canonical workflow replay has no bound intake authority"
+            )
+        manifest = _load_json_object(
+            _require_string(row["manifest_json"], "intake manifest")
+        )
+        mode = manifest.get("inputMode")
+        if mode not in {"text", "audio"}:
+            raise WorkflowAtomicityError(
+                "Canonical workflow replay has an invalid intake mode"
+            )
+        return cast(str, mode)
+
+    @staticmethod
+    def _validate_replay_actor(
+        event: StateWorkflowEvent | GateWorkflowEvent | AppendableWorkflowEvent,
+        actor: ActorType,
+    ) -> None:
+        if isinstance(event, StateWorkflowEvent):
+            if event.actor is not actor:
+                raise WorkflowAtomicityError(
+                    "State workflow actor disagrees with its audit authority"
+                )
+            return
+        expected = (
+            ActorType.AGENT
+            if isinstance(
+                event,
+                ProviderCallWorkflowEvent
+                | RetryWorkflowEvent
+                | PlanStepWorkflowEvent
+                | ToolCallWorkflowEvent
+                | PortalFillWorkflowEvent,
+            )
+            else ActorType.SYSTEM
+        )
+        if actor is not expected:
+            raise WorkflowAtomicityError(
+                "Workflow event actor is not authorized for its event family"
+            )
+
+    @staticmethod
+    def _validate_state_replay_boundary(
+        event: StateWorkflowEvent,
+        *,
+        actor: ActorType,
+        boundary_stage: int,
+        intake_mode: str | None,
+    ) -> None:
+        transition = (event.from_state, event.to_state)
+        system = ActorType.SYSTEM
+        allowed: dict[tuple[CaseState, CaseState], tuple[ActorType, frozenset[int]]] = {
+            (CaseState.CREATED, CaseState.DISCLOSED): (
+                ActorType.HUMAN,
+                frozenset({1}),
+            ),
+            (CaseState.DISCLOSED, CaseState.ANALYZING): (system, frozenset({0})),
+            (
+                CaseState.DISCLOSED,
+                CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+            ): (system, frozenset({0})),
+            (CaseState.DISCLOSED, CaseState.FAILED): (system, frozenset({4})),
+            (
+                CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+                CaseState.ANALYZING,
+            ): (ActorType.HUMAN, frozenset({0})),
+            (
+                CaseState.ANALYZING,
+                CaseState.AWAITING_CLARIFICATION,
+            ): (system, frozenset({3})),
+            (CaseState.ANALYZING, CaseState.READY_TO_FILL): (
+                system,
+                frozenset({2}),
+            ),
+            (CaseState.ANALYZING, CaseState.BLOCKED): (
+                system,
+                frozenset({1, 2}),
+            ),
+            (CaseState.ANALYZING, CaseState.EMERGENCY_STOPPED): (
+                system,
+                frozenset({2}),
+            ),
+            (CaseState.ANALYZING, CaseState.FAILED): (system, frozenset({4})),
+            (
+                CaseState.AWAITING_CLARIFICATION,
+                CaseState.READY_TO_FILL,
+            ): (system, frozenset({3})),
+            (CaseState.AWAITING_CLARIFICATION, CaseState.BLOCKED): (
+                system,
+                frozenset({3}),
+            ),
+            (CaseState.FILLING, CaseState.FAILED): (system, frozenset({4})),
+            (CaseState.VERIFYING, CaseState.FAILED): (system, frozenset({4})),
+        }
+        authority = allowed.get(transition)
+        if (
+            authority is None
+            or actor is not authority[0]
+            or event.actor is not authority[0]
+            or boundary_stage not in authority[1]
+            or (
+                event.from_state is CaseState.DISCLOSED
+                and (
+                    (
+                        intake_mode == "text"
+                        and event.to_state is not CaseState.ANALYZING
+                    )
+                    or (
+                        intake_mode == "audio"
+                        and event.to_state
+                        not in {
+                            CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+                            CaseState.FAILED,
+                        }
+                    )
+                    or intake_mode not in {"text", "audio"}
+                )
+            )
+        ):
+            raise WorkflowAtomicityError(
+                "State transition has no exact canonical writer boundary"
+            )
+
+    @staticmethod
+    def _consume_replayed_plan(
+        pending_plan: list[PlanStepWorkflowEvent],
+        *,
+        target: CaseState,
+    ) -> tuple[
+        tuple[tuple[int, AllowedTool], ...],
+        tuple[tuple[AllowedTool, str], ...],
+    ]:
+        safe_plan = {
+            CaseState.AWAITING_CLARIFICATION: _AWAITING_CLARIFICATION_PLAN,
+            CaseState.READY_TO_FILL: _READY_TO_FILL_PLAN,
+            CaseState.BLOCKED: _BLOCKED_PLAN,
+            CaseState.EMERGENCY_STOPPED: _BLOCKED_PLAN,
+        }.get(target)
+        if safe_plan is None:
+            raise WorkflowAtomicityError(
+                "Packet plan has no authorized replay target"
+            )
+        plan_events = tuple((event.sequence, event.tool) for event in pending_plan)
+        expected_events = tuple(
+            (index, tool)
+            for index, (tool, _reason) in enumerate(safe_plan, start=1)
+        )
+        if plan_events != expected_events:
+            raise WorkflowAtomicityError(
+                "Plan events disagree with the deterministic target-state plan"
+            )
+        return plan_events, safe_plan
+
+    @staticmethod
+    def _validate_provider_replay_batch(
+        from_state: CaseState,
+        to_state: CaseState,
+        events: tuple[
+            tuple[
+                ProviderCallWorkflowEvent
+                | RetryWorkflowEvent
+                | OperationalFailureWorkflowEvent,
+                datetime,
+            ],
+            ...,
+        ],
+        *,
+        mutation_at: datetime,
+    ) -> None:
+        event_values = tuple(event for event, _occurred_at in events)
+        event_times = tuple(occurred_at for _event, occurred_at in events)
+        if (
+            tuple(sorted(event_times)) != event_times
+            or any(occurred_at > mutation_at for occurred_at in event_times)
+        ):
+            raise WorkflowAtomicityError(
+                "Provider telemetry timestamps escape their atomic boundary"
+            )
+
+        def successful_extraction() -> bool:
+            if len(event_values) == 1:
+                only = event_values[0]
+                return (
+                    isinstance(only, ProviderCallWorkflowEvent)
+                    and only.operation is WorkflowOperation.EXTRACTION
+                    and only.call_sequence == 1
+                    and only.retry_attempt == 0
+                )
+            if len(event_values) != 3:
+                return False
+            first, retry, final = event_values
+            return (
+                isinstance(first, ProviderCallWorkflowEvent)
+                and isinstance(retry, RetryWorkflowEvent)
+                and isinstance(final, ProviderCallWorkflowEvent)
+                and first.operation is WorkflowOperation.EXTRACTION
+                and first.call_sequence == 1
+                and first.retry_attempt == 0
+                and retry.call_sequence == first.call_sequence
+                and retry.failure.category
+                is ProviderFailureCategory.INVALID_RESPONSE
+                and retry.model_id is first.model_id
+                and retry.provider_mode == first.provider_mode
+                and retry.duration_ms == first.duration_ms
+                and final.operation is WorkflowOperation.EXTRACTION
+                and final.call_sequence == first.call_sequence + 1
+                and final.retry_attempt == 1
+                and final.model_id is first.model_id
+                and final.provider_mode == first.provider_mode
+            )
+
+        def terminal_failure(operation: WorkflowOperation) -> bool:
+            if len(event_values) == 1:
+                only = event_values[0]
+                return (
+                    isinstance(only, OperationalFailureWorkflowEvent)
+                    and only.operation is operation
+                    and only.call_sequence == 1
+                    and only.retry_attempt == 0
+                )
+            if operation is not WorkflowOperation.EXTRACTION or len(event_values) != 3:
+                return False
+            first, retry, failed = event_values
+            return (
+                isinstance(first, ProviderCallWorkflowEvent)
+                and isinstance(retry, RetryWorkflowEvent)
+                and isinstance(failed, OperationalFailureWorkflowEvent)
+                and first.operation is WorkflowOperation.EXTRACTION
+                and first.call_sequence == 1
+                and first.retry_attempt == 0
+                and retry.call_sequence == first.call_sequence
+                and retry.failure.category
+                is ProviderFailureCategory.INVALID_RESPONSE
+                and retry.model_id is first.model_id
+                and retry.provider_mode == first.provider_mode
+                and retry.duration_ms == first.duration_ms
+                and failed.operation is WorkflowOperation.EXTRACTION
+                and failed.call_sequence == first.call_sequence + 1
+                and failed.retry_attempt == 1
+                and failed.model_id is first.model_id
+                and failed.provider_mode == first.provider_mode
+            )
+
+        valid = False
+        if (
+            from_state is CaseState.DISCLOSED
+            and to_state is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION
+            and len(event_values) == 1
+        ):
+            only = event_values[0]
+            valid = (
+                isinstance(only, ProviderCallWorkflowEvent)
+                and only.operation is WorkflowOperation.TRANSCRIPTION
+                and only.call_sequence == 1
+                and only.retry_attempt == 0
+            )
+        elif from_state is CaseState.ANALYZING and to_state in {
+            CaseState.AWAITING_CLARIFICATION,
+            CaseState.READY_TO_FILL,
+            CaseState.BLOCKED,
+            CaseState.EMERGENCY_STOPPED,
+        }:
+            valid = successful_extraction()
+        elif to_state is CaseState.FAILED:
+            operation_by_state = {
+                CaseState.DISCLOSED: WorkflowOperation.TRANSCRIPTION,
+                CaseState.ANALYZING: WorkflowOperation.EXTRACTION,
+                CaseState.FILLING: WorkflowOperation.COMPUTER_USE,
+                CaseState.VERIFYING: WorkflowOperation.VERIFICATION,
+            }
+            operation = operation_by_state.get(from_state)
+            valid = (
+                operation is not None
+                and terminal_failure(operation)
+                and bool(event_values)
+                and isinstance(
+                    event_values[-1],
+                    OperationalFailureWorkflowEvent,
+                )
+                and event_times[-1] == mutation_at
+            )
+        else:
+            valid = not event_values
+        if not valid:
+            raise WorkflowAtomicityError(
+                "Provider telemetry does not form one authorized atomic boundary"
+            )
+
+    @staticmethod
+    def _validate_capability_case_binding(
+        capability: AuthorityCapabilityRecord,
+        *,
+        version_origins: dict[int, datetime],
+    ) -> None:
+        origin = version_origins.get(capability.bound_case_version)
+        next_origin = version_origins.get(capability.bound_case_version + 1)
+        consumed_at = capability.consumed_at
+        if (
+            origin is None
+            or capability.issued_at < origin
+            or (
+                next_origin is not None
+                and capability.issued_at >= next_origin
+            )
+            or (
+                consumed_at is not None
+                and (
+                    consumed_at < origin
+                    or (next_origin is not None and consumed_at >= next_origin)
+                )
+            )
+        ):
+            raise PersistedDataIntegrityError(
+                "Persisted capability falls outside its bound case-version lifetime"
+            )
+
+    @staticmethod
+    def _require_state_transition_time(
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        from_state: CaseState,
+        to_state: CaseState,
+    ) -> datetime:
+        matches: list[datetime] = []
+        for row in connection.execute(
+            """
+            SELECT event_json
+            FROM workflow_events
+            WHERE case_id = ? AND event_kind = ?
+            ORDER BY source_audit_sequence
+            """,
+            (case_id, WorkflowEventKind.STATE.value),
+        ):
+            envelope = WorkflowEventEnvelope.model_validate_json(
+                _require_string(row["event_json"], "state workflow event")
+            )
+            event = envelope.event
+            if (
+                isinstance(event, StateWorkflowEvent)
+                and event.from_state is from_state
+                and event.to_state is to_state
+            ):
+                matches.append(envelope.occurred_at)
+        if len(matches) != 1:
+            raise WorkflowAtomicityError(
+                "Canonical authority has no unique originating state transition"
+            )
+        return matches[0]
+
+    @staticmethod
+    def _effective_packet_gates(
+        history: tuple[GateDecision, ...],
+    ) -> tuple[GateDecision, ...]:
+        if (
+            len(history) < 4
+            or tuple(item.gate_id for item in history[:4])
+            != (
+                GateId.G0_INTAKE,
+                GateId.G1_PRIVACY,
+                GateId.G2_OUTPUT_CONTRACT,
+                GateId.G3_SAFETY_SCOPE,
+            )
+        ):
+            raise WorkflowAtomicityError(
+                "Packet authority requires the canonical G0-G3 prefix"
+            )
+        tail = history[4:]
+        if any(
+            decision.gate_id
+            is not (GateId.G4_PROVENANCE if index % 2 == 0 else GateId.G5_COMPLETENESS)
+            for index, decision in enumerate(tail)
+        ):
+            raise WorkflowAtomicityError(
+                "Packet authority requires canonical G4/G5 history pairs"
+            )
+        if not tail:
+            return history[:4]
+        effective_tail = (
+            tail[-2:]
+            if tail[-1].gate_id is GateId.G5_COMPLETENESS
+            else tail[-1:]
+        )
+        return (*history[:4], *effective_tail)
+
+    @classmethod
+    def _validate_packet_recomputations(
+        cls,
+        packet: ClaimPacket,
+        history: tuple[GateDecision, ...],
+        effective: tuple[GateDecision, ...],
+    ) -> None:
+        cls._validate_neutral_narrative(packet)
+        if len(effective) < 5:
+            return
+        g4 = effective[4]
+        provenance = evaluate_g4(packet, decided_at=g4.decided_at)
+        if provenance.decision != g4:
+            raise WorkflowAtomicityError(
+                "Persisted packet no longer satisfies its deterministic G4"
+            )
+        if len(effective) < 6:
+            return
+        g5 = effective[5]
+        completed_rounds = max(
+            0,
+            sum(
+                decision.gate_id is GateId.G5_COMPLETENESS for decision in history
+            )
+            - 1,
+        )
+        completeness = cls._derive_completeness(
+            provenance,
+            completed_rounds=completed_rounds,
+            decided_at=g5.decided_at,
+        )
+        if completeness.decision != g5:
+            raise WorkflowAtomicityError(
+                "Persisted packet no longer satisfies its deterministic G5"
+            )
+
+    def _insert_packet_authority(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+        bound_case_version: int,
+        packet: ClaimPacket,
+        created_at: datetime,
+    ) -> None:
+        history = self._read_gate_decisions(connection, case_id=case_id)
+        effective = self._effective_packet_gates(history)
+        if packet.gate_decisions != effective:
+            raise WorkflowAtomicityError(
+                "ClaimPacket gates disagree with current persisted gate authority"
+            )
+        self._validate_packet_recomputations(packet, history, effective)
+        packet_json = _dump_json_value(
+            cast(JsonValue, packet.model_dump(mode="json", by_alias=True))
+        )
+        gates_json = _dump_json_value(
+            cast(
+                JsonValue,
+                [
+                    decision.model_dump(mode="json", by_alias=True)
+                    for decision in effective
+                ],
+            )
+        )
+        packet_digest = hashlib.sha256(
+            b"claimdone-packet-authority-v1\0" + packet_json.encode("utf-8")
+        ).hexdigest()
+        gates_digest = hashlib.sha256(
+            b"claimdone-packet-gates-v1\0" + gates_json.encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            """
+            INSERT INTO case_packet_authority (
+                case_id, bound_case_version, authority_version,
+                packet_json, packet_sha256, effective_gates_json,
+                effective_gates_sha256, created_at
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                case_id,
+                bound_case_version,
+                packet_json,
+                packet_digest,
+                gates_json,
+                gates_digest,
+                _dump_aware_datetime(created_at, "packet authority created_at"),
+            ),
+        )
+
+    def _validate_packet_authority_row(
+        self,
+        row: sqlite3.Row,
+        *,
+        current: CaseRecord,
+        history: tuple[GateDecision, ...],
+    ) -> tuple[int, datetime, ClaimPacket, tuple[GateDecision, ...]]:
+        """Validate one immutable packet row, including historical authorities."""
+
+        packet_json = _require_string(row["packet_json"], "packet authority JSON")
+        packet_digest = _require_string(row["packet_sha256"], "packet authority digest")
+        gates_json = _require_string(
+            row["effective_gates_json"],
+            "packet gate authority JSON",
+        )
+        gates_digest = _require_string(
+            row["effective_gates_sha256"],
+            "packet gate authority digest",
+        )
+        stored_packet = ClaimPacket.model_validate_json(packet_json)
+        effective = _GATE_DECISIONS_ADAPTER.validate_json(gates_json)
+        canonical_packet_json = _dump_json_value(
+            cast(JsonValue, stored_packet.model_dump(mode="json", by_alias=True))
+        )
+        canonical_gates_json = _dump_json_value(
+            cast(
+                JsonValue,
+                [
+                    decision.model_dump(mode="json", by_alias=True)
+                    for decision in effective
+                ],
+            )
+        )
+        bound_version = _require_integer(row["bound_case_version"], "packet bound version")
+        created_at = _parse_datetime(
+            _require_string(row["created_at"], "packet authority created_at")
+        )
+        if (
+            _require_integer(row["authority_version"], "packet authority version") != 1
+            or _require_string(row["case_id"], "packet authority case id")
+            != current.case_id
+            or bound_version < 2
+            or bound_version > current.version
+            or created_at < current.created_at
+            or created_at > current.updated_at
+            or packet_json != canonical_packet_json
+            or gates_json != canonical_gates_json
+            or _SHA256.fullmatch(packet_digest) is None
+            or _SHA256.fullmatch(gates_digest) is None
+            or hashlib.sha256(
+                b"claimdone-packet-authority-v1\0" + packet_json.encode("utf-8")
+            ).hexdigest()
+            != packet_digest
+            or hashlib.sha256(
+                b"claimdone-packet-gates-v1\0" + gates_json.encode("utf-8")
+            ).hexdigest()
+            != gates_digest
+            or stored_packet.case_id != current.case_id
+            or stored_packet.gate_decisions != effective
+        ):
+            raise WorkflowAtomicityError("Persisted ClaimPacket authority is invalid")
+
+        matching_history = tuple(
+            prefix
+            for end in range(4, len(history) + 1)
+            if (prefix := history[:end])[-1].decided_at <= created_at
+            and self._effective_packet_gates(prefix) == effective
+        )
+        if not matching_history:
+            raise WorkflowAtomicityError(
+                "Packet authority gates have no bound persisted history"
+            )
+        recomputation_error: WorkflowAtomicityError | None = None
+        for prefix in matching_history:
+            try:
+                self._validate_packet_recomputations(stored_packet, prefix, effective)
+            except WorkflowAtomicityError as error:
+                recomputation_error = error
+            else:
+                break
+        else:
+            raise WorkflowAtomicityError(
+                "Packet authority fails deterministic gate recomputation"
+            ) from recomputation_error
+        return bound_version, created_at, stored_packet, effective
+
+    def _validate_retained_packet_authorities(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+    ) -> None:
+        """Revalidate every retained packet row, not only the current version."""
+
+        rows = connection.execute(
+            """
+            SELECT * FROM case_packet_authority
+            WHERE case_id = ?
+            ORDER BY bound_case_version ASC
+            """,
+            (current.case_id,),
+        ).fetchall()
+        if not rows:
+            return
+        history = self._read_gate_decisions(connection, case_id=current.case_id)
+        self._effective_packet_gates(history)
+        prior_version = 1
+        prior_created_at = current.created_at
+        for row in rows:
+            bound_version, created_at, _packet, _effective = (
+                self._validate_packet_authority_row(
+                    row,
+                    current=current,
+                    history=history,
+                )
+            )
+            if bound_version <= prior_version or created_at < prior_created_at:
+                raise WorkflowAtomicityError(
+                    "Packet authority bounds are not chronologically monotonic"
+                )
+            prior_version = bound_version
+            prior_created_at = created_at
+
+    def _require_current_packet_authority(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+    ) -> None:
+        self._validate_retained_packet_authorities(connection, current)
+        packet = current.snapshot.claim_packet
+        row = connection.execute(
+            """
+            SELECT * FROM case_packet_authority
+            WHERE case_id = ? AND bound_case_version = ?
+            """,
+            (current.case_id, current.version),
+        ).fetchone()
+        if packet is None:
+            if row is not None:
+                raise WorkflowAtomicityError(
+                    "Packet authority exists without a current ClaimPacket"
+                )
+            return
+        if row is None:
+            raise WorkflowAtomicityError("Current ClaimPacket has no immutable authority")
+        history = self._read_gate_decisions(connection, case_id=current.case_id)
+        bound_version, _created_at, stored_packet, effective = (
+            self._validate_packet_authority_row(
+                row,
+                current=current,
+                history=history,
+            )
+        )
+        if (
+            bound_version != current.version
+            or stored_packet != packet
+            or stored_packet.state is not current.state
+            or self._effective_packet_gates(history) != effective
+        ):
+            raise WorkflowAtomicityError("Current ClaimPacket authority is invalid")
+        self._validate_packet_recomputations(stored_packet, history, effective)
+
+    def _require_intake_authority(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        *,
+        verify_media: bool = True,
+    ) -> tuple[JsonObject, str]:
+        """Revalidate persisted authority, owned handles, and every staged byte."""
+
+        from claimdone_api.media import (
+            CaseHandle,
+            ExifDecision,
+            MediaStorageError,
+            StoredAssetRef,
+            UnsafeStoragePath,
+            expected_model_image_bytes,
+        )
+
+        row = connection.execute(
+            """
+            SELECT * FROM case_intake_authority WHERE case_id = ?
+            """,
+            (current.case_id,),
+        ).fetchone()
+        if row is None:
+            raise WorkflowAtomicityError("Case has no canonical intake authority")
+        authority_version = _require_integer(row["authority_version"], "authority version")
+        bound_version = _require_integer(row["bound_case_version"], "bound case version")
+        authority_created_at = _parse_datetime(
+            _require_string(row["created_at"], "intake authority created_at")
+        )
+        storage_name = _require_string(row["storage_name"], "authority storage name")
+        manifest_json = _require_string(row["manifest_json"], "intake manifest")
+        manifest_digest = _require_string(
+            row["manifest_sha256"],
+            "intake manifest digest",
+        )
+        if (
+            authority_version != 1
+            or bound_version != 2
+            or bound_version > current.version
+            or authority_created_at
+            != self._require_state_transition_time(
+                connection,
+                case_id=current.case_id,
+                from_state=CaseState.CREATED,
+                to_state=CaseState.DISCLOSED,
+            )
+            or _MEDIA_STORAGE_NAME.fullmatch(storage_name) is None
+            or _SHA256.fullmatch(manifest_digest) is None
+            or hashlib.sha256(
+                b"claimdone-intake-authority-v1\0" + manifest_json.encode("utf-8")
+            ).hexdigest()
+            != manifest_digest
+        ):
+            raise WorkflowAtomicityError("Persisted intake authority identity is invalid")
+        manifest = _load_json_object(manifest_json)
+        if _dump_json_object(manifest) != manifest_json:
+            raise WorkflowAtomicityError("Intake manifest is not canonical JSON")
+        summary = manifest.get("intakeSummary")
+        if (
+            manifest.get("authorityVersion") != 1
+            or manifest.get("caseId") != current.case_id
+            or manifest.get("boundCaseVersion") != bound_version
+            or manifest.get("storageName") != storage_name
+            or type(summary) is not dict
+        ):
+            raise WorkflowAtomicityError("Intake manifest is not bound to the case snapshot")
+        current_summary = current.snapshot.intake_summary
+        if type(current_summary) is not dict:
+            raise WorkflowAtomicityError("Case lost its intake summary")
+        handle_row = connection.execute(
+            "SELECT storage_name, created_at FROM case_media_handles WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if (
+            handle_row is None
+            or _require_string(handle_row["storage_name"], "media handle")
+            != storage_name
+            or _parse_datetime(
+                _require_string(handle_row["created_at"], "media handle created_at")
+            )
+            != authority_created_at
+        ):
+            raise WorkflowAtomicityError("Intake authority lost its owned media handle")
+
+        g0_sequence = _require_integer(row["g0_gate_sequence"], "G0 sequence")
+        g1_sequence = _require_integer(row["g1_gate_sequence"], "G1 sequence")
+        gate_rows = connection.execute(
+            """
+            SELECT sequence, case_id, decision_json
+            FROM gate_decisions
+            WHERE case_id = ?
+            ORDER BY sequence
+            LIMIT 2
+            """,
+            (current.case_id,),
+        ).fetchall()
+        if len(gate_rows) != 2:
+            raise WorkflowAtomicityError("Intake authority lost its G0/G1 decisions")
+        decisions = tuple(
+            GateDecision.model_validate_json(
+                _require_string(gate_row["decision_json"], "authority gate")
+            )
+            for gate_row in gate_rows
+        )
+        if (
+            tuple(_require_integer(item["sequence"], "gate sequence") for item in gate_rows)
+            != (g0_sequence, g1_sequence)
+            or any(
+                _require_string(item["case_id"], "gate case id") != current.case_id
+                for item in gate_rows
+            )
+            or tuple(decision.gate_id for decision in decisions)
+            != (GateId.G0_INTAKE, GateId.G1_PRIVACY)
+            or any(not decision.passed for decision in decisions)
+            or decisions[0].decided_at < current.created_at
+            or decisions[0].decided_at > decisions[1].decided_at
+            or decisions[1].decided_at > authority_created_at
+        ):
+            raise WorkflowAtomicityError("Intake authority G0/G1 binding is invalid")
+
+        images = manifest.get("images")
+        input_order = manifest.get("inputOrder")
+        choices = manifest.get("exifChoices")
+        if (
+            type(images) is not list
+            or len(images) != 3
+            or type(input_order) is not list
+            or type(choices) is not list
+            or len(choices) != 3
+            or manifest.get("modelCopyApproved") is not True
+            or manifest.get("consents")
+            != {
+                "sandboxAcknowledged": True,
+                "imageRightsConfirmed": True,
+                "dataProcessingApproved": True,
+            }
+        ):
+            raise WorkflowAtomicityError("Intake authority policy manifest is invalid")
+        handle = CaseHandle(storage_name=storage_name)
+
+        def read_owned(ref: StoredAssetRef) -> bytes:
+            try:
+                return self.__media_store.read_bytes(handle, ref)
+            except (MediaStorageError, UnsafeStoragePath) as error:
+                raise WorkflowAtomicityError(
+                    "Intake authority media bytes are missing or altered"
+                ) from error
+
+        def ref_from(value: object) -> StoredAssetRef:
+            if type(value) is not dict:
+                raise WorkflowAtomicityError("Authority asset reference is invalid")
+            file_id = value.get("fileId")
+            media_type = value.get("mediaType")
+            digest = value.get("sha256")
+            if (
+                type(file_id) is not str
+                or type(media_type) is not str
+                or type(digest) is not str
+                or _SHA256.fullmatch(digest) is None
+            ):
+                raise WorkflowAtomicityError("Authority asset reference is invalid")
+            return StoredAssetRef(
+                file_id=file_id,
+                media_type=media_type,
+                sha256=digest,
+            )
+
+        observed_order: list[str] = []
+        for index, image in enumerate(images):
+            choice_value = choices[index]
+            if type(image) is not dict or type(choice_value) is not dict:
+                raise WorkflowAtomicityError("Authority image entry is invalid")
+            input_id = image.get("inputId")
+            if (
+                type(input_id) is not str
+                or input_id != f"image-{index + 1}"
+                or choice_value.get("inputId") != input_id
+                or image.get("imageFormat") not in {"JPEG", "PNG"}
+            ):
+                raise WorkflowAtomicityError("Authority image ordering is invalid")
+            decision_value = choice_value.get("decision")
+            if type(decision_value) is not str:
+                raise WorkflowAtomicityError("Authority EXIF choice is invalid")
+            try:
+                choice = ExifDecision(decision_value)
+            except (TypeError, ValueError) as error:
+                raise WorkflowAtomicityError("Authority EXIF choice is invalid") from error
+            source_ref = ref_from(image.get("source"))
+            model_ref = ref_from(image.get("model"))
+            if verify_media:
+                source = read_owned(source_ref)
+                try:
+                    expected = expected_model_image_bytes(
+                        source,
+                        image_format=cast(str, image.get("imageFormat")),
+                        decision=choice,
+                    )
+                except (OSError, TypeError, ValueError) as error:
+                    raise WorkflowAtomicityError(
+                        "Authority source image no longer satisfies G1"
+                    ) from error
+                if read_owned(model_ref) != expected:
+                    raise WorkflowAtomicityError(
+                        "Authority model bytes no longer satisfy G1"
+                    )
+            observed_order.append(input_id)
+        if input_order != observed_order:
+            raise WorkflowAtomicityError("Authority input order changed")
+
+        input_mode = manifest.get("inputMode")
+        text_value = manifest.get("text")
+        audio_value = manifest.get("audio")
+        statement_value = manifest.get("statement")
+        if input_mode == "text":
+            text_ref = ref_from(text_value)
+            if (
+                audio_value is not None
+                or statement_value != text_value
+                or current_summary != summary
+            ):
+                raise WorkflowAtomicityError("Text authority mode is inconsistent")
+            if verify_media:
+                try:
+                    read_owned(text_ref).decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise WorkflowAtomicityError(
+                        "Text authority bytes are not canonical UTF-8"
+                    ) from error
+            if manifest.get("transcriptState") != "not_applicable":
+                raise WorkflowAtomicityError("Text authority has transcript state")
+        elif input_mode == "audio":
+            audio_ref = ref_from(audio_value)
+            base_current_summary = dict(current_summary)
+            base_current_summary["statement"] = None
+            if (
+                text_value is not None
+                or statement_value is not None
+                or audio_ref.media_type != "audio/wav"
+                or manifest.get("transcriptState") != "awaiting_transcription"
+                or base_current_summary != summary
+            ):
+                raise WorkflowAtomicityError("Audio authority mode is inconsistent")
+            if verify_media:
+                read_owned(audio_ref)
+        else:
+            raise WorkflowAtomicityError("Intake authority input mode is invalid")
+        return manifest, manifest_digest
+
+    def _require_transcript_authority(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        *,
+        intake_manifest_digest: str,
+        verify_media: bool = True,
+    ) -> TranscriptRecord:
+        """Verify transcript bytes, provider telemetry, snapshot, and version binding."""
+
+        from claimdone_api.media import (
+            CaseHandle,
+            MediaStorageError,
+            StoredAssetRef,
+            UnsafeStoragePath,
+        )
+
+        row = connection.execute(
+            "SELECT * FROM case_transcript_authority WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if row is None:
+            raise TranscriptStateError("Case has no canonical transcript authority")
+        manifest_json = _require_string(row["manifest_json"], "transcript manifest")
+        manifest_digest = _require_string(
+            row["manifest_sha256"],
+            "transcript manifest digest",
+        )
+        manifest = _load_json_object(manifest_json)
+        bound_version = _require_integer(row["bound_case_version"], "bound case version")
+        authority_created_at = _parse_datetime(
+            _require_string(row["created_at"], "transcript authority created_at")
+        )
+        transcript_id = _require_string(row["transcript_id"], "transcript id")
+        local_ref = _require_string(row["transcript_local_ref"], "transcript local ref")
+        digest = _require_string(row["transcript_sha256"], "transcript digest")
+        provider_sequence = _require_integer(
+            row["provider_source_audit_sequence"],
+            "transcription provider sequence",
+        )
+        if (
+            _require_integer(row["authority_version"], "transcript authority version")
+            != 1
+            or bound_version != 3
+            or bound_version > current.version
+            or authority_created_at
+            != self._require_state_transition_time(
+                connection,
+                case_id=current.case_id,
+                from_state=CaseState.DISCLOSED,
+                to_state=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+            )
+            or _SHA256.fullmatch(digest) is None
+            or _SHA256.fullmatch(manifest_digest) is None
+            or _require_string(
+                row["intake_manifest_sha256"],
+                "bound intake manifest digest",
+            )
+            != intake_manifest_digest
+            or _dump_json_object(manifest) != manifest_json
+            or hashlib.sha256(
+                b"claimdone-transcript-authority-v1\0" + manifest_json.encode("utf-8")
+            ).hexdigest()
+            != manifest_digest
+            or manifest.get("authorityVersion") != 1
+            or manifest.get("caseId") != current.case_id
+            or manifest.get("boundCaseVersion") != bound_version
+            or manifest.get("intakeManifestSha256") != intake_manifest_digest
+            or manifest.get("transcriptId") != transcript_id
+            or manifest.get("providerSourceAuditSequence") != provider_sequence
+        ):
+            raise TranscriptStateError("Persisted transcript authority identity is invalid")
+        statement = manifest.get("transcript")
+        if (
+            type(statement) is not dict
+            or statement.get("fileId") != local_ref
+            or statement.get("mediaType") != "text/plain"
+            or statement.get("sha256") != digest
+            or current.snapshot.intake_summary is None
+            or current.snapshot.intake_summary.get("statement") != statement
+        ):
+            raise TranscriptStateError("Transcript authority lost its statement binding")
+        intake_row = connection.execute(
+            "SELECT storage_name FROM case_intake_authority WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if intake_row is None:
+            raise TranscriptStateError("Transcript authority lost its intake handle")
+        storage_name = _require_string(intake_row["storage_name"], "intake storage name")
+        if manifest.get("storageName") != storage_name:
+            raise TranscriptStateError("Transcript authority changed its storage handle")
+        ref = StoredAssetRef(
+            file_id=local_ref,
+            media_type="text/plain",
+            sha256=digest,
+        )
+        if verify_media:
+            try:
+                transcript_text = self.__media_store.read_bytes(
+                    CaseHandle(storage_name=storage_name),
+                    ref,
+                ).decode("utf-8")
+            except (
+                MediaStorageError,
+                UnsafeStoragePath,
+                UnicodeDecodeError,
+                ValueError,
+                TypeError,
+            ) as error:
+                raise TranscriptStateError(
+                    "Transcript authority bytes are invalid"
+                ) from error
+            normalized = re.sub(
+                r"\s+",
+                " ",
+                unicodedata.normalize("NFC", transcript_text),
+            ).strip()
+            if (
+                normalized != transcript_text
+                or not transcript_text
+                or len(transcript_text) > 4_000
+            ):
+                raise TranscriptStateError("Transcript authority text is not normalized")
+        workflow_row = connection.execute(
+            """
+            SELECT event_json FROM workflow_events
+            WHERE source_audit_sequence = ? AND case_id = ?
+            """,
+            (provider_sequence, current.case_id),
+        ).fetchone()
+        if workflow_row is None:
+            raise TranscriptStateError("Transcript authority lost provider telemetry")
+        envelope = WorkflowEventEnvelope.model_validate_json(
+            _require_string(workflow_row["event_json"], "transcription workflow event")
+        )
+        if (
+            type(envelope.event) is not ProviderCallWorkflowEvent
+            or envelope.event.operation is not WorkflowOperation.TRANSCRIPTION
+            or envelope.event.retry_attempt != 0
+            or envelope.event.status != "succeeded"
+        ):
+            raise TranscriptStateError("Transcript authority provider telemetry is invalid")
+        transcript = self._require_transcript(connection, current.case_id)
+        if (
+            transcript.transcript_id != transcript_id
+            or transcript.local_ref != local_ref
+            or transcript.transcript_sha256 != digest
+            or transcript.bound_case_version != bound_version
+            or transcript.created_at != authority_created_at
+        ):
+            raise TranscriptStateError("Transcript record disagrees with its authority")
+        return transcript
+
+    @classmethod
+    def _require_passed_g0_g1_history(
+        cls,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+    ) -> tuple[GateDecision, GateDecision]:
+        history = cls._read_gate_decisions(connection, case_id=current.case_id)
+        if (
+            len(history) != 2
+            or tuple(decision.gate_id for decision in history)
+            != (GateId.G0_INTAKE, GateId.G1_PRIVACY)
+            or any(not decision.passed for decision in history)
+            or history[0].decided_at > history[1].decided_at
+            or history[1].decided_at > current.updated_at
+        ):
+            raise WorkflowAtomicityError(
+                "Transcript authority requires the exact persisted passed G0/G1 prefix"
+            )
+        return history
+
+    @staticmethod
+    def _validate_transcript_snapshot_authority(current: CaseRecord) -> None:
+        snapshot = current.snapshot
+        if snapshot.intake_summary is None:
+            raise TranscriptStateError("Transcript authority requires persisted intake")
+        if snapshot.claim_packet is not None or snapshot.active_clarification is not None:
+            raise TranscriptStateError(
+                "Transcript authority cannot carry a ClaimPacket or clarification"
+            )
+        if snapshot.portal_state is not PortalState.DRAFT:
+            raise TranscriptStateError("Transcript authority requires draft portal state")
+
+    def _validate_transcript_case_binding(
+        self,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        transcript: TranscriptRecord,
+    ) -> None:
+        """Bind pending/confirmed transcript metadata to the current case state."""
+
+        if transcript.created_at > current.updated_at:
+            raise TranscriptStateError("Transcript cannot postdate the current case")
+        if current.state is CaseState.AWAITING_TRANSCRIPT_CONFIRMATION:
+            if (
+                transcript.confirmed
+                or transcript.bound_case_version != current.version
+                or transcript.created_at != current.updated_at
+            ):
+                raise TranscriptStateError(
+                    "Awaiting transcript state requires its current pending transcript"
+                )
+            return
+        if (
+            not transcript.confirmed
+            or transcript.bound_case_version != 3
+            or transcript.bound_case_version >= current.version
+            or transcript.confirmed_at is None
+            or transcript.confirmed_at > current.updated_at
+            or transcript.confirmed_at
+            != self._require_state_transition_time(
+                connection,
+                case_id=current.case_id,
+                from_state=CaseState.AWAITING_TRANSCRIPT_CONFIRMATION,
+                to_state=CaseState.ANALYZING,
+            )
+        ):
+            raise TranscriptStateError(
+                "A transcript outside confirmation state must be confirmed and prior-bound"
+            )
+
     @classmethod
     def _validate_analysis_command(
         cls,
+        connection: sqlite3.Connection,
         current: CaseRecord,
         command: AnalysisWorkflowCommand,
         *,
@@ -2080,6 +5394,7 @@ class SqliteCaseRepository:
             CaseState.AWAITING_CLARIFICATION,
             CaseState.READY_TO_FILL,
             CaseState.BLOCKED,
+            CaseState.EMERGENCY_STOPPED,
         }
         if current.state not in allowed_current or command.target not in allowed_target:
             raise WorkflowAtomicityError(
@@ -2119,18 +5434,15 @@ class SqliteCaseRepository:
         ):
             raise WorkflowAtomicityError("Clarification events must be canonical")
 
-        effective_gates = cls._validate_analysis_gates(
-            current,
-            command,
-            existing_gates=existing_gates,
-        )
-        cls._validate_analysis_provider_events(current, command)
-        cls._validate_analysis_clarification(current, command)
         packet = command.claim_packet
-        if command.target in {
-            CaseState.AWAITING_CLARIFICATION,
-            CaseState.READY_TO_FILL,
-        } and packet is None:
+        if (
+            command.target
+            in {
+                CaseState.AWAITING_CLARIFICATION,
+                CaseState.READY_TO_FILL,
+            }
+            and packet is None
+        ):
             raise WorkflowAtomicityError(
                 f"{command.target.value} requires a target-state ClaimPacket"
             )
@@ -2138,38 +5450,38 @@ class SqliteCaseRepository:
             raise WorkflowAtomicityError(
                 "A case with a stored ClaimPacket requires its target-state packet"
             )
+        authority = cls._validate_analysis_authority(
+            connection,
+            current,
+            command,
+            existing_gates=existing_gates,
+        )
+        effective_gates = authority.effective_gates
+        cls._validate_analysis_clarification(
+            current,
+            command,
+            completeness=authority.completeness,
+        )
         if packet is not None:
             if packet.gate_decisions != effective_gates:
                 raise WorkflowAtomicityError(
                     "ClaimPacket gates must equal the bound prior prefix plus new decisions"
                 )
             if packet.verification.status is not VerificationState.PENDING:
-                raise WorkflowAtomicityError(
-                    "Analysis targets require pending verification"
-                )
+                raise WorkflowAtomicityError("Analysis targets require pending verification")
             if packet.portal_state is not PortalState.DRAFT:
                 raise WorkflowAtomicityError("Analysis targets require draft portal state")
-            if (
-                command.target is CaseState.READY_TO_FILL
-                and packet.claim.missing_required_fields
-            ):
-                raise WorkflowAtomicityError(
-                    "ready_to_fill cannot retain missing required fields"
-                )
-            expected_plan = tuple(
-                (step.sequence, step.tool) for step in packet.plan.steps
-            )
-            supplied_plan = tuple(
-                (event.sequence, event.tool) for event in command.plan_steps
-            )
+            if command.target is CaseState.READY_TO_FILL and packet.claim.missing_required_fields:
+                raise WorkflowAtomicityError("ready_to_fill cannot retain missing required fields")
+            expected_plan = tuple((step.sequence, step.tool) for step in packet.plan.steps)
+            supplied_plan = tuple((event.sequence, event.tool) for event in command.plan_steps)
             allowed_tools = {
                 CaseState.AWAITING_CLARIFICATION: _AWAITING_CLARIFICATION_PLAN,
                 CaseState.READY_TO_FILL: _READY_TO_FILL_PLAN,
                 CaseState.BLOCKED: _BLOCKED_PLAN,
+                CaseState.EMERGENCY_STOPPED: _BLOCKED_PLAN,
             }[command.target]
-            packet_plan = tuple(
-                (step.tool, step.reason) for step in packet.plan.steps
-            )
+            packet_plan = tuple((step.tool, step.reason) for step in packet.plan.steps)
             if packet_plan != allowed_tools or supplied_plan != expected_plan:
                 raise WorkflowAtomicityError(
                     "Plan-step events must exactly match the target-state safe plan"
@@ -2190,11 +5502,7 @@ class SqliteCaseRepository:
         )
         snapshot = replace(
             current.snapshot,
-            portal_state=(
-                current.snapshot.portal_state
-                if packet is None
-                else packet.portal_state
-            ),
+            portal_state=(current.snapshot.portal_state if packet is None else packet.portal_state),
             claim_packet=packet,
             active_clarification=active_payload,
         )
@@ -2215,9 +5523,7 @@ class SqliteCaseRepository:
         if not isinstance(command.target, CaseState):
             raise WorkflowAtomicityError("Analysis target must be a canonical CaseState")
         if type(command.updated_at) is not datetime or command.updated_at.utcoffset() is None:
-            raise WorkflowAtomicityError(
-                "Analysis updatedAt must be an aware datetime object"
-            )
+            raise WorkflowAtomicityError("Analysis updatedAt must be an aware datetime object")
         if type(command.gate_decisions) is not tuple or any(
             not isinstance(decision, GateDecision) for decision in command.gate_decisions
         ):
@@ -2259,9 +5565,7 @@ class SqliteCaseRepository:
                 clarification_event,
                 "clarification event",
             )
-        if command.claim_packet is not None and not isinstance(
-            command.claim_packet, ClaimPacket
-        ):
+        if command.claim_packet is not None and not isinstance(command.claim_packet, ClaimPacket):
             raise WorkflowAtomicityError("claim_packet must be canonical or null")
         if command.claim_packet is not None:
             SqliteCaseRepository._require_canonical_contract(
@@ -2279,6 +5583,23 @@ class SqliteCaseRepository:
                 command.active_clarification,
                 "ClarificationView",
             )
+        if command.clarification_answer is not None and not isinstance(
+            command.clarification_answer, ClarificationAnswerRequest
+        ):
+            raise WorkflowAtomicityError("clarification_answer must be canonical or null")
+        if command.clarification_answer is not None:
+            SqliteCaseRepository._require_canonical_contract(
+                command.clarification_answer,
+                "ClarificationAnswerRequest",
+            )
+        SqliteCaseRepository._validate_approved_evidence_shape(
+            command.approved_evidence
+        )
+        SqliteCaseRepository._validate_output_contract_attempt_shape(
+            command.g2_attempts
+        )
+        if command.safety_input is not None:
+            SqliteCaseRepository._validate_safety_input(command.safety_input)
 
     @staticmethod
     def _validate_terminal_provider_command_shape(
@@ -2315,15 +5636,64 @@ class SqliteCaseRepository:
                 emission.event,
                 "provider failure prefix event",
             )
-        if command.claim_packet is not None and not isinstance(
-            command.claim_packet, ClaimPacket
-        ):
+        if command.claim_packet is not None and not isinstance(command.claim_packet, ClaimPacket):
             raise WorkflowAtomicityError("claim_packet must be canonical or null")
         if command.claim_packet is not None:
             SqliteCaseRepository._require_canonical_contract(
                 command.claim_packet,
                 "ClaimPacket",
             )
+        SqliteCaseRepository._validate_approved_evidence_shape(
+            command.approved_evidence
+        )
+        SqliteCaseRepository._validate_output_contract_attempt_shape(
+            command.g2_attempts
+        )
+
+    @staticmethod
+    def _validate_approved_evidence_shape(
+        evidence: tuple[EvidenceItem, ...],
+    ) -> None:
+        if type(evidence) is not tuple or any(
+            not isinstance(item, EvidenceItem) for item in evidence
+        ):
+            raise WorkflowAtomicityError(
+                "Approved evidence must be a tuple of canonical EvidenceItem values"
+            )
+        for item in evidence:
+            SqliteCaseRepository._require_canonical_contract(
+                item,
+                "approved EvidenceItem",
+            )
+
+    @staticmethod
+    def _validate_output_contract_attempt_shape(
+        attempts: tuple[OutputContractAttempt, ...],
+    ) -> None:
+        if type(attempts) is not tuple or any(
+            not isinstance(attempt, OutputContractAttempt)
+            or not isinstance(attempt.envelope, ModelOutputEnvelope)
+            or type(attempt.decided_at) is not datetime
+            or attempt.decided_at.utcoffset() is None
+            for attempt in attempts
+        ):
+            raise WorkflowAtomicityError(
+                "G2 attempts must be raw, timezone-bound OutputContractAttempt values"
+            )
+        for index, attempt in enumerate(attempts):
+            envelope = attempt.envelope
+            if (
+                type(envelope.payload) not in {str, bytes, type(None)}
+                or type(envelope.refusal) is not bool
+                or type(envelope.truncated) is not bool
+                or type(envelope.attempt) is not int
+                or envelope.attempt != index
+            ):
+                raise WorkflowAtomicityError(
+                    "G2 raw envelopes must use strict payload, flags, and contiguous attempts"
+                )
+        if len(attempts) > 2:
+            raise WorkflowAtomicityError("G2 allows at most one retry")
 
     @staticmethod
     def _require_canonical_contract(
@@ -2331,65 +5701,823 @@ class SqliteCaseRepository:
         label: str,
     ) -> None:
         try:
-            canonical = type(value).model_validate(
-                value.model_dump(mode="json", by_alias=True)
-            )
+            canonical = type(value).model_validate(value.model_dump(mode="json", by_alias=True))
         except (ValidationError, ValueError, TypeError) as error:
             raise WorkflowAtomicityError(f"{label} is not canonical") from error
         if canonical != value:
             raise WorkflowAtomicityError(f"{label} changed during canonical validation")
 
     @staticmethod
-    def _validate_analysis_gates(
+    def _validate_output_contract_run(run: OutputContractRun) -> None:
+        if type(run.attempts) is not tuple or any(
+            not isinstance(result, OutputContractResult)
+            or type(result.retry_allowed) is not bool
+            or type(result.attempt) is not int
+            or not isinstance(result.decision, GateDecision)
+            or (
+                result.extraction is not None and not isinstance(result.extraction, ModelExtraction)
+            )
+            for result in run.attempts
+        ):
+            raise WorkflowAtomicityError("G2 run contains a non-canonical attempt")
+        for result in run.attempts:
+            SqliteCaseRepository._require_canonical_contract(
+                result.decision,
+                "G2 GateDecision",
+            )
+            if result.extraction is not None:
+                SqliteCaseRepository._require_canonical_contract(
+                    result.extraction,
+                    "G2 ModelExtraction",
+                )
+        try:
+            canonical = OutputContractRun(attempts=run.attempts)
+        except (ValueError, TypeError) as error:
+            raise WorkflowAtomicityError("G2 run is not canonical") from error
+        if canonical != run:
+            raise WorkflowAtomicityError("G2 run changed during canonical validation")
+
+    @staticmethod
+    def _recompute_output_contract_run(
+        attempts: tuple[OutputContractAttempt, ...],
+        approved_evidence: tuple[EvidenceItem, ...],
+    ) -> OutputContractRun:
+        run = OutputContractRun()
+        try:
+            for attempt in attempts:
+                result = evaluate_g2(
+                    attempt.envelope,
+                    approved_evidence=approved_evidence,
+                    run=run,
+                    decided_at=attempt.decided_at,
+                )
+                run = run.append(result)
+        except (TypeError, ValueError) as error:
+            raise WorkflowAtomicityError(
+                "Raw G2 attempts do not form one canonical initial/retry run"
+            ) from error
+        SqliteCaseRepository._validate_output_contract_run(run)
+        return run
+
+    @staticmethod
+    def _validate_safety_input(value: SafetyInput) -> None:
+        if not isinstance(value, SafetyInput):
+            raise WorkflowAtomicityError("safety_input must be SafetyInput or null")
+        if any(
+            type(flag) is not bool
+            for flag in (
+                value.injury_reported,
+                value.immediate_danger,
+                value.portal_is_sandbox,
+                value.real_credentials_present,
+            )
+        ):
+            raise WorkflowAtomicityError("SafetyInput booleans must be strict")
+        if type(value.advice_categories) is not tuple or any(
+            not isinstance(item, AdviceCategory) for item in value.advice_categories
+        ):
+            raise WorkflowAtomicityError("SafetyInput advice categories are invalid")
+        if type(value.requested_actions) is not tuple or any(
+            not isinstance(item, RequestedAction) for item in value.requested_actions
+        ):
+            raise WorkflowAtomicityError("SafetyInput requested actions are invalid")
+        if value.model_signal is not None and not isinstance(
+            value.model_signal,
+            ModelSafetySignal,
+        ):
+            raise WorkflowAtomicityError("SafetyInput model signal is invalid")
+        if type(value.evidence_refs) is not tuple or any(
+            type(reference) is not str or _IDENTIFIER.fullmatch(reference) is None
+            for reference in value.evidence_refs
+        ):
+            raise WorkflowAtomicityError("SafetyInput evidence refs are invalid")
+
+    @classmethod
+    def _validate_initial_extraction_binding(
+        cls,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        packet: ClaimPacket,
+        extraction: ModelExtraction,
+        approved_evidence: tuple[EvidenceItem, ...],
+    ) -> None:
+        """Bind G2 output to the persisted intake and deterministic narrative."""
+
+        cls._validate_approved_evidence_binding(
+            connection,
+            current,
+            approved_evidence,
+        )
+
+        packet_non_narrative_facts = tuple(
+            fact for fact in packet.facts if fact.field is not EvidenceField.NARRATIVE
+        )
+        extraction_non_narrative_facts = tuple(
+            fact for fact in extraction.facts if fact.field is not EvidenceField.NARRATIVE
+        )
+        packet_claim = packet.claim.model_dump(mode="json", by_alias=False)
+        extraction_claim = extraction.claim.model_dump(mode="json", by_alias=False)
+        packet_claim.pop("narrative")
+        extraction_claim.pop("narrative")
+        packet_claim["field_provenance"] = tuple(
+            item
+            for item in packet.claim.field_provenance
+            if item.field is not RequiredClaimField.NARRATIVE
+        )
+        extraction_claim["field_provenance"] = tuple(
+            item
+            for item in extraction.claim.field_provenance
+            if item.field is not RequiredClaimField.NARRATIVE
+        )
+        packet_claim["missing_required_fields"] = tuple(
+            field
+            for field in packet.claim.missing_required_fields
+            if field is not RequiredClaimField.NARRATIVE
+        )
+        extraction_claim["missing_required_fields"] = tuple(
+            field
+            for field in extraction.claim.missing_required_fields
+            if field is not RequiredClaimField.NARRATIVE
+        )
+        if (
+            packet.evidence != approved_evidence
+            or extraction.evidence != approved_evidence
+            or packet.provenance != extraction.provenance
+            or packet_non_narrative_facts != extraction_non_narrative_facts
+            or packet_claim != extraction_claim
+        ):
+            raise WorkflowAtomicityError(
+                "ClaimPacket non-narrative extraction fields must equal final canonical G2"
+            )
+        cls._validate_neutral_narrative(packet)
+
+    @classmethod
+    def _validate_approved_evidence_binding(
+        cls,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        approved_evidence: tuple[EvidenceItem, ...],
+    ) -> None:
+        """Bind every provider-visible evidence value to persisted intake authority."""
+
+        authority_row = connection.execute(
+            "SELECT manifest_json FROM case_intake_authority WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        summary = current.snapshot.intake_summary
+        if authority_row is None or summary is None:
+            raise WorkflowAtomicityError("Initial analysis requires canonical intake authority")
+        manifest = _load_json_object(
+            _require_string(authority_row["manifest_json"], "intake manifest")
+        )
+        images = manifest.get("images")
+        statement = summary.get("statement")
+        if type(images) is not list or len(images) != 3 or type(statement) is not dict:
+            raise WorkflowAtomicityError(
+                "Persisted intake must contain exactly three images and one statement"
+            )
+
+        bound_images: list[tuple[str, str, str]] = []
+        for image in images:
+            if type(image) is not dict:
+                raise WorkflowAtomicityError("Persisted image identity is invalid")
+            source = image.get("model")
+            if type(source) is not dict:
+                raise WorkflowAtomicityError("Persisted image source identity is invalid")
+            file_id = source.get("fileId")
+            media_type = source.get("mediaType")
+            digest = source.get("sha256")
+            if (
+                type(file_id) is not str
+                or type(media_type) is not str
+                or type(digest) is not str
+                or _IDENTIFIER.fullmatch(file_id) is None
+                or media_type not in {"image/jpeg", "image/png"}
+                or _SHA256.fullmatch(digest) is None
+            ):
+                raise WorkflowAtomicityError("Persisted image source identity is invalid")
+            bound_images.append((file_id, media_type, digest))
+
+        if len(approved_evidence) != 4:
+            raise WorkflowAtomicityError(
+                "Approved evidence must contain only the staged three images and statement"
+            )
+        approved_images = tuple(
+            item for item in approved_evidence if item.kind is EvidenceKind.IMAGE
+        )
+        if tuple(
+            (item.local_ref, item.media_type, item.sha256) for item in approved_images
+        ) != tuple(bound_images):
+            raise WorkflowAtomicityError(
+                "Approved image evidence does not match the G1 model-copy manifest"
+            )
+        if any(not item.model_copy_approved for item in approved_evidence):
+            raise WorkflowAtomicityError(
+                "Every provider-visible evidence item must be approved for model copy"
+            )
+
+        statement_file = statement.get("fileId")
+        statement_media = statement.get("mediaType")
+        statement_digest = statement.get("sha256")
+        if (
+            type(statement_file) is not str
+            or _IDENTIFIER.fullmatch(statement_file) is None
+            or statement_media != "text/plain"
+            or type(statement_digest) is not str
+            or _SHA256.fullmatch(statement_digest) is None
+        ):
+            raise WorkflowAtomicityError("Persisted statement identity is invalid")
+        text_evidence = tuple(
+            item for item in approved_evidence if item.kind is not EvidenceKind.IMAGE
+        )
+        if len(text_evidence) != 1:
+            raise WorkflowAtomicityError(
+                "Initial G2 extraction requires exactly one staged statement"
+            )
+        evidence = text_evidence[0]
+        if (
+            evidence.local_ref != statement_file
+            or evidence.media_type != statement_media
+            or evidence.sha256 != statement_digest
+            or evidence.text is None
+            or hashlib.sha256(evidence.text.encode("utf-8")).hexdigest() != statement_digest
+        ):
+            raise WorkflowAtomicityError(
+                "Extracted statement content does not match its persisted content identity"
+            )
+
+        transcript_row = connection.execute(
+            "SELECT * FROM case_transcripts WHERE case_id = ?",
+            (current.case_id,),
+        ).fetchone()
+        if transcript_row is None:
+            if manifest.get("audio") is not None:
+                raise WorkflowAtomicityError(
+                    "Audio intake cannot enter extraction without a bound transcript"
+                )
+            if (
+                evidence.kind is not EvidenceKind.USER_STATEMENT
+                or evidence.transcript_confirmed is not None
+            ):
+                raise WorkflowAtomicityError("Text intake must bind to user-statement evidence")
+        else:
+            transcript = cls._row_to_transcript(transcript_row)
+            if (
+                not transcript.confirmed
+                or transcript.local_ref != evidence.local_ref
+                or transcript.transcript_sha256 != evidence.sha256
+                or evidence.kind is not EvidenceKind.TRANSCRIPT
+                or evidence.transcript_confirmed is not True
+            ):
+                raise WorkflowAtomicityError(
+                    "Transcript evidence must match the confirmed persisted transcript identity"
+                )
+
+    @staticmethod
+    def _validate_neutral_narrative(packet: ClaimPacket) -> None:
+        try:
+            result = compose_neutral_narrative(
+                NarrativeInput(
+                    facts=packet.facts,
+                    provenance=packet.provenance,
+                    evidence=packet.evidence,
+                )
+            )
+        except ValueError as error:
+            raise WorkflowAtomicityError(
+                "Claim narrative cannot be composed from canonical supported facts"
+            ) from error
+        if packet.claim.narrative != result.text:
+            raise WorkflowAtomicityError(
+                "Claim narrative must equal the deterministic neutral narrative"
+            )
+        narrative_facts = tuple(
+            fact for fact in packet.facts if fact.field is EvidenceField.NARRATIVE
+        )
+        narrative_provenance = tuple(
+            item
+            for item in packet.claim.field_provenance
+            if item.field is RequiredClaimField.NARRATIVE
+        )
+        if result.text is None:
+            if narrative_facts or narrative_provenance:
+                raise WorkflowAtomicityError(
+                    "An empty neutral narrative cannot retain narrative support"
+                )
+            return
+        if (
+            len(narrative_facts) != 1
+            or narrative_facts[0].value != result.text
+            or narrative_facts[0].status is not FactStatus.USER_STATED
+            or narrative_facts[0].source_refs != result.source_refs
+            or narrative_facts[0].confidence is not None
+            or len(narrative_provenance) != 1
+            or narrative_provenance[0].source_refs != result.source_refs
+        ):
+            raise WorkflowAtomicityError(
+                "Neutral narrative fact and claim provenance must equal its exact source union"
+            )
+
+    @staticmethod
+    def _validate_safety_binding(
+        packet: ClaimPacket,
+        safety_input: SafetyInput,
+    ) -> None:
+        """Bind deterministically represented G3 facts to the final extraction."""
+
+        if (
+            packet.scope.environment != "sandbox"
+            or safety_input.portal_is_sandbox is not True
+            or safety_input.real_credentials_present is not False
+        ):
+            raise WorkflowAtomicityError(
+                "G3 portal scope must remain the fixed credential-free sandbox boundary"
+            )
+
+        provenance_by_id = {reference.provenance_id: reference for reference in packet.provenance}
+        evidence_by_id = {item.evidence_id: item for item in packet.evidence}
+        values: dict[EvidenceField, tuple[bool, tuple[str, ...]]] = {}
+        for field in (EvidenceField.INJURY_STATUS, EvidenceField.IMMEDIATE_DANGER):
+            facts = tuple(
+                fact
+                for fact in packet.facts
+                if fact.field is field and fact.status is FactStatus.USER_STATED
+            )
+            if (
+                len(facts) != 1
+                or type(facts[0].value) is not bool
+                or not facts[0].source_refs
+                or any(
+                    not SqliteCaseRepository._is_authoritative_safety_source(
+                        source,
+                        provenance_by_id=provenance_by_id,
+                        evidence_by_id=evidence_by_id,
+                    )
+                    for source in facts[0].source_refs
+                )
+            ):
+                raise WorkflowAtomicityError(
+                    f"G3 requires one user-stated, authoritative boolean {field.value} fact"
+                )
+            values[field] = (facts[0].value, facts[0].source_refs)
+        if (
+            safety_input.injury_reported is not values[EvidenceField.INJURY_STATUS][0]
+            or safety_input.immediate_danger is not values[EvidenceField.IMMEDIATE_DANGER][0]
+        ):
+            raise WorkflowAtomicityError(
+                "G3 injury and danger flags must equal the final G2 extraction"
+            )
+        expected_refs = tuple(
+            dict.fromkeys(
+                (
+                    *values[EvidenceField.INJURY_STATUS][1],
+                    *values[EvidenceField.IMMEDIATE_DANGER][1],
+                )
+            )
+        )
+        if safety_input.evidence_refs != expected_refs:
+            raise WorkflowAtomicityError(
+                "G3 evidence refs must equal the injury/danger provenance union"
+            )
+
+    @staticmethod
+    def _is_authoritative_safety_source(
+        source_ref: str,
+        *,
+        provenance_by_id: dict[str, ProvenanceRef],
+        evidence_by_id: dict[str, EvidenceItem],
+    ) -> bool:
+        reference = provenance_by_id.get(source_ref)
+        if reference is None:
+            return False
+        evidence = evidence_by_id.get(reference.evidence_id)
+        if evidence is None or evidence.model_copy_approved is not True:
+            return False
+        if evidence.kind is EvidenceKind.USER_STATEMENT:
+            return True
+        if evidence.kind is EvidenceKind.TRANSCRIPT:
+            return evidence.transcript_confirmed is True and reference.user_confirmed is True
+        if evidence.kind is EvidenceKind.CLARIFICATION:
+            return reference.user_confirmed is True
+        return False
+
+    @classmethod
+    def _validate_clarification_answer_delta(
+        cls,
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+    ) -> None:
+        """Permit one exact answer-bound evidence/fact/claim mutation only."""
+
+        answer = command.clarification_answer
+        prior = current.snapshot.claim_packet
+        target = command.claim_packet
+        try:
+            active = ClarificationView.model_validate(current.snapshot.active_clarification)
+        except (ValidationError, ValueError, TypeError) as error:
+            raise WorkflowAtomicityError(
+                "Clarification continuation requires a canonical active view"
+            ) from error
+        if answer is None or prior is None or target is None:
+            raise WorkflowAtomicityError(
+                "Clarification continuation requires its exact answer and packet delta"
+            )
+        if (
+            answer.case_id != current.case_id
+            or answer.clarification_id != active.clarification_id
+            or answer.field is not active.field
+            or answer.round != active.round
+            or answer.expected_version != current.version
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification answer must bind the active id, field, round, and version"
+            )
+        if answer.field in {
+            RequiredClaimField.ATTACHMENTS,
+            RequiredClaimField.NARRATIVE,
+        }:
+            raise WorkflowAtomicityError(
+                "Attachments and free-form narratives cannot be supplied by clarification text"
+            )
+        if target.scope != prior.scope:
+            raise WorkflowAtomicityError("Clarification cannot change the immutable ClaimScope")
+
+        raw_answer = answer.answer
+        digest = hashlib.sha256(raw_answer.encode("utf-8")).hexdigest()
+        identity = hashlib.sha256(
+            (
+                "claimdone-clarification-v1\0"
+                f"{current.case_id}\0{active.clarification_id}\0"
+                f"{active.round}\0{digest}"
+            ).encode()
+        ).hexdigest()
+        expected_evidence_id = f"clarification-{identity[:32]}"
+        expected_local_ref = f"clarification-{identity[:32]}.txt"
+        expected_provenance_id = f"provenance-{identity[:32]}"
+        expected_fact_id = f"fact-{identity[:32]}"
+
+        if (
+            len(target.evidence) != len(prior.evidence) + 1
+            or target.evidence[:-1] != prior.evidence
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification may append exactly one evidence item and preserve its prefix"
+            )
+        appended_evidence = target.evidence[-1]
+        if (
+            appended_evidence.evidence_id != expected_evidence_id
+            or appended_evidence.kind is not EvidenceKind.CLARIFICATION
+            or appended_evidence.local_ref != expected_local_ref
+            or appended_evidence.media_type != "text/plain"
+            or appended_evidence.sha256 != digest
+            or appended_evidence.text != raw_answer
+            or appended_evidence.model_copy_approved is not True
+            or appended_evidence.transcript_confirmed is not None
+        ):
+            raise WorkflowAtomicityError(
+                "Appended clarification evidence must equal the exact answer identity"
+            )
+        if (
+            len(target.provenance) != len(prior.provenance) + 1
+            or target.provenance[:-1] != prior.provenance
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification may append exactly one provenance ref and preserve its prefix"
+            )
+        appended_provenance = target.provenance[-1]
+        if (
+            appended_provenance.provenance_id != expected_provenance_id
+            or appended_provenance.evidence_id != expected_evidence_id
+            or appended_provenance.locator != "clarification answer"
+            or appended_provenance.user_confirmed is not True
+        ):
+            raise WorkflowAtomicityError(
+                "Appended clarification provenance must bind the exact answer evidence"
+            )
+
+        claim_value, fact_value = cls._parse_clarification_answer(
+            answer.field,
+            raw_answer,
+        )
+        evidence_field = EvidenceField(answer.field.value)
+        target_facts = tuple(fact for fact in target.facts if fact.field is evidence_field)
+        if (
+            len(target_facts) != 1
+            or target_facts[0].fact_id != expected_fact_id
+            or target_facts[0].value != fact_value
+            or target_facts[0].status is not FactStatus.USER_STATED
+            or target_facts[0].source_refs != (expected_provenance_id,)
+            or target_facts[0].confidence is not None
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification must replace only its target field with one answer-bound fact"
+            )
+        immutable_prior_facts = tuple(
+            fact
+            for fact in prior.facts
+            if fact.field not in {evidence_field, EvidenceField.NARRATIVE}
+        )
+        immutable_target_facts = tuple(
+            fact
+            for fact in target.facts
+            if fact.field not in {evidence_field, EvidenceField.NARRATIVE}
+        )
+        if immutable_target_facts != immutable_prior_facts:
+            raise WorkflowAtomicityError(
+                "Clarification cannot change facts outside its field and derived narrative"
+            )
+
+        claim_attributes = (
+            RequiredClaimField.INCIDENT_DATE,
+            RequiredClaimField.INCIDENT_TIME,
+            RequiredClaimField.LOCATION,
+            RequiredClaimField.CLAIMANT_NAME,
+            RequiredClaimField.POLICY_REFERENCE,
+            RequiredClaimField.VEHICLE_REGISTRATION,
+            RequiredClaimField.COUNTERPARTY_KNOWN,
+            RequiredClaimField.ATTACHMENTS,
+        )
+        for field in claim_attributes:
+            if field is answer.field:
+                continue
+            if getattr(target.claim, field.value) != getattr(prior.claim, field.value):
+                raise WorkflowAtomicityError("Clarification cannot change unrelated claim fields")
+        if getattr(target.claim, answer.field.value) != claim_value:
+            raise WorkflowAtomicityError(
+                "Clarification claim value must equal the canonical parsed answer"
+            )
+
+        immutable_prior_provenance = tuple(
+            item
+            for item in prior.claim.field_provenance
+            if item.field not in {answer.field, RequiredClaimField.NARRATIVE}
+        )
+        immutable_target_provenance = tuple(
+            item
+            for item in target.claim.field_provenance
+            if item.field not in {answer.field, RequiredClaimField.NARRATIVE}
+        )
+        if immutable_target_provenance != immutable_prior_provenance:
+            raise WorkflowAtomicityError(
+                "Clarification cannot change unrelated claim-field provenance"
+            )
+        target_field_provenance = tuple(
+            item for item in target.claim.field_provenance if item.field is answer.field
+        )
+        if len(target_field_provenance) != 1 or target_field_provenance[0].source_refs != (
+            expected_provenance_id,
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification target field must use only its answer provenance"
+            )
+        cls._validate_neutral_narrative(target)
+
+    @staticmethod
+    def _parse_clarification_answer(
+        field: RequiredClaimField,
+        raw_answer: str,
+    ) -> tuple[object, str]:
+        value = raw_answer.strip()
+        try:
+            if field is RequiredClaimField.INCIDENT_DATE:
+                parsed_date = date.fromisoformat(value)
+                return parsed_date, parsed_date.isoformat()
+            if field is RequiredClaimField.INCIDENT_TIME:
+                parsed_time = time.fromisoformat(value)
+                return parsed_time, parsed_time.isoformat()
+            if field is RequiredClaimField.COUNTERPARTY_KNOWN:
+                parsed_counterparty = CounterpartyKnown(value.lower())
+                return parsed_counterparty, parsed_counterparty.value
+        except ValueError as error:
+            raise WorkflowAtomicityError(
+                f"Clarification answer is invalid for {field.value}"
+            ) from error
+        if field in {
+            RequiredClaimField.LOCATION,
+            RequiredClaimField.CLAIMANT_NAME,
+            RequiredClaimField.POLICY_REFERENCE,
+            RequiredClaimField.VEHICLE_REGISTRATION,
+        }:
+            return value, value
+        raise WorkflowAtomicityError(f"Clarification field {field.value} has no safe text parser")
+
+    @classmethod
+    def _validate_analysis_authority(
+        cls,
+        connection: sqlite3.Connection,
         current: CaseRecord,
         command: AnalysisWorkflowCommand,
         *,
         existing_gates: tuple[GateDecision, ...],
-    ) -> tuple[GateDecision, ...]:
-        emitted = command.gate_decisions
-        if not emitted:
-            raise WorkflowAtomicityError("Analysis commit requires new gate decisions")
-        if current.state is CaseState.ANALYZING:
-            existing_ids = tuple(decision.gate_id for decision in existing_gates)
-            if existing_ids != _ANALYSIS_GATE_SEQUENCE[:2] or any(
-                not decision.passed for decision in existing_gates
-            ):
-                raise WorkflowAtomicityError(
-                    "Initial analysis requires exactly one persisted passed G0/G1 prefix"
-                )
-            expected_new: tuple[GateId, ...] = _ANALYSIS_GATE_SEQUENCE[2:]
-            emitted_ids = tuple(decision.gate_id for decision in emitted)
-            if emitted_ids != expected_new[: len(emitted)]:
-                raise WorkflowAtomicityError(
-                    "Initial analysis may emit only a contiguous G2-G5 suffix"
-                )
-            decisions = (*existing_gates, *emitted)
-        else:
-            current_packet = current.snapshot.claim_packet
-            if current_packet is None:
-                raise WorkflowAtomicityError(
-                    "Clarification continuation requires its prior ClaimPacket"
-                )
-            prior = current_packet.gate_decisions
-            latest = SqliteCaseRepository._latest_analysis_gate_set(existing_gates)
-            if (
-                tuple(decision.gate_id for decision in prior)
-                != _ANALYSIS_GATE_SEQUENCE
-                or latest != prior
-            ):
-                raise WorkflowAtomicityError(
-                    "Clarification continuation must bind the latest persisted G0-G5 set"
-                )
-            expected_new = _ANALYSIS_GATE_SEQUENCE[4:]
-            emitted_ids = tuple(decision.gate_id for decision in emitted)
-            if emitted_ids != expected_new[: len(emitted)]:
-                raise WorkflowAtomicityError(
-                    "Clarification continuation may emit only contiguous G4/G5 decisions"
-                )
-            decisions = (*prior[:4], *emitted)
+    ) -> _AnalysisAuthority:
+        """Derive, rather than trust, every G2-G5 decision and target state."""
 
-        gate_ids = tuple(decision.gate_id for decision in decisions)
-        emitted_times = tuple(decision.decided_at for decision in emitted)
+        cls._validate_analysis_history(current, existing_gates)
+        if current.state is CaseState.ANALYZING:
+            return cls._validate_initial_analysis_authority(
+                connection,
+                current,
+                command,
+                existing_gates=existing_gates,
+            )
+        return cls._validate_clarification_authority(current, command)
+
+    @classmethod
+    def _validate_initial_analysis_authority(
+        cls,
+        connection: sqlite3.Connection,
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+        *,
+        existing_gates: tuple[GateDecision, ...],
+    ) -> _AnalysisAuthority:
+        if command.clarification_answer is not None:
+            raise WorkflowAtomicityError("Initial analysis cannot contain a clarification answer")
+        cls._validate_approved_evidence_binding(
+            connection,
+            current,
+            command.approved_evidence,
+        )
+        run = cls._recompute_output_contract_run(
+            command.g2_attempts,
+            command.approved_evidence,
+        )
+        final = run.final_result
+        if final is None:
+            raise WorkflowAtomicityError("Initial analysis requires a final G2 result")
+        emitted = command.gate_decisions
+        if not emitted or emitted[0] != final.decision:
+            raise WorkflowAtomicityError(
+                "The emitted G2 decision must equal the final canonical G2 result"
+            )
+        cls._validate_analysis_provider_events(current, command, g2_run=run)
+
+        authoritative: list[GateDecision] = [final.decision]
+        provenance: ProvenanceResult | None = None
+        completeness: CompletenessResult | None = None
+        packet = command.claim_packet
+        if not final.decision.passed:
+            if packet is not None or command.safety_input is not None:
+                raise WorkflowAtomicityError(
+                    "A failed G2 cannot expose a ClaimPacket or downstream safety input"
+                )
+            expected_target = CaseState.BLOCKED
+        else:
+            if final.extraction is None or packet is None:
+                raise WorkflowAtomicityError(
+                    "A passed G2 requires its extracted target ClaimPacket"
+                )
+            cls._validate_initial_extraction_binding(
+                connection,
+                current,
+                packet,
+                final.extraction,
+                command.approved_evidence,
+            )
+            safety_input = command.safety_input
+            if safety_input is None:
+                raise WorkflowAtomicityError("A passed G2 requires authoritative G3 input")
+            cls._validate_safety_binding(packet, safety_input)
+            g3_event = cls._require_emitted_gate(emitted, 1, GateId.G3_SAFETY_SCOPE)
+            safety = evaluate_g3(safety_input, decided_at=g3_event.decided_at)
+            if g3_event != safety.decision:
+                raise WorkflowAtomicityError(
+                    "The emitted G3 decision must equal recomputed SafetyInput"
+                )
+            authoritative.append(safety.decision)
+            if not safety.decision.passed:
+                expected_target = (
+                    CaseState.EMERGENCY_STOPPED if safety.emergency_stop else CaseState.BLOCKED
+                )
+            else:
+                g4_event = cls._require_emitted_gate(emitted, 2, GateId.G4_PROVENANCE)
+                provenance = evaluate_g4(packet, decided_at=g4_event.decided_at)
+                if g4_event != provenance.decision:
+                    raise WorkflowAtomicityError(
+                        "The emitted G4 decision must equal recomputed packet provenance"
+                    )
+                authoritative.append(provenance.decision)
+                if not provenance.decision.passed and not cls._is_exclusive_g4_conflict(provenance):
+                    expected_target = CaseState.BLOCKED
+                else:
+                    g5_event = cls._require_emitted_gate(
+                        emitted,
+                        3,
+                        GateId.G5_COMPLETENESS,
+                    )
+                    completeness = cls._derive_completeness(
+                        provenance,
+                        completed_rounds=0,
+                        decided_at=g5_event.decided_at,
+                    )
+                    if g5_event != completeness.decision:
+                        raise WorkflowAtomicityError(
+                            "The emitted G5 decision must equal recomputed completeness"
+                        )
+                    authoritative.append(completeness.decision)
+                    expected_target = cls._target_for_completeness(completeness)
+
+        cls._validate_derived_analysis_target(
+            current,
+            command,
+            expected_target=expected_target,
+            authoritative=tuple(authoritative),
+        )
+        return _AnalysisAuthority(
+            effective_gates=(*existing_gates, *authoritative),
+            provenance=provenance,
+            completeness=completeness,
+        )
+
+    @classmethod
+    def _validate_clarification_authority(
+        cls,
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+    ) -> _AnalysisAuthority:
+        if (
+            command.g2_attempts
+            or command.approved_evidence
+            or command.safety_input is not None
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification continuation cannot rerun G2/G3 or a provider"
+            )
+        cls._validate_analysis_provider_events(current, command, g2_run=None)
+        cls._validate_clarification_answer_delta(current, command)
+        packet = command.claim_packet
+        prior_packet = current.snapshot.claim_packet
+        if packet is None or prior_packet is None:
+            raise WorkflowAtomicityError(
+                "Clarification continuation requires prior and target ClaimPackets"
+            )
+        stored_active = ClarificationView.model_validate(current.snapshot.active_clarification)
+        emitted = command.gate_decisions
+        g4_event = cls._require_emitted_gate(emitted, 0, GateId.G4_PROVENANCE)
+        provenance = evaluate_g4(packet, decided_at=g4_event.decided_at)
+        if g4_event != provenance.decision:
+            raise WorkflowAtomicityError(
+                "The emitted G4 decision must equal recomputed clarification provenance"
+            )
+        authoritative: list[GateDecision] = [provenance.decision]
+        completeness: CompletenessResult | None = None
+        if not provenance.decision.passed and not cls._is_exclusive_g4_conflict(provenance):
+            expected_target = CaseState.BLOCKED
+        else:
+            g5_event = cls._require_emitted_gate(emitted, 1, GateId.G5_COMPLETENESS)
+            completeness = cls._derive_completeness(
+                provenance,
+                completed_rounds=stored_active.round,
+                decided_at=g5_event.decided_at,
+            )
+            if g5_event != completeness.decision:
+                raise WorkflowAtomicityError(
+                    "The emitted G5 decision must equal recomputed clarification completeness"
+                )
+            authoritative.append(completeness.decision)
+            expected_target = cls._target_for_completeness(completeness)
+
+        cls._validate_derived_analysis_target(
+            current,
+            command,
+            expected_target=expected_target,
+            authoritative=tuple(authoritative),
+        )
+        return _AnalysisAuthority(
+            effective_gates=(*prior_packet.gate_decisions[:4], *authoritative),
+            provenance=provenance,
+            completeness=completeness,
+        )
+
+    @staticmethod
+    def _require_emitted_gate(
+        emitted: tuple[GateDecision, ...],
+        index: int,
+        gate_id: GateId,
+    ) -> GateDecision:
+        if index >= len(emitted) or emitted[index].gate_id is not gate_id:
+            raise WorkflowAtomicityError(
+                f"Analysis requires authoritative {gate_id.value} at emitted position {index}"
+            )
+        return emitted[index]
+
+    @staticmethod
+    def _validate_derived_analysis_target(
+        current: CaseRecord,
+        command: AnalysisWorkflowCommand,
+        *,
+        expected_target: CaseState,
+        authoritative: tuple[GateDecision, ...],
+    ) -> None:
+        if command.gate_decisions != authoritative:
+            raise WorkflowAtomicityError(
+                "Analysis gate suffix must equal the complete authoritative result chain"
+            )
+        if command.target is not expected_target:
+            raise WorkflowAtomicityError(
+                f"Authoritative gates require target {expected_target.value}"
+            )
+        emitted_times = tuple(decision.decided_at for decision in authoritative)
         if tuple(sorted(emitted_times)) != emitted_times:
             raise WorkflowAtomicityError("New analysis gate timestamps must be monotonic")
         if emitted_times[0] < current.updated_at or emitted_times[-1] > command.updated_at:
@@ -2397,73 +6525,162 @@ class SqliteCaseRepository:
                 "New analysis gate timestamps must fall within the atomic command window"
             )
 
-        if command.target is CaseState.READY_TO_FILL:
-            if gate_ids != _ANALYSIS_GATE_SEQUENCE or any(
-                not decision.passed for decision in decisions
-            ):
-                raise WorkflowAtomicityError(
-                    "ready_to_fill requires the complete passed G0-G5 sequence"
-                )
-            return decisions
-        if command.target is CaseState.AWAITING_CLARIFICATION:
-            if gate_ids != _ANALYSIS_GATE_SEQUENCE:
-                raise WorkflowAtomicityError(
-                    "awaiting_clarification requires the complete G0-G5 sequence"
-                )
-            if any(not decision.passed for decision in decisions[:-1]):
-                raise WorkflowAtomicityError(
-                    "awaiting_clarification requires passed G0-G4"
-                )
-            final = decisions[-1]
-            if (
-                final.passed
-                or final.reason_codes
-                != (GateReasonCode.G5_REQUIRED_FIELD_MISSING,)
-            ):
-                raise WorkflowAtomicityError(
-                    "awaiting_clarification requires only the canonical G5 missing-field failure"
-                )
-            return decisions
-
-        if any(not decision.passed for decision in decisions[:-1]) or decisions[-1].passed:
-            raise WorkflowAtomicityError(
-                "blocked requires passed prefix gates and one final failed gate"
-            )
-        final = decisions[-1]
-        if final.gate_id is GateId.G5_COMPLETENESS and final.reason_codes == (
-            GateReasonCode.G5_REQUIRED_FIELD_MISSING,
+    @classmethod
+    def _validate_analysis_history(
+        cls,
+        current: CaseRecord,
+        history: tuple[GateDecision, ...],
+    ) -> None:
+        timestamps = tuple(decision.decided_at for decision in history)
+        if tuple(sorted(timestamps)) != timestamps or (
+            timestamps and timestamps[-1] > current.updated_at
         ):
             raise WorkflowAtomicityError(
-                "A clarifiable G5 missing field must enter awaiting_clarification"
+                "Persisted analysis gate history has a non-monotonic chronology"
             )
-        return decisions
+        if current.state is CaseState.ANALYZING:
+            if tuple(decision.gate_id for decision in history) != _ANALYSIS_GATE_SEQUENCE[
+                :2
+            ] or any(not decision.passed for decision in history):
+                raise WorkflowAtomicityError(
+                    "Initial analysis requires exactly one persisted passed G0/G1 prefix"
+                )
+            return
+
+        packet = current.snapshot.claim_packet
+        active_payload = current.snapshot.active_clarification
+        if packet is None or active_payload is None:
+            raise WorkflowAtomicityError(
+                "Clarification history requires its packet and active view"
+            )
+        try:
+            active = ClarificationView.model_validate(active_payload)
+        except (ValidationError, ValueError, TypeError) as error:
+            raise WorkflowAtomicityError(
+                "Persisted active clarification is not canonical"
+            ) from error
+        if len(history) < 6 or (len(history) - 4) % 2:
+            raise WorkflowAtomicityError(
+                "Clarification history must contain a G0-G3 prefix and complete G4/G5 pairs"
+            )
+        prefix = history[:4]
+        if tuple(decision.gate_id for decision in prefix) != _ANALYSIS_GATE_SEQUENCE[:4] or any(
+            not decision.passed for decision in prefix
+        ):
+            raise WorkflowAtomicityError(
+                "Clarification history requires one immutable passed G0-G3 prefix"
+            )
+        pairs = tuple((history[index], history[index + 1]) for index in range(4, len(history), 2))
+        if len(pairs) != active.round:
+            raise WorkflowAtomicityError(
+                "Clarification history pair count must equal the active round"
+            )
+        for g4, g5 in pairs:
+            if g4.gate_id is not GateId.G4_PROVENANCE or g5.gate_id is not GateId.G5_COMPLETENESS:
+                raise WorkflowAtomicityError(
+                    "Clarification history may contain only complete G4/G5 pairs"
+                )
+            g4_continues = g4.passed or g4.reason_codes == (GateReasonCode.G4_CONFLICTING_SOURCES,)
+            if not g4_continues or g5.reason_codes != (GateReasonCode.G5_REQUIRED_FIELD_MISSING,):
+                raise WorkflowAtomicityError(
+                    "Only passed G4 or exclusive G4 conflict plus clarifiable G5 may continue"
+                )
+        latest = (*prefix, *pairs[-1])
+        if packet.gate_decisions != latest:
+            raise WorkflowAtomicityError(
+                "Clarification packet must equal the latest exact persisted G0-G5 set"
+            )
+        latest_g4, latest_g5 = pairs[-1]
+        provenance = evaluate_g4(packet, decided_at=latest_g4.decided_at)
+        completeness = cls._derive_completeness(
+            provenance,
+            completed_rounds=active.round - 1,
+            decided_at=latest_g5.decided_at,
+        )
+        accepted = completeness.accepted_question
+        if (
+            provenance.decision != latest_g4
+            or completeness.decision != latest_g5
+            or accepted is None
+            or active.field is not accepted.field
+            or active.question != accepted.text
+        ):
+            raise WorkflowAtomicityError(
+                "Active clarification is not bound to deterministic G4/G5 authority"
+            )
 
     @staticmethod
-    def _latest_analysis_gate_set(
-        history: tuple[GateDecision, ...],
-    ) -> tuple[GateDecision, ...]:
-        latest: dict[GateId, GateDecision] = {}
-        for decision in history:
-            if decision.gate_id in _ANALYSIS_GATE_SEQUENCE:
-                latest[decision.gate_id] = decision
-        if any(gate not in latest for gate in _ANALYSIS_GATE_SEQUENCE):
-            raise WorkflowAtomicityError(
-                "Persisted clarification history lacks a complete G0-G5 set"
-            )
-        return tuple(latest[gate] for gate in _ANALYSIS_GATE_SEQUENCE)
+    def _is_exclusive_g4_conflict(provenance: ProvenanceResult) -> bool:
+        return provenance.decision.reason_codes == (
+            GateReasonCode.G4_CONFLICTING_SOURCES,
+        ) and bool(provenance.conflicting_fields)
+
+    @staticmethod
+    def _derive_completeness(
+        provenance: ProvenanceResult,
+        *,
+        completed_rounds: int,
+        decided_at: datetime,
+    ) -> CompletenessResult:
+        blockers = set(compute_missing_required_fields(provenance.claim)) | set(
+            provenance.conflicting_fields
+        )
+        ordered = tuple(field for field in RequiredClaimField if field in blockers)
+        questions: tuple[ClarificationQuestion, ...] = ()
+        if (
+            ordered
+            and ordered[0] in _TEXT_CLARIFIABLE_FIELDS
+            and completed_rounds < MAX_CLARIFICATION_ROUNDS
+        ):
+            field = ordered[0]
+            questions = (ClarificationQuestion(field, _QUESTION_BY_FIELD[field]),)
+        return evaluate_g5(
+            provenance,
+            proposed_questions=questions,
+            completed_rounds=completed_rounds,
+            decided_at=decided_at,
+        )
+
+    @staticmethod
+    def _target_for_completeness(completeness: CompletenessResult) -> CaseState:
+        if completeness.decision.passed:
+            return CaseState.READY_TO_FILL
+        if completeness.accepted_question is not None:
+            return CaseState.AWAITING_CLARIFICATION
+        if completeness.manual_handoff:
+            return CaseState.BLOCKED
+        if (
+            completeness.blocking_fields
+            and completeness.accepted_question is None
+            and GateReasonCode.G5_QUESTION_INVALID in completeness.decision.reason_codes
+        ):
+            return CaseState.BLOCKED
+        raise WorkflowAtomicityError(
+            "Deterministic fixed-question G5 produced no authorized target"
+        )
 
     @staticmethod
     def _validate_analysis_provider_events(
         current: CaseRecord,
         command: AnalysisWorkflowCommand,
+        *,
+        g2_run: OutputContractRun | None,
     ) -> None:
         emissions = command.provider_events
         if current.state is CaseState.AWAITING_CLARIFICATION:
-            if emissions:
+            if emissions or g2_run is not None:
                 raise WorkflowAtomicityError(
                     "Clarification continuation is deterministic and cannot call a provider"
                 )
             return
+        if g2_run is None:
+            raise WorkflowAtomicityError("Initial provider telemetry requires its G2 run")
+        attempts = g2_run.attempts
+        expected_emissions = 1 if len(attempts) == 1 else 3
+        if len(attempts) not in {1, 2} or len(emissions) != expected_emissions:
+            raise WorkflowAtomicityError(
+                "Provider emissions must exactly match one or two completed G2 attempts"
+            )
         if len(emissions) not in {1, 3}:
             raise WorkflowAtomicityError(
                 "Analysis requires one provider call or call/retry/call telemetry"
@@ -2491,10 +6708,20 @@ class SqliteCaseRepository:
 
         if len(events) == 1:
             event = events[0]
-            if not isinstance(event, ProviderCallWorkflowEvent) or event.retry_attempt != 0:
+            if (
+                not isinstance(event, ProviderCallWorkflowEvent)
+                or event.call_sequence != 1
+                or event.retry_attempt != 0
+            ):
                 raise WorkflowAtomicityError(
                     "A single analysis provider event must be the initial successful call"
                 )
+            if attempts[0].attempt != 0 or attempts[0].decision != command.gate_decisions[0]:
+                raise WorkflowAtomicityError(
+                    "The single provider call must bind the final attempt-zero G2 decision"
+                )
+            if emissions[0].occurred_at > attempts[0].decision.decided_at:
+                raise WorkflowAtomicityError("G2 cannot predate its completed provider call")
             return
 
         first, retry, succeeded = events
@@ -2511,7 +6738,8 @@ class SqliteCaseRepository:
                 "The analysis retry is authorized only for a deterministic invalid response"
             )
         if (
-            first.retry_attempt != 0
+            first.call_sequence != 1
+            or first.retry_attempt != 0
             or retry.call_sequence != first.call_sequence
             or retry.model_id is not first.model_id
             or retry.provider_mode != first.provider_mode
@@ -2519,15 +6747,37 @@ class SqliteCaseRepository:
             or succeeded.retry_attempt != 1
             or succeeded.model_id is not first.model_id
             or succeeded.provider_mode != first.provider_mode
+            or retry.duration_ms != first.duration_ms
         ):
             raise WorkflowAtomicityError(
                 "Retry and successful provider telemetry must be contiguous and identically bound"
+            )
+        initial_attempt, final_attempt = attempts
+        if (
+            initial_attempt.attempt != 0
+            or initial_attempt.decision.passed
+            or not initial_attempt.retry_allowed
+            or final_attempt.attempt != 1
+            or final_attempt.decision != command.gate_decisions[0]
+        ):
+            raise WorkflowAtomicityError(
+                "Retry telemetry requires the exact canonical failed-then-final G2 run"
+            )
+        if (
+            emissions[0].occurred_at > initial_attempt.decision.decided_at
+            or initial_attempt.decision.decided_at > emissions[1].occurred_at
+            or emissions[2].occurred_at > final_attempt.decision.decided_at
+        ):
+            raise WorkflowAtomicityError(
+                "Provider, retry, and G2 attempt timestamps must be causally ordered"
             )
 
     @staticmethod
     def _validate_analysis_clarification(
         current: CaseRecord,
         command: AnalysisWorkflowCommand,
+        *,
+        completeness: CompletenessResult | None,
     ) -> None:
         stored_active: ClarificationView | None = None
         if current.snapshot.active_clarification is not None:
@@ -2554,40 +6804,41 @@ class SqliteCaseRepository:
         active = command.active_clarification
         events = command.clarification_events
         if command.target is CaseState.AWAITING_CLARIFICATION:
-            if active is None:
+            accepted = None if completeness is None else completeness.accepted_question
+            if active is None or accepted is None:
                 raise WorkflowAtomicityError(
-                    "awaiting_clarification requires an active ClarificationView"
+                    "awaiting_clarification requires the exact G5-accepted question"
                 )
             if (
                 active.case_id != current.case_id
                 or active.expected_version != current.version + 1
                 or active.requested_at != command.updated_at
                 or active.status is not ClarificationStatus.REQUESTED
+                or active.field is not accepted.field
+                or active.question != accepted.text
             ):
                 raise WorkflowAtomicityError(
-                    "ClarificationView must bind to the resulting case version and timestamp"
-                )
-            packet = command.claim_packet
-            if (
-                packet is None
-                or not packet.claim.missing_required_fields
-                or active.field is not packet.claim.missing_required_fields[0]
-            ):
-                raise WorkflowAtomicityError(
-                    "ClarificationView field must be the first missing ClaimPacket field"
+                    "ClarificationView must bind the fixed server question, version, and timestamp"
                 )
             if current.state is CaseState.ANALYZING:
-                if active.round != 1 or len(events) != 1 or (
-                    events[0].status is not ClarificationStatus.REQUESTED
-                    or events[0].field is not active.field
-                    or events[0].round != active.round
+                if (
+                    active.round != 1
+                    or len(events) != 1
+                    or (
+                        events[0].status is not ClarificationStatus.REQUESTED
+                        or events[0].field is not active.field
+                        or events[0].round != active.round
+                    )
                 ):
                     raise WorkflowAtomicityError(
                         "Initial clarification must request exactly round one"
                     )
             else:
                 assert stored_active is not None
-                if stored_active.round >= 3 or active.round != stored_active.round + 1:
+                if (
+                    stored_active.round >= MAX_CLARIFICATION_ROUNDS
+                    or active.round != stored_active.round + 1
+                ):
                     raise WorkflowAtomicityError(
                         "Clarification continuation must advance by one bounded round"
                     )
@@ -2606,7 +6857,7 @@ class SqliteCaseRepository:
 
         if active is not None:
             raise WorkflowAtomicityError(
-                "ready/blocked targets cannot expose an active clarification"
+                "A closed analysis target cannot expose an active clarification"
             )
         if current.state is CaseState.ANALYZING:
             if events:
@@ -2616,11 +6867,11 @@ class SqliteCaseRepository:
             return
         assert stored_active is not None
         expected_status = ClarificationStatus.CONFIRMED
-        final_gate = command.gate_decisions[-1]
         if (
             command.target is CaseState.BLOCKED
-            and final_gate.gate_id is GateId.G5_COMPLETENESS
-            and GateReasonCode.G5_CLARIFICATION_LIMIT in final_gate.reason_codes
+            and completeness is not None
+            and completeness.manual_handoff
+            and stored_active.round == MAX_CLARIFICATION_ROUNDS
         ):
             expected_status = ClarificationStatus.EXHAUSTED
         if len(events) != 1 or (
@@ -2632,10 +6883,14 @@ class SqliteCaseRepository:
                 "Clarification close event must match the stored active view"
             )
 
-    @staticmethod
+    @classmethod
     def _validate_terminal_provider_failure(
+        cls,
+        connection: sqlite3.Connection,
         current: CaseRecord,
         command: TerminalProviderFailureCommand,
+        *,
+        intake_manifest: JsonObject,
     ) -> CaseSnapshot:
         if command.case_id != current.case_id:
             raise WorkflowAtomicityError("Provider failure caseId is not current")
@@ -2658,6 +6913,29 @@ class SqliteCaseRepository:
                 f"{command.event.operation.value} provider failure requires "
                 f"case state {required_state.value}"
             )
+        if (
+            command.event.operation is WorkflowOperation.TRANSCRIPTION
+            and intake_manifest.get("inputMode") != "audio"
+        ):
+            raise WorkflowAtomicityError(
+                "Transcription provider failure requires canonical audio intake"
+            )
+        if command.event.operation is WorkflowOperation.EXTRACTION:
+            cls._validate_approved_evidence_binding(
+                connection,
+                current,
+                command.approved_evidence,
+            )
+            g2_run = cls._recompute_output_contract_run(
+                command.g2_attempts,
+                command.approved_evidence,
+            )
+        else:
+            if command.approved_evidence or command.g2_attempts:
+                raise WorkflowAtomicityError(
+                    "Only extraction provider failures may carry G2 inputs"
+                )
+            g2_run = OutputContractRun()
         prefix = command.provider_events
         if type(prefix) is not tuple or any(
             not isinstance(emission, ProviderWorkflowEmission) for emission in prefix
@@ -2666,9 +6944,16 @@ class SqliteCaseRepository:
                 "Provider failure prefix must use ProviderWorkflowEmission"
             )
         if not prefix:
-            if command.event.retry_attempt != 0:
+            if command.event.call_sequence != 1 or command.event.retry_attempt != 0:
                 raise WorkflowAtomicityError(
-                    "A first-call terminal failure must use retryAttempt zero"
+                    "A first-call terminal failure must use callSequence one and retryAttempt zero"
+                )
+            if (
+                command.event.operation is WorkflowOperation.EXTRACTION
+                and g2_run.attempts
+            ):
+                raise WorkflowAtomicityError(
+                    "A first-call extraction failure requires an empty canonical G2 run"
                 )
         else:
             if len(prefix) != 2:
@@ -2696,12 +6981,14 @@ class SqliteCaseRepository:
                 )
             if (
                 first.operation is not WorkflowOperation.EXTRACTION
+                or first.call_sequence != 1
                 or first.retry_attempt != 0
                 or retry.operation is not WorkflowOperation.EXTRACTION
                 or retry.failure.category is not ProviderFailureCategory.INVALID_RESPONSE
                 or retry.call_sequence != first.call_sequence
                 or retry.model_id is not first.model_id
                 or retry.provider_mode != first.provider_mode
+                or retry.duration_ms != first.duration_ms
                 or command.event.operation is not WorkflowOperation.EXTRACTION
                 or command.event.call_sequence != first.call_sequence + 1
                 or command.event.retry_attempt != 1
@@ -2710,6 +6997,23 @@ class SqliteCaseRepository:
             ):
                 raise WorkflowAtomicityError(
                     "Terminal retry prefix and attempt-one failure are not exactly bound"
+                )
+            run = g2_run
+            if len(run.attempts) != 1:
+                raise WorkflowAtomicityError(
+                    "A terminal extraction retry requires its single failed G2 attempt"
+                )
+            failed_attempt = run.attempts[0]
+            if (
+                failed_attempt.attempt != 0
+                or failed_attempt.decision.passed
+                or not failed_attempt.retry_allowed
+                or failed_attempt.extraction is not None
+                or first_emission.occurred_at > failed_attempt.decision.decided_at
+                or failed_attempt.decision.decided_at > retry_emission.occurred_at
+            ):
+                raise WorkflowAtomicityError(
+                    "Terminal retry telemetry must equal and follow its canonical failed G2 attempt"
                 )
         try:
             validate_case_transition(current.state, CaseState.FAILED)
@@ -2762,8 +7066,8 @@ class SqliteCaseRepository:
         *,
         case_id: str,
         decision: GateDecision,
-    ) -> None:
-        connection.execute(
+    ) -> int:
+        cursor = connection.execute(
             """
             INSERT INTO gate_decisions (
                 case_id, gate_id, decided_at, decision_json
@@ -2776,6 +7080,9 @@ class SqliteCaseRepository:
                 decision.model_dump_json(by_alias=True),
             ),
         )
+        if cursor.lastrowid is None:
+            raise PersistenceError("Gate decision sequence was not allocated")
+        return int(cursor.lastrowid)
 
     @staticmethod
     def _read_gate_decisions(
@@ -2979,6 +7286,14 @@ class SqliteCaseRepository:
         snapshot: CaseSnapshot,
         updated_at: datetime,
     ) -> None:
+        updated_at_value = _dump_aware_datetime(updated_at, "updated_at")
+        if updated_at < current.updated_at:
+            raise ValueError("updated_at cannot move backwards")
+        cls._require_capabilities_before_next_version(
+            connection,
+            current=current,
+            next_origin=updated_at,
+        )
         transcript_row = connection.execute(
             "SELECT * FROM case_transcripts WHERE case_id = ?",
             (current.case_id,),
@@ -3007,9 +7322,6 @@ class SqliteCaseRepository:
                     "A case update cannot replace its bound transcript identity"
                 )
 
-        updated_at_value = _dump_aware_datetime(updated_at, "updated_at")
-        if updated_at < current.updated_at:
-            raise ValueError("updated_at cannot move backwards")
         claim_packet_json = (
             None
             if snapshot.claim_packet is None
@@ -3054,6 +7366,33 @@ class SqliteCaseRepository:
                 current.version,
                 current.version + 1,
             )
+
+    @classmethod
+    def _require_capabilities_before_next_version(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        current: CaseRecord,
+        next_origin: datetime,
+    ) -> None:
+        """Keep current-version capabilities inside [origin, next_origin)."""
+
+        for row in connection.execute(
+            """
+            SELECT * FROM authority_capabilities
+            WHERE case_id = ? AND bound_case_version = ?
+            """,
+            (current.case_id, current.version),
+        ):
+            capability = cls._row_to_capability(row)
+            if capability.issued_at >= next_origin or (
+                capability.consumed_at is not None
+                and capability.consumed_at >= next_origin
+            ):
+                raise WorkflowAtomicityError(
+                    "Case mutation must strictly follow every current-version "
+                    "capability issue and consumption timestamp"
+                )
 
     @staticmethod
     def _validate_page(after: int, limit: int) -> None:
@@ -3401,11 +7740,17 @@ class SqliteCaseRepository:
             ),
         )
         _validate_snapshot(case_id, state, snapshot)
+        created_at = _parse_datetime(_require_string(row["created_at"], "created_at"))
+        updated_at = _parse_datetime(_require_string(row["updated_at"], "updated_at"))
+        if created_at > updated_at:
+            raise PersistedDataIntegrityError(
+                "Persisted case created_at cannot follow updated_at"
+            )
         return CaseRecord(
             case_id=case_id,
             version=_require_integer(row["version"], "version"),
             state=state,
             snapshot=snapshot,
-            created_at=_parse_datetime(_require_string(row["created_at"], "created_at")),
-            updated_at=_parse_datetime(_require_string(row["updated_at"], "updated_at")),
+            created_at=created_at,
+            updated_at=updated_at,
         )

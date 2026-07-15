@@ -30,17 +30,15 @@ class RecordingCleaner:
         self.reset_count += 1
 
 
-def _build_client(database_path: Path) -> tuple[TestClient, RecordingCleaner]:
-    cleaner = RecordingCleaner()
+def _build_client(database_path: Path) -> TestClient:
     service = CaseService(
         SqliteCaseRepository(database_path),
-        resource_cleaner=cleaner,
         now=lambda: NOW,
         case_id_factory=lambda: "case-api-001",
     )
     app = FastAPI()
     app.include_router(create_case_router(service))
-    return TestClient(app), cleaner
+    return TestClient(app)
 
 
 def _json_object(response_json: object) -> dict[str, Any]:
@@ -48,7 +46,7 @@ def _json_object(response_json: object) -> dict[str, Any]:
 
 
 def test_create_get_delete_round_trip_redacts_metadata(tmp_path: Path) -> None:
-    client, cleaner = _build_client(tmp_path / "cases.db")
+    client = _build_client(tmp_path / "cases.db")
     raw_claimant = "Ada Lovelace"
     raw_filename = "private-incident.jpg"
 
@@ -91,7 +89,6 @@ def test_create_get_delete_round_trip_redacts_metadata(tmp_path: Path) -> None:
     deleted = client.delete("/api/cases/case-api-001")
     assert deleted.status_code == 204
     assert deleted.content == b""
-    assert cleaner.deleted_case_ids == ["case-api-001"]
 
     missing = client.get("/api/cases/case-api-001")
     assert missing.status_code == 404
@@ -108,7 +105,7 @@ def test_create_get_delete_round_trip_redacts_metadata(tmp_path: Path) -> None:
 
 
 def test_missing_case_and_repeated_delete_are_safe(tmp_path: Path) -> None:
-    client, cleaner = _build_client(tmp_path / "cases.db")
+    client = _build_client(tmp_path / "cases.db")
 
     missing = client.get("/api/cases/does-not-exist")
     first_delete = client.delete("/api/cases/does-not-exist")
@@ -117,11 +114,10 @@ def test_missing_case_and_repeated_delete_are_safe(tmp_path: Path) -> None:
     assert missing.status_code == 404
     assert first_delete.status_code == 204
     assert second_delete.status_code == 204
-    assert cleaner.deleted_case_ids == ["does-not-exist", "does-not-exist"]
 
 
 def test_invalid_metadata_key_is_rejected_before_service_execution(tmp_path: Path) -> None:
-    client, _ = _build_client(tmp_path / "cases.db")
+    client = _build_client(tmp_path / "cases.db")
 
     invalid = client.post(
         "/api/cases",
@@ -134,7 +130,7 @@ def test_invalid_metadata_key_is_rejected_before_service_execution(tmp_path: Pat
 
 def test_syntactically_valid_pii_like_metadata_key_is_not_persisted(tmp_path: Path) -> None:
     database_path = tmp_path / "cases.db"
-    client, _ = _build_client(database_path)
+    client = _build_client(database_path)
     pii_like_key = "claimant_Janik_Dotzel"
 
     invalid = client.post(
