@@ -193,20 +193,30 @@ function browserEventSourceFactory(url: string): WorkflowEventSourcePort {
     throw new WorkflowStreamError("STREAM_UNAVAILABLE");
   }
   const source = new EventSource(url);
+  let closed = false;
   const port: WorkflowEventSourcePort = {
     close() {
+      if (closed) return;
+      closed = true;
+      source.removeEventListener("workflow", workflowListener);
+      source.removeEventListener("error", errorListener);
+      port.onmessage = null;
+      port.onerror = null;
       source.close();
     },
     onerror: null,
     onmessage: null,
   };
-  source.onmessage = (event) => {
+  const workflowListener: EventListener = (event) => {
+    const message = event as MessageEvent<unknown>;
     port.onmessage?.({
-      data: typeof event.data === "string" ? event.data : "",
-      lastEventId: event.lastEventId,
+      data: typeof message.data === "string" ? message.data : "",
+      lastEventId: message.lastEventId,
     });
   };
-  source.onerror = (event) => port.onerror?.(event);
+  const errorListener: EventListener = (event) => port.onerror?.(event);
+  source.addEventListener("workflow", workflowListener);
+  source.addEventListener("error", errorListener);
   return port;
 }
 

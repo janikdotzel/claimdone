@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildClarificationAnswerRequest,
@@ -11,6 +11,11 @@ import {
   REVIEW_SNAPSHOT,
   SHOWCASE_EVENTS,
 } from "../src/features/workflow/fixtures";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  FakeBrowserEventSource.reset();
+});
 
 describe("workflow read transport", () => {
   it("fetches and parses the canonical snapshot without legacy FlowResponse", async () => {
@@ -111,6 +116,71 @@ describe("workflow read transport", () => {
     subscription.close();
     subscription.close();
     expect(fake.closeCount).toBe(1);
+  });
+
+  it("uses only the native named workflow event and removes its listener on close", () => {
+    vi.stubGlobal("EventSource", FakeBrowserEventSource);
+    const observed: number[] = [];
+    const failures: string[] = [];
+    const transport = createWorkflowReadTransport({
+      apiOrigin: "http://127.0.0.1:8000",
+    });
+
+    const subscription = transport.subscribeEvents("case-happy-001", 5, {
+      onEnvelope: (envelope) => observed.push(envelope.cursor),
+      onFailure: (error) => failures.push(error.code),
+    });
+    const source = FakeBrowserEventSource.onlyInstance();
+
+    expect(source.url).toBe(
+      "http://127.0.0.1:8000/api/cases/case-happy-001/events?after=5",
+    );
+    expect(source.listenerCount("workflow")).toBe(1);
+    expect(source.listenerCount("message")).toBe(0);
+
+    source.emitMessage("message", SHOWCASE_EVENTS[5], "6");
+    expect(observed).toEqual([]);
+    source.emitMessage("workflow", SHOWCASE_EVENTS[5], "6");
+    expect(observed).toEqual([6]);
+    expect(failures).toEqual([]);
+
+    subscription.close();
+    subscription.close();
+    expect(source.closeCount).toBe(1);
+    expect(source.listenerCount("workflow")).toBe(0);
+    expect(source.listenerCount("error")).toBe(0);
+    expect(source.removeCount("workflow")).toBe(1);
+    expect(source.removeCount("error")).toBe(1);
+
+    source.emitMessage("workflow", SHOWCASE_EVENTS[5], "6");
+    source.emitError();
+    expect(observed).toEqual([6]);
+    expect(failures).toEqual([]);
+  });
+
+  it("removes native listeners and closes once when the EventSource fails", () => {
+    vi.stubGlobal("EventSource", FakeBrowserEventSource);
+    const observed: number[] = [];
+    const failures: string[] = [];
+    const transport = createWorkflowReadTransport();
+
+    transport.subscribeEvents("case-happy-001", null, {
+      onEnvelope: (envelope) => observed.push(envelope.cursor),
+      onFailure: (error) => failures.push(error.code),
+    });
+    const source = FakeBrowserEventSource.onlyInstance();
+
+    source.emitError();
+    source.emitError();
+    source.emitMessage("workflow", SHOWCASE_EVENTS[0], "1");
+
+    expect(observed).toEqual([]);
+    expect(failures).toEqual(["STREAM_UNAVAILABLE"]);
+    expect(source.closeCount).toBe(1);
+    expect(source.listenerCount("workflow")).toBe(0);
+    expect(source.listenerCount("error")).toBe(0);
+    expect(source.removeCount("workflow")).toBe(1);
+    expect(source.removeCount("error")).toBe(1);
   });
 
   it("requires a positive SSE lastEventId equal to the database cursor", () => {
@@ -221,6 +291,94 @@ class FakeEventSource implements WorkflowEventSourcePort {
 
   fail(): void {
     this.onerror?.(new Event("error"));
+  }
+}
+
+class FakeBrowserEventSource {
+  static instances: FakeBrowserEventSource[] = [];
+
+  static onlyInstance(): FakeBrowserEventSource {
+    expect(FakeBrowserEventSource.instances).toHaveLength(1);
+    const instance = FakeBrowserEventSource.instances[0];
+    if (instance === undefined) throw new Error("Expected an EventSource instance");
+    return instance;
+  }
+
+  static reset(): void {
+    FakeBrowserEventSource.instances = [];
+  }
+
+  closeCount = 0;
+  onerror: ((event: Event) => void) | null = null;
+  onmessage: ((event: FakeSseMessageEvent) => void) | null = null;
+  private readonly listeners = new Map<
+    string,
+    Set<EventListenerOrEventListenerObject>
+  >();
+  private readonly removals = new Map<string, number>();
+
+  constructor(readonly url: string) {
+    FakeBrowserEventSource.instances.push(this);
+  }
+
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+  ): void {
+    if (listener === null) return;
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+  ): void {
+    if (listener === null) return;
+    this.listeners.get(type)?.delete(listener);
+    this.removals.set(type, (this.removals.get(type) ?? 0) + 1);
+  }
+
+  close(): void {
+    this.closeCount += 1;
+  }
+
+  emitMessage(type: "message" | "workflow", value: unknown, lastEventId: string): void {
+    const event = new FakeSseMessageEvent(type, JSON.stringify(value), lastEventId);
+    this.dispatch(type, event);
+    if (type === "message") this.onmessage?.(event);
+  }
+
+  emitError(): void {
+    const event = new Event("error");
+    this.dispatch("error", event);
+    this.onerror?.(event);
+  }
+
+  listenerCount(type: string): number {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+
+  removeCount(type: string): number {
+    return this.removals.get(type) ?? 0;
+  }
+
+  private dispatch(type: string, event: Event): void {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) {
+      if (typeof listener === "function") listener(event);
+      else listener.handleEvent(event);
+    }
+  }
+}
+
+class FakeSseMessageEvent extends Event {
+  constructor(
+    type: string,
+    readonly data: string,
+    readonly lastEventId: string,
+  ) {
+    super(type);
   }
 }
 
