@@ -4,11 +4,19 @@ import {
   evaluateIntakeGates,
   initialIntakeState,
   intakeReducer,
+  isInt002ClarificationSnapshot,
+  isWorkflowSnapshotState,
   mapBackendValidationErrors,
   type AwaitingClarificationResponse,
   type IntakeImage,
   type IntakeState,
+  type ReadyToFillResponse,
 } from "../src/features/intake";
+import {
+  CLARIFICATION_SNAPSHOT,
+  READY_SNAPSHOT,
+} from "../src/features/workflow/fixtures";
+import { parseWorkflowSnapshot } from "../src/features/workflow/validation";
 
 function image(id: string, decision: "strip" | "retain" | null = null): IntakeImage {
   return {
@@ -60,43 +68,44 @@ function validTextState(): IntakeState {
 }
 
 function awaitingResponse(): AwaitingClarificationResponse {
-  return {
-    case: {
-      activeClarification: null,
-      caseId: "case-intake-001",
-      claimPacket: null,
-      createdAt: "2026-07-14T12:00:00Z",
-      intakeSummary: null,
-      portalState: "draft",
-      redactedMetadata: {},
-      state: "awaiting_clarification",
-      updatedAt: "2026-07-14T12:00:01Z",
-      version: 4,
-    },
-    clarification: {
-      clarificationId: "clarification-001",
-      expectedVersion: 4,
-      field: "incident_time",
-      question: "What time did the staged incident happen?",
-      round: 1,
-    },
-    draftRevision: 4,
-    gateHistory: (["G0", "G1", "G2", "G3", "G4", "G5"] as const).map(
-      (gateId) => ({
-        contractVersion: "4.0.0" as const,
-        decidedAt: "2026-07-14T12:00:01Z",
-        deterministicPassed: gateId !== "G5",
-        evidenceRefs: [],
-        gateId,
-        modelBlocked: false,
-        passed: gateId !== "G5",
-        reasonCodes: gateId === "G5" ? (["G5_REQUIRED_FIELD_MISSING"] as const) : [],
-      }),
-    ),
-    phase: "awaiting_clarification",
-    portal: null,
-    requestId: "request-intake-001",
-  };
+  const body = structuredClone(CLARIFICATION_SNAPSHOT) as MutableRecord;
+  record(body.case).caseId = "case-intake-001";
+  record(body.case).version = 4;
+  record(body.claimPacket).caseId = "case-intake-001";
+  const claim = record(record(body.claimPacket).claim);
+  const readyClaim = record(record(structuredClone(READY_SNAPSHOT).claimPacket).claim);
+  claim.incidentDate = readyClaim.incidentDate;
+  claim.incidentTime = null;
+  claim.missingRequiredFields = ["incident_time"];
+  claim.fieldProvenance = array(readyClaim.fieldProvenance).filter(
+    (entry) => record(entry).field !== "incident_time",
+  );
+  const clarification = record(body.clarification);
+  clarification.caseId = "case-intake-001";
+  clarification.clarificationId = "clarification-001";
+  clarification.expectedVersion = 4;
+  clarification.field = "incident_time";
+  clarification.question = "Wann ereignete sich der Vorfall?";
+  body.requestId = "request-intake-001";
+  const parsed = parseWorkflowSnapshot(body, "case-intake-001");
+  if (!isInt002ClarificationSnapshot(parsed)) {
+    throw new Error("Expected canonical INT-002 clarification fixture");
+  }
+  return parsed;
+}
+
+function readyResponse(): ReadyToFillResponse {
+  const body = structuredClone(READY_SNAPSHOT) as MutableRecord;
+  record(body.case).caseId = "case-intake-001";
+  record(body.case).version = 5;
+  record(body.case).updatedAt = "2026-07-14T12:00:21Z";
+  record(body.claimPacket).caseId = "case-intake-001";
+  body.requestId = "request-ready-intake-001";
+  const parsed = parseWorkflowSnapshot(body, "case-intake-001");
+  if (!isWorkflowSnapshotState(parsed, "ready_to_fill")) {
+    throw new Error("Expected canonical ready fixture");
+  }
+  return parsed;
 }
 
 describe("intake reducer authority and validation", () => {
@@ -355,6 +364,80 @@ describe("intake reducer authority and validation", () => {
     expect(intakeReducer(answering, { type: "RESET" })).toBe(answering);
   });
 
+  it("processes clarification success before run start and keeps READY for run-only retry", () => {
+    const intakeRequest = intakeReducer(validTextState(), {
+      kind: "intake",
+      token: 30,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    const owned = intakeReducer(intakeRequest, {
+      caseId: "case-intake-001",
+      token: 30,
+      type: "SERVER_CASE_CREATED",
+    });
+    const clarified = intakeReducer(owned, {
+      response: awaitingResponse(),
+      token: 30,
+      type: "SERVER_SUCCEEDED",
+    });
+    const answering = intakeReducer(clarified, {
+      kind: "clarification",
+      token: 31,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+
+    const ready = intakeReducer(answering, {
+      response: readyResponse(),
+      token: 31,
+      type: "SERVER_SUCCEEDED",
+    });
+    expect(ready.stage).toBe("ready_to_fill");
+    expect(ready.serverAuthority?.case.state).toBe("ready_to_fill");
+    expect(ready.serverRequest).toBeNull();
+
+    const running = intakeReducer(ready, {
+      kind: "run",
+      token: 32,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    expect(running.serverRequest?.kind).toBe("run");
+
+    const failedRun = intakeReducer(running, {
+      code: "PORTAL_RUN_FAILED",
+      currentVersion: 5,
+      errors: [],
+      message: "Portal run stopped.",
+      reasonCodes: ["G6_STATE_INVALID"],
+      token: 32,
+      type: "SERVER_FAILED",
+    });
+    expect(failedRun.stage).toBe("ready_to_fill");
+    expect(failedRun.serverAuthority?.case.state).toBe("ready_to_fill");
+    expect(failedRun.serverError?.code).toBe("PORTAL_RUN_FAILED");
+
+    const retry = intakeReducer(failedRun, {
+      kind: "run",
+      token: 33,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    expect(retry.serverRequest?.kind).toBe("run");
+    expect(retry.serverRequest?.token).toBe(33);
+
+    const duplicateAnswer = intakeReducer(failedRun, {
+      kind: "clarification",
+      token: 33,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    expect(duplicateAnswer).toBe(failedRun);
+
+    const staleClarification = intakeReducer(retry, {
+      response: readyResponse(),
+      token: 31,
+      type: "SERVER_SUCCEEDED",
+    });
+    expect(staleClarification).toBe(retry);
+  });
+
   it("treats an in-flight image check as pending, not as a fabricated type failure", () => {
     const valid = validTextState();
     const pending: IntakeState = {
@@ -441,3 +524,17 @@ describe("intake reducer authority and validation", () => {
     );
   });
 });
+
+type MutableRecord = Record<string, unknown>;
+
+function record(value: unknown): MutableRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Expected test record");
+  }
+  return value as MutableRecord;
+}
+
+function array(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error("Expected test array");
+  return value;
+}

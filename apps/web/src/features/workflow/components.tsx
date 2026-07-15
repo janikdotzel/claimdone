@@ -150,6 +150,8 @@ export function SplitViewShell({
 
       <HumanApprovalBoundary state={state} />
 
+      <DeterministicGateTrail snapshot={snapshot} />
+
       {snapshot.clarification !== null ? (
         <ClarificationPanel
           clarification={snapshot.clarification}
@@ -196,6 +198,42 @@ export function SplitViewShell({
         </aside>
       </div>
     </div>
+  );
+}
+
+function DeterministicGateTrail({
+  snapshot,
+}: {
+  readonly snapshot: WorkflowSnapshot;
+}) {
+  const headingId = useId();
+  const gates = snapshot.claimPacket?.gateDecisions ?? [];
+  if (gates.length === 0) return null;
+  return (
+    <section className={styles.panel} aria-labelledby={headingId}>
+      <div className={styles.sectionHeading}>
+        <div>
+          <p className={styles.eyebrow}>Deterministic authority</p>
+          <h2 id={headingId}>Gate trail</h2>
+        </div>
+        <span className={styles.countBadge}>{gates.length} gates</span>
+      </div>
+      <ol className={styles.eventList} aria-label="Deterministic gate trail">
+        {gates.map((gate) => (
+          <li
+            className={gate.passed ? styles.event_success : styles.event_blocked}
+            key={gate.gateId}
+          >
+            <span className={styles.eventCursor}>{gate.gateId}</span>
+            <span>
+              {gate.passed
+                ? "Passed deterministically"
+                : gate.reasonCodes.map((reason) => gateReasonLabel(reason)).join("; ")}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 

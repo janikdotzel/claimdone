@@ -21,6 +21,7 @@ import {
   INITIAL_WORKFLOW_EVENT_STORE,
   reduceWorkflowEventStore,
 } from "../src/features/workflow/store";
+import { parseWorkflowSnapshot } from "../src/features/workflow/validation";
 
 const EVENT_SUMMARIES = SHOWCASE_EVENTS.reduce(
   (store, envelope) =>
@@ -148,6 +149,36 @@ describe("accessible workflow experience", () => {
     expect(repair).not.toContain("verification-repairable");
     expect(repair).not.toContain("Different staged location");
     expect(repair).not.toContain("prov-statement");
+  });
+
+  it("renders the final INT-002 review with G0-G8, two attempts, and no approval", () => {
+    const body = structuredClone(REPAIR_SNAPSHOT) as Record<string, unknown>;
+    const caseView = body.case as Record<string, unknown>;
+    const packet = body.claimPacket as Record<string, unknown>;
+    caseView.state = "review";
+    caseView.version = 12;
+    caseView.updatedAt = "2026-07-14T12:00:22Z";
+    packet.state = "review";
+    body.requestId = "request-review-int002";
+    const snapshot = parseWorkflowSnapshot(body, "case-happy-001");
+
+    const html = renderToStaticMarkup(
+      <WorkflowExperience mode="ready" snapshot={snapshot} />,
+    );
+
+    expect(html).toContain("Verified review ready");
+    expect(html).toContain("Gate trail");
+    for (const gateId of ["G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"]) {
+      expect(html).toContain(`>${gateId}<`);
+    }
+    expect(html).toContain("9 gates");
+    expect(html).toContain("Attempt 1");
+    expect(html).toContain("Attempt 2");
+    expect(html).toContain("One narrow repair authorized");
+    expect(html).toContain("Authorized repair used");
+    expect(html).toContain("Not submitted / human approval required");
+    expect(html).not.toContain("Human approval recorded");
+    expect(html).not.toContain("Redacted sandbox receipt");
   });
 
   it("shows a final deterministic G8 mismatch without inventing repair authority", () => {

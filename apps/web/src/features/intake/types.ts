@@ -45,9 +45,10 @@ export type IntakeStage =
   | "disclosure"
   | "intake"
   | "awaiting_clarification"
+  | "ready_to_fill"
   | "review";
 
-export type ServerRequestKind = "intake" | "clarification";
+export type ServerRequestKind = "intake" | "clarification" | "run";
 
 export type ServerRequest = Readonly<{
   inputRevision: number;

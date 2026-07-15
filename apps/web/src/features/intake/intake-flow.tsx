@@ -37,7 +37,7 @@ import {
   MAX_IMAGE_BYTES,
   PreviewUrlRegistry,
   REQUIRED_IMAGE_COUNT,
-  answerClarification,
+  answerThenRunToReview,
   createAndSubmitIntake,
   deleteAuthoritativeCase,
   evaluateIntakeGates,
@@ -46,13 +46,27 @@ import {
   inspectAudioDuration,
   inspectImageFile,
   intakeReducer,
+  isInt002ClarificationSnapshot,
+  isWorkflowSnapshotState,
   isWavFile,
   isSupportedImageMime,
+  portalAReviewUrl,
+  runClaimToReview,
   validateAudioDuration,
   type BackendValidationError,
+  type AwaitingClarificationResponse,
+  type IntakeFlowResponse,
   type IntakeImage,
+  type ReadyToFillResponse,
+  type ReviewResponse,
   type StatementMode,
 } from ".";
+import {
+  createWorkflowReadTransport,
+  INITIAL_WORKFLOW_EVENT_STORE,
+  reduceWorkflowEventStore,
+  WorkflowExperience,
+} from "../workflow";
 
 const intakeSteps = [
   {
@@ -111,11 +125,11 @@ function FieldErrorList({
   );
 }
 
-export function MockDraftNotice() {
+export function DemoAnalysisNotice() {
   return (
-    <Alert title="No live AI extraction in this walking skeleton" tone="warning">
-      Your statement is retained as evidence and safety-checked. Portal A receives a
-      fixed, versioned synthetic fixture draft—not claim facts inferred from your text.
+    <Alert title="Deterministic INT-002 demo analysis" tone="warning">
+      Your staged evidence is retained as evidence and processed by the bounded local
+      demo workflow. External provider calls remain disabled for this V1 path.
     </Alert>
   );
 }
@@ -140,7 +154,7 @@ function disclosureView({
           ClaimDone prepares a staged draft. It does not contact an insurer, submit a
           claim, approve a payment, or perform a real-world action.
         </Alert>
-        <MockDraftNotice />
+        <DemoAnalysisNotice />
         <div className="disclosure-grid">
           <div>
             <h3>What happens here</h3>
@@ -219,7 +233,7 @@ export function ClarificationCard({
           <CardTitle id="clarification-title">One detail is still required</CardTitle>
           <p className="card__description">
             The authoritative server gates stopped before portal fill. Answer this one
-            question to trigger a full deterministic G0–G5 rerun.
+            question to recompute only G4 and G5 before the separate portal run.
           </p>
         </CardHeader>
         <CardContent className="stack stack--medium">
@@ -233,7 +247,8 @@ export function ClarificationCard({
               </label>
             </div>
             <p className="field__description" id="clarification-time-help">
-              Use 24-hour time in HH:MM format. Press Enter to continue.
+              Use 24-hour time in exact HH:MM:SS format, for example 14:30:00. Press
+              Enter to continue.
             </p>
             <input
               aria-describedby={
@@ -249,7 +264,7 @@ export function ClarificationCard({
               onChange={(event) => onAnswerChange(event.currentTarget.value)}
               ref={inputRef}
               required
-              step={60}
+              step={1}
               type="time"
               value={value}
             />
@@ -269,7 +284,7 @@ export function ClarificationCard({
             leadingIcon={<ArrowRightIcon />}
             type="submit"
           >
-            {busy ? "Checking and filling Portal A…" : "Answer and continue"}
+            {busy ? "Answering and running verified Portal A…" : "Answer and continue"}
           </Button>
           <Button
             disabled={busy || resetting}
@@ -304,6 +319,13 @@ export function IntakeFlow({
   const [clarificationError, setClarificationError] = useState<string | null>(null);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
   const [isResetting, setIsResetting] = useState(false);
+  const [workflowStore, dispatchWorkflowStore] = useReducer(
+    reduceWorkflowEventStore,
+    INITIAL_WORKFLOW_EVENT_STORE,
+  );
+  const workflowTransport = useMemo(() => createWorkflowReadTransport(), []);
+  const workflowStoreRef = useRef(workflowStore);
+  const nextWorkflowSnapshotToken = useRef(0);
   const previewRegistry = useRef<PreviewUrlRegistry | null>(null);
   const activeAudioPreview = useRef<string | null>(null);
   const audioSourceFile = useRef<File | null>(null);
@@ -314,6 +336,63 @@ export function IntakeFlow({
   const cleanupErrorRef = useRef<HTMLDivElement>(null);
   const serverErrorRef = useRef<HTMLDivElement>(null);
   const gateResult = useMemo(() => evaluateIntakeGates(state), [state]);
+
+  useEffect(() => {
+    workflowStoreRef.current = workflowStore;
+  }, [workflowStore]);
+
+  const recordAuthoritativeSnapshot = useCallback(
+    (snapshot: IntakeFlowResponse) => {
+      const current = workflowStoreRef.current;
+      const requestToken = ++nextWorkflowSnapshotToken.current;
+      dispatchWorkflowStore({
+        caseId: snapshot.case.caseId,
+        refreshGeneration: current.refreshGeneration,
+        requestToken,
+        type: "SNAPSHOT_REQUESTED",
+      });
+      dispatchWorkflowStore({
+        refreshGeneration: current.refreshGeneration,
+        requestToken,
+        snapshot,
+        type: "SNAPSHOT_RECEIVED",
+      });
+    },
+    [],
+  );
+
+  const authoritativeCaseId = state.serverAuthority?.case.caseId ?? null;
+  useEffect(() => {
+    if (authoritativeCaseId === null) return;
+    const current = workflowStoreRef.current;
+    const afterCursor =
+      current.activeCaseId === authoritativeCaseId ? current.lastCursor : null;
+    try {
+      const subscription = workflowTransport.subscribeEvents(
+        authoritativeCaseId,
+        afterCursor,
+        {
+          onEnvelope: (envelope) =>
+            dispatchWorkflowStore({ envelope, type: "EVENT_RECEIVED" }),
+          onFailure: (error) =>
+            dispatchWorkflowStore({
+              message: error.message,
+              type: "STREAM_FAILED",
+            }),
+        },
+      );
+      return () => subscription.close();
+    } catch (error) {
+      dispatchWorkflowStore({
+        message:
+          error instanceof Error
+            ? error.message
+            : "The redacted workflow event stream is unavailable.",
+        type: "STREAM_FAILED",
+      });
+      return;
+    }
+  }, [authoritativeCaseId, workflowTransport]);
 
   const registerPreview = useCallback((file: File) => {
     previewRegistry.current ??= new PreviewUrlRegistry({
@@ -675,6 +754,7 @@ export function IntakeFlow({
       );
     })()
       .then((response) => {
+        recordAuthoritativeSnapshot(response);
         dispatch({ response, token, type: "SERVER_SUCCEEDED" });
       })
       .catch((error: unknown) => {
@@ -698,29 +778,75 @@ export function IntakeFlow({
       });
   };
 
+  const beginRun = (
+    authority: ReadyToFillResponse,
+  ) => {
+    const token = ++nextRequestToken.current;
+    requestPendingRef.current = true;
+    dispatch({ kind: "run", token, type: "BEGIN_SERVER_REQUEST" });
+    void runClaimToReview(
+      authority.case.caseId,
+      authority.case.version,
+    )
+      .then((response) => {
+        recordAuthoritativeSnapshot(response);
+        dispatch({ response, token, type: "SERVER_SUCCEEDED" });
+      })
+      .catch((error: unknown) => dispatchServerError(token, error));
+  };
+
+  const retryRun = () => {
+    if (requestPendingRef.current) return;
+    const authority = state.serverAuthority;
+    if (!isWorkflowSnapshotState(authority, "ready_to_fill")) return;
+    beginRun(authority);
+  };
+
   const submitClarification = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (requestPendingRef.current) return;
     const authority = state.serverAuthority;
-    if (authority?.phase !== "awaiting_clarification") return;
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(clarificationAnswer)) {
-      setClarificationError("Enter a valid 24-hour time in HH:MM format.");
+    if (!isInt002ClarificationSnapshot(authority)) return;
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(clarificationAnswer)) {
+      setClarificationError(
+        "Enter a valid 24-hour time in exact HH:MM:SS format.",
+      );
       return;
     }
     setClarificationError(null);
     const token = ++nextRequestToken.current;
     requestPendingRef.current = true;
     dispatch({ kind: "clarification", token, type: "BEGIN_SERVER_REQUEST" });
-    void answerClarification(
-      authority.case.caseId,
-      authority.clarification.clarificationId,
-      authority.clarification.expectedVersion,
-      clarificationAnswer,
+    let runToken: number | null = null;
+    void answerThenRunToReview(
+      {
+        answer: clarificationAnswer,
+        caseId: authority.case.caseId,
+        clarificationId: authority.clarification.clarificationId,
+        contractVersion: "4.0.0",
+        expectedVersion: authority.clarification.expectedVersion,
+        field: authority.clarification.field,
+        round: authority.clarification.round,
+      },
+      {
+        onReady: (response) => {
+          recordAuthoritativeSnapshot(response);
+          dispatch({ response, token, type: "SERVER_SUCCEEDED" });
+          runToken = ++nextRequestToken.current;
+          requestPendingRef.current = true;
+          dispatch({ kind: "run", token: runToken, type: "BEGIN_SERVER_REQUEST" });
+        },
+      },
     )
       .then((response) => {
-        dispatch({ response, token, type: "SERVER_SUCCEEDED" });
+        recordAuthoritativeSnapshot(response);
+        if (runToken !== null) {
+          dispatch({ response, token: runToken, type: "SERVER_SUCCEEDED" });
+        }
       })
-      .catch((error: unknown) => dispatchServerError(token, error));
+      .catch((error: unknown) =>
+        dispatchServerError(runToken ?? token, error),
+      );
   };
 
   const imageSectionError =
@@ -738,10 +864,10 @@ export function IntakeFlow({
         : state.stage === "awaiting_clarification"
           ? 2
           : 3;
-  const authoritativeG0 = state.serverAuthority?.gateHistory.find(
+  const authoritativeG0 = state.serverAuthority?.claimPacket?.gateDecisions.find(
     (decision) => decision.gateId === "G0",
   );
-  const authoritativeG1 = state.serverAuthority?.gateHistory.find(
+  const authoritativeG1 = state.serverAuthority?.claimPacket?.gateDecisions.find(
     (decision) => decision.gateId === "G1",
   );
   const g0Status = authoritativeG0?.passed ? "passed" : "pending";
@@ -773,6 +899,22 @@ export function IntakeFlow({
   const generalBackendErrors = backendErrorEntries
     .filter(([field]) => !knownBackendFields.has(field))
     .map(([, message]) => message);
+  const clarificationAuthority: AwaitingClarificationResponse | null =
+    isInt002ClarificationSnapshot(state.serverAuthority)
+      ? state.serverAuthority
+      : null;
+  const readyAuthority: ReadyToFillResponse | null = isWorkflowSnapshotState(
+    state.serverAuthority,
+    "ready_to_fill",
+  )
+    ? state.serverAuthority
+    : null;
+  const reviewAuthority: ReviewResponse | null = isWorkflowSnapshotState(
+    state.serverAuthority,
+    "review",
+  )
+    ? state.serverAuthority
+    : null;
 
   return (
     <PageShell
@@ -804,7 +946,7 @@ export function IntakeFlow({
                 label="Privacy"
                 reason={
                   authoritativeG1?.passed
-                    ? `Confirmed at case version ${state.serverAuthority?.draftRevision ?? ""}`
+                    ? `Confirmed at case version ${state.serverAuthority?.case.version ?? ""}`
                     : gateResult.g1.reasonCodes
                         .map((code) => gateReasonLabels[code] ?? code)
                         .join("; ") ||
@@ -1079,7 +1221,7 @@ export function IntakeFlow({
                 <CardTitle id="statement-title">Use written text or one audio memo</CardTitle>
               </CardHeader>
               <CardContent className="stack stack--medium">
-                <MockDraftNotice />
+                <DemoAnalysisNotice />
                 <FieldErrorList
                   errors={statementBackendErrors}
                   label="The server rejected the statement:"
@@ -1227,9 +1369,9 @@ export function IntakeFlow({
                 />
               </CardContent>
               <CardFooter className="analysis-footer">
-                <p className="mock-analysis-note" id="mock-analysis-notice">
-                  This runs deterministic gates and prepares the fixed synthetic mock
-                  draft. It does not extract claim fields from your statement.
+                <p className="analysis-note" id="analysis-notice">
+                  This runs the bounded local INT-002 analysis and deterministic gates.
+                  External provider calls remain disabled for this V1 path.
                 </p>
                 <div aria-live="polite" className="gate-summary">
                   <span>
@@ -1240,20 +1382,20 @@ export function IntakeFlow({
                   </span>
                 </div>
                 <Button
-                  aria-describedby="mock-analysis-notice continue-requirements"
+                  aria-describedby="analysis-notice continue-requirements"
                   disabled={!gateResult.canContinue || state.serverRequest !== null}
                   leadingIcon={<ArrowRightIcon />}
                   type="submit"
                 >
                   {state.serverRequest?.kind === "intake"
-                    ? "Running gates and mock draft…"
+                    ? "Running deterministic intake analysis…"
                     : state.serverError === null
-                      ? "Create fixed mock draft"
-                      : "Retry mock flow"}
+                      ? "Analyze staged claim"
+                      : "Retry intake analysis"}
                 </Button>
                 <span className="visually-hidden" id="continue-requirements">
                   Continue is available only after deterministic G0 and G1 preflight
-                  checks pass. No live AI extraction runs in this build.
+                  checks pass. The canonical server snapshot remains authoritative.
                 </span>
               </CardFooter>
             </Card>
@@ -1262,10 +1404,10 @@ export function IntakeFlow({
         ) : null}
 
         {state.stage === "awaiting_clarification" &&
-        state.serverAuthority?.phase === "awaiting_clarification" ? (
+        clarificationAuthority !== null ? (
           <ClarificationCard
             busy={state.serverRequest?.kind === "clarification"}
-            clarification={state.serverAuthority.clarification}
+            clarification={clarificationAuthority.clarification}
             error={clarificationError ?? state.serverError?.message ?? null}
             onAnswerChange={(value) => {
               setClarificationAnswer(value);
@@ -1278,48 +1420,119 @@ export function IntakeFlow({
           />
         ) : null}
 
-        {state.stage === "review" && state.serverAuthority?.phase === "review" ? (
+        {state.stage === "ready_to_fill" &&
+        readyAuthority !== null ? (
           <div className="stack stack--medium">
             <StateView
-              description="The server reran G0–G5, filled Sandbox Portal A, and moved the portal to read-only review. Verification remains pending; no approval or submission occurred."
-              title="Portal A is ready for human review"
+              description="The exact clarification answer was committed once and only G4/G5 were recomputed. The separate, version-bound Portal A run is still required."
+              title="Claim data is ready for the portal run"
               variant="success"
             />
-            <Alert title="Human boundary preserved" tone="warning">
-              Verification state is pending. ClaimDone stopped in backend state verifying and
-              portal state review; the agent cannot approve or submit this sandbox claim.
-            </Alert>
+            {state.serverError !== null ? (
+              <Alert title="Portal A run did not complete" tone="warning">
+                {state.serverError.message} The clarification will not be sent again;
+                retry calls only the version-bound run endpoint.
+              </Alert>
+            ) : null}
             <Card>
               <CardContent className="ready-summary server-review-summary">
                 <div>
                   <span>Case</span>
-                  <strong>{state.serverAuthority.case.caseId}</strong>
+                  <strong>{readyAuthority.case.caseId}</strong>
+                </div>
+                <div>
+                  <span>Ready version</span>
+                  <strong>{readyAuthority.case.version}</strong>
+                </div>
+                <div>
+                  <span>Next authority call</span>
+                  <strong>POST /run only</strong>
+                </div>
+              </CardContent>
+              <CardFooter>
+                <Button
+                  disabled={state.serverRequest?.kind === "run" || isResetting}
+                  onClick={retryRun}
+                >
+                  {state.serverRequest?.kind === "run"
+                    ? "Running Portal A and verification…"
+                    : state.serverError === null
+                      ? "Run Portal A"
+                      : "Retry Portal A run"}
+                </Button>
+                <Button
+                  disabled={isResetting || state.serverRequest !== null}
+                  onClick={reset}
+                  variant="secondary"
+                >
+                  {isResetting ? "Deleting server case…" : "Start over"}
+                </Button>
+              </CardFooter>
+            </Card>
+          </div>
+        ) : null}
+
+        {state.stage === "review" &&
+        reviewAuthority !== null ? (
+          <div className="stack stack--medium">
+            <StateView
+              description="Deterministic G0–G8 passed. The first rendered-field check found one bounded fault, one narrow repair was applied, and the second verification attempt passed reproducibly."
+              title="Verified Portal A review is ready"
+              variant="success"
+            />
+            <Alert title="Human boundary preserved" tone="warning">
+              ClaimDone stopped in backend state review after verification. The agent
+              cannot approve or submit this sandbox claim, and no receipt exists.
+            </Alert>
+            {workflowStore.failedClosed === null ? null : (
+              <Alert title="Redacted activity stream unavailable" tone="warning">
+                {workflowStore.failedClosed} The canonical review snapshot below remains
+                the only product authority.
+              </Alert>
+            )}
+            <WorkflowExperience
+              events={workflowStore.events}
+              mode="ready"
+              snapshot={reviewAuthority}
+            />
+            <Card>
+              <CardContent className="ready-summary server-review-summary">
+                <div>
+                  <span>Case</span>
+                  <strong>{reviewAuthority.case.caseId}</strong>
                 </div>
                 <div>
                   <span>Authoritative revision</span>
-                  <strong>{state.serverAuthority.draftRevision}</strong>
+                  <strong>{reviewAuthority.case.version}</strong>
                 </div>
                 <div>
                   <span>Server request</span>
-                  <strong>{state.serverAuthority.requestId}</strong>
+                  <strong>{reviewAuthority.requestId}</strong>
                 </div>
                 <div>
-                  <span>Gate history</span>
-                  <strong>{state.serverAuthority.gateHistory.map(({ gateId }) => gateId).join(" → ")}</strong>
+                  <span>Deterministic gates</span>
+                  <strong>
+                    {reviewAuthority.claimPacket.gateDecisions
+                      .map(({ gateId }) => gateId)
+                      .join(" → ")}
+                  </strong>
                 </div>
                 <div>
                   <span>Portal state</span>
-                  <strong>{state.serverAuthority.case.portalState}</strong>
+                  <strong>{reviewAuthority.portalSession.state}</strong>
                 </div>
                 <div>
                   <span>Verification</span>
-                  <strong>{state.serverAuthority.portal.verificationState}</strong>
+                  <strong>
+                    {reviewAuthority.verificationAttempts.attempts.length} attempts ·
+                    verified
+                  </strong>
                 </div>
               </CardContent>
               <CardFooter>
                 <a
                   className="button button--primary"
-                  href={state.serverAuthority.portal.reviewUrl}
+                  href={portalAReviewUrl(reviewAuthority.case.caseId)}
                   rel="noopener noreferrer"
                   target="_blank"
                 >

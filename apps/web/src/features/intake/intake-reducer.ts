@@ -353,7 +353,14 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
       if (
         action.kind === "clarification" &&
         (state.stage !== "awaiting_clarification" ||
-          state.serverAuthority?.phase !== "awaiting_clarification")
+          state.serverAuthority?.case.state !== "awaiting_clarification")
+      ) {
+        return state;
+      }
+      if (
+        action.kind === "run" &&
+        (state.stage !== "ready_to_fill" ||
+          state.serverAuthority?.case.state !== "ready_to_fill")
       ) {
         return state;
       }
@@ -389,11 +396,14 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
         request === null ||
         request.token !== action.token ||
         request.inputRevision !== state.inputRevision ||
-        (request.kind === "intake" && action.response.phase !== "awaiting_clarification") ||
-        (request.kind === "clarification" && action.response.phase !== "review") ||
+        (request.kind === "intake" &&
+          action.response.case.state !== "awaiting_clarification") ||
+        (request.kind === "clarification" &&
+          action.response.case.state !== "ready_to_fill") ||
+        (request.kind === "run" && action.response.case.state !== "review") ||
         (request.kind === "intake" &&
           state.pendingCaseId !== action.response.case.caseId) ||
-        (request.kind === "clarification" &&
+        (request.kind !== "intake" &&
           state.serverAuthority?.case.caseId !== action.response.case.caseId)
       ) {
         return state;
@@ -405,7 +415,7 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
         serverAuthority: action.response,
         serverError: null,
         serverRequest: null,
-        stage: action.response.phase,
+        stage: action.response.case.state,
       };
     }
 

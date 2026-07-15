@@ -1,170 +1,81 @@
 import type {
   CaseState,
-  GateDecision,
-  GateId,
+  ClarificationAnswerRequest,
   GateReasonCode,
-  PortalState,
-  RequiredClaimField,
+  WorkflowSnapshot,
 } from "../../../../../contracts/generated/claimdone";
+
+import {
+  isKnownGateReasonCode,
+  parseWorkflowSnapshot,
+  validateGateDecisionBoundary,
+  WorkflowPayloadError,
+} from "../workflow/validation";
 
 export const DEFAULT_CLAIMDONE_API_ORIGIN = "http://127.0.0.1:8000";
 export const DEFAULT_CLAIMDONE_PORTAL_ORIGIN = "http://127.0.0.1:3000";
 
-const FLOW_GATE_IDS = ["G0", "G1", "G2", "G3", "G4", "G5"] as const;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const WIRE_AWARE_DATETIME_PATTERN =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
-const GATE_DECISION_KEYS = [
-  "contractVersion",
-  "decidedAt",
-  "deterministicPassed",
-  "evidenceRefs",
-  "gateId",
-  "modelBlocked",
-  "passed",
-  "reasonCodes",
-] as const;
+const INCIDENT_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/;
+const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
+const UNSAFE_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const INT002_CREATED_VERSION = 1;
+const INT002_CLARIFICATION_VERSION = 4;
+const INT002_READY_VERSION = 5;
+const INT002_REVIEW_VERSION = 9;
 
-const GATE_REASON_CODES_BY_GATE = {
-  G0: [
-    "G0_IMAGE_COUNT_INVALID",
-    "G0_IMAGE_TYPE_INVALID",
-    "G0_IMAGE_TOO_LARGE",
-    "G0_INPUT_MODE_INVALID",
-    "G0_AUDIO_TOO_LONG",
-    "G0_CONSENT_MISSING",
-  ],
-  G1: [
-    "G1_EXIF_UNREVIEWED",
-    "G1_MODEL_COPY_NOT_APPROVED",
-    "G1_SENSITIVE_LOG_DATA",
-  ],
-  G2: [
-    "G2_SCHEMA_INVALID",
-    "G2_REFUSAL",
-    "G2_OUTPUT_TRUNCATED",
-    "G2_REFERENCE_MISSING",
-    "G2_RETRY_EXHAUSTED",
-  ],
-  G3: [
-    "G3_INJURY_OR_EMERGENCY",
-    "G3_REAL_PORTAL",
-    "G3_LEGAL_OR_LIABILITY",
-    "G3_PAYMENT_OR_COVERAGE",
-    "G3_SUBMISSION_ACTION",
-    "G3_MODEL_UNCERTAIN",
-  ],
-  G4: [
-    "G4_PROVENANCE_MISSING",
-    "G4_SENSITIVE_IMAGE_INFERENCE",
-    "G4_FACT_NOT_WRITABLE",
-    "G4_CONFIDENCE_BELOW_THRESHOLD",
-    "G4_CONFLICTING_SOURCES",
-    "G4_NARRATIVE_UNSUPPORTED",
-  ],
-  G5: [
-    "G5_REQUIRED_FIELD_MISSING",
-    "G5_QUESTION_INVALID",
-    "G5_CLARIFICATION_LIMIT",
-  ],
-  G6: [
-    "G6_TOOL_UNKNOWN",
-    "G6_ARGUMENTS_INVALID",
-    "G6_STATE_INVALID",
-    "G6_URL_NOT_ALLOWED",
-    "G6_LIMIT_EXCEEDED",
-    "G6_FORBIDDEN_ACTION",
-  ],
-  G7: [
-    "G7_FIELD_NOT_ALLOWED",
-    "G7_VALUE_NOT_FROM_PACKET",
-    "G7_PROVENANCE_MISSING",
-    "G7_FIELD_NOT_EDITABLE",
-    "G7_ATTACHMENT_MISMATCH",
-  ],
-  G8: [
-    "G8_FIELD_MISMATCH",
-    "G8_ATTACHMENT_MISMATCH",
-    "G8_REQUIRED_FIELD_MISSING",
-    "G8_MODEL_MISMATCH",
-  ],
-  G9: ["G9_AGENT_FORBIDDEN", "G9_ROLE_INVALID", "G9_TOKEN_INVALID"],
-  G10: ["G10_BEFORE_APPROVAL", "G10_REDACTION_FAILED"],
-  G11: [
-    "G11_DETERMINISTIC_TESTS_FAILED",
-    "G11_SAFETY_EVAL_FAILED",
-    "G11_THRESHOLD_FAILED",
-    "G11_PORTAL_SUCCESS_FAILED",
-    "G11_APPROVAL_ATTACK_FAILED",
-    "G11_CLEAN_CHECKOUT_FAILED",
-    "G11_DOCUMENTATION_MISSING",
-    "G11_LICENSE_MISSING",
-    "G11_FIXTURES_MISSING",
-    "G11_TEST_REPORT_MISSING",
-    "G11_HUMAN_CHECKPOINT_MISSING",
-  ],
-} as const satisfies Readonly<Record<GateId, readonly GateReasonCode[]>>;
+export type CreatedSnapshot = Extract<
+  WorkflowSnapshot,
+  { readonly case: { readonly state: "created" } }
+>;
+export type AwaitingClarificationResponse = Extract<
+  WorkflowSnapshot,
+  { readonly case: { readonly state: "awaiting_clarification" } }
+> & {
+  readonly clarification: Extract<
+    NonNullable<WorkflowSnapshot["clarification"]>,
+    object
+  > & {
+    readonly field: "incident_time";
+    readonly round: 1;
+  };
+};
+export type ReadyToFillResponse = Extract<
+  WorkflowSnapshot,
+  { readonly case: { readonly state: "ready_to_fill" } }
+>;
+export type ReviewResponse = Extract<
+  WorkflowSnapshot,
+  { readonly case: { readonly state: "review" } }
+>;
+export type IntakeFlowResponse =
+  | AwaitingClarificationResponse
+  | ReadyToFillResponse
+  | ReviewResponse;
 
-type ListedGateReasonCode =
-  (typeof GATE_REASON_CODES_BY_GATE)[keyof typeof GATE_REASON_CODES_BY_GATE][number];
-const ALL_GATE_REASON_CODES_ARE_LISTED: Exclude<
-  GateReasonCode,
-  ListedGateReasonCode
-> extends never
-  ? true
-  : never = true;
-const GATE_REASON_CODE_SET = new Set<GateReasonCode>(
-  Object.values(GATE_REASON_CODES_BY_GATE).flat(),
-);
-void ALL_GATE_REASON_CODES_ARE_LISTED;
+type SnapshotForState<State extends CaseState> = Extract<
+  WorkflowSnapshot,
+  { readonly case: { readonly state: State } }
+>;
 
-export interface CaseView {
-  readonly activeClarification: Readonly<Record<string, unknown>> | null;
-  readonly caseId: string;
-  readonly claimPacket: Readonly<Record<string, unknown>> | null;
-  readonly createdAt: string;
-  readonly intakeSummary: Readonly<Record<string, unknown>> | null;
-  readonly portalState: PortalState;
-  readonly redactedMetadata: Readonly<Record<string, string>>;
-  readonly state: CaseState;
-  readonly updatedAt: string;
-  readonly version: number;
+export function isWorkflowSnapshotState<State extends CaseState>(
+  snapshot: WorkflowSnapshot | null,
+  state: State,
+): snapshot is SnapshotForState<State> {
+  return snapshot?.case.state === state;
 }
 
-export interface ClarificationView {
-  readonly clarificationId: string;
-  readonly expectedVersion: number;
-  readonly field: "incident_time";
-  readonly question: string;
-  readonly round?: number;
+export function isInt002ClarificationSnapshot(
+  snapshot: WorkflowSnapshot | null,
+): snapshot is AwaitingClarificationResponse {
+  return (
+    isWorkflowSnapshotState(snapshot, "awaiting_clarification") &&
+    snapshot.case.version === INT002_CLARIFICATION_VERSION &&
+    snapshot.clarification.field === "incident_time" &&
+    snapshot.clarification.round === 1 &&
+    snapshot.clarification.expectedVersion === snapshot.case.version
+  );
 }
-
-export interface PortalReviewView {
-  readonly renderedValues: Readonly<Record<string, unknown>>;
-  readonly reviewUrl: string;
-  readonly verificationState: "pending";
-}
-
-interface FlowResponseBase {
-  readonly case: CaseView;
-  readonly draftRevision: number;
-  readonly gateHistory: readonly GateDecision[];
-  readonly requestId: string;
-}
-
-export interface AwaitingClarificationResponse extends FlowResponseBase {
-  readonly clarification: ClarificationView;
-  readonly phase: "awaiting_clarification";
-  readonly portal: null;
-}
-
-export interface ReviewResponse extends FlowResponseBase {
-  readonly clarification: null;
-  readonly phase: "review";
-  readonly portal: PortalReviewView;
-}
-
-export type IntakeFlowResponse = AwaitingClarificationResponse | ReviewResponse;
 
 export interface IntakeSubmission {
   readonly audio: File | null;
@@ -225,36 +136,43 @@ export type ClaimDoneFetch = (
 ) => Promise<Response>;
 
 export function claimDoneApiOrigin(): string {
-  const configured = process.env.NEXT_PUBLIC_CLAIMDONE_API_ORIGIN;
   return normalizeConfiguredOrigin(
-    configured || DEFAULT_CLAIMDONE_API_ORIGIN,
+    process.env.NEXT_PUBLIC_CLAIMDONE_API_ORIGIN || DEFAULT_CLAIMDONE_API_ORIGIN,
     "API",
     DEFAULT_CLAIMDONE_API_ORIGIN,
   );
 }
 
 export function claimDonePortalOrigin(): string {
-  const configured = process.env.NEXT_PUBLIC_CLAIMDONE_PORTAL_ORIGIN;
   return normalizeConfiguredOrigin(
-    configured || DEFAULT_CLAIMDONE_PORTAL_ORIGIN,
+    process.env.NEXT_PUBLIC_CLAIMDONE_PORTAL_ORIGIN ||
+      DEFAULT_CLAIMDONE_PORTAL_ORIGIN,
     "portal",
     DEFAULT_CLAIMDONE_PORTAL_ORIGIN,
   );
 }
 
+export function portalAReviewUrl(caseId: string): string {
+  assertIdentifier(caseId, "caseId");
+  return `${claimDonePortalOrigin()}/sandbox/A/cases/${encodeURIComponent(caseId)}`;
+}
+
 export async function createCase(
   fetcher: ClaimDoneFetch = fetch,
-): Promise<CaseView> {
-  const body = await requestJson(
-    fetcher,
-    `${claimDoneApiOrigin()}/api/cases`,
-    {
-      body: JSON.stringify({ metadata: {} }),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-    },
-  );
-  return parseCaseView(body);
+): Promise<CreatedSnapshot> {
+  const body = await requestJson(fetcher, `${claimDoneApiOrigin()}/api/cases`, {
+    body: JSON.stringify({ metadata: {} }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const snapshot = parseMutationSnapshot(body);
+  if (
+    !isWorkflowSnapshotState(snapshot, "created") ||
+    snapshot.case.version !== INT002_CREATED_VERSION
+  ) {
+    throw invalidResponse("Case creation did not return the canonical created snapshot.");
+  }
+  return snapshot;
 }
 
 export async function createAndSubmitIntake(
@@ -263,21 +181,20 @@ export async function createAndSubmitIntake(
   lifecycle: IntakeCaseLifecycle = {},
 ): Promise<AwaitingClarificationResponse> {
   const created = await createCase(fetcher);
-  lifecycle.onCaseCreated?.(created.caseId);
+  lifecycle.onCaseCreated?.(created.case.caseId);
   try {
-    const response = await submitIntake(
-      created.caseId,
-      { ...submission, expectedVersion: created.version },
+    return await submitIntake(
+      created.case.caseId,
+      { ...submission, expectedVersion: created.case.version },
       fetcher,
     );
-    return response;
   } catch (primaryError) {
     try {
-      await deleteAuthoritativeCase(created.caseId, fetcher);
-      lifecycle.onCaseCleaned?.(created.caseId);
+      await deleteAuthoritativeCase(created.case.caseId, fetcher);
+      lifecycle.onCaseCleaned?.(created.case.caseId);
     } catch (cleanupError) {
       throw new ClaimDonePendingCleanupError(
-        created.caseId,
+        created.case.caseId,
         primaryError,
         cleanupError,
       );
@@ -291,32 +208,12 @@ export async function deleteCase(
   fetcher: ClaimDoneFetch = fetch,
 ): Promise<void> {
   assertIdentifier(caseId, "caseId");
-  let response: Response;
-  try {
-    response = await fetcher(
-      `${claimDoneApiOrigin()}/api/cases/${encodeURIComponent(caseId)}`,
-      { cache: "no-store", method: "DELETE" },
-    );
-  } catch {
-    throw new ClaimDoneApiError(
-      {
-        code: "CLIENT_NETWORK_ERROR",
-        currentVersion: null,
-        fieldErrors: [],
-        message: "The ClaimDone API could not be reached for cleanup.",
-        reasonCodes: [],
-      },
-      0,
-    );
-  }
-  if (response.ok) return;
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw invalidResponse("The ClaimDone API returned invalid cleanup JSON.", response.status);
-  }
-  throw parseErrorEnvelope(body, response.status);
+  await requestDelete(
+    fetcher,
+    `${claimDoneApiOrigin()}/api/cases/${encodeURIComponent(caseId)}`,
+    "The ClaimDone API could not be reached for cleanup.",
+    "The ClaimDone API returned invalid cleanup JSON.",
+  );
 }
 
 export async function deletePortalCase(
@@ -324,39 +221,22 @@ export async function deletePortalCase(
   fetcher: ClaimDoneFetch = fetch,
 ): Promise<void> {
   assertIdentifier(caseId, "caseId");
-  let response: Response;
-  try {
-    response = await fetcher(
-      `${claimDonePortalOrigin()}/api/sandbox/cases/${encodeURIComponent(caseId)}`,
-      { cache: "no-store", method: "DELETE" },
-    );
-  } catch {
-    throw new ClaimDoneApiError(
-      {
-        code: "CLIENT_NETWORK_ERROR",
-        currentVersion: null,
-        fieldErrors: [],
-        message: "The sandbox portal could not be reached for cleanup.",
-        reasonCodes: [],
-      },
-      0,
-    );
-  }
-  if (response.ok) return;
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw invalidResponse("The sandbox portal returned invalid cleanup JSON.", response.status);
-  }
-  throw parseErrorEnvelope(body, response.status);
+  await requestDelete(
+    fetcher,
+    `${claimDonePortalOrigin()}/api/sandbox/cases/${encodeURIComponent(caseId)}`,
+    "The sandbox portal could not be reached for cleanup.",
+    "The sandbox portal returned invalid cleanup JSON.",
+  );
 }
 
 export async function deleteAuthoritativeCase(
   caseId: string,
   fetcher: ClaimDoneFetch = fetch,
 ): Promise<void> {
-  await Promise.all([deleteCase(caseId, fetcher), deletePortalCase(caseId, fetcher)]);
+  // Portal cleanup is deliberately first and idempotent. If it fails, retain the
+  // backend case so the caller still owns an authoritative retry target.
+  await deletePortalCase(caseId, fetcher);
+  await deleteCase(caseId, fetcher);
 }
 
 export async function submitIntake(
@@ -365,20 +245,7 @@ export async function submitIntake(
   fetcher: ClaimDoneFetch = fetch,
 ): Promise<AwaitingClarificationResponse> {
   assertIdentifier(caseId, "caseId");
-  if (submission.images.length !== 3 || submission.exifDecisions.length !== 3) {
-    throw clientInputError("Exactly three images and EXIF decisions are required.");
-  }
-  if (!Number.isSafeInteger(submission.expectedVersion) || submission.expectedVersion < 1) {
-    throw clientInputError("The intake requires a valid case version.");
-  }
-  const hasText = submission.statementText !== null;
-  const hasAudio = submission.audio !== null;
-  if (hasText === hasAudio) {
-    throw clientInputError("Provide exactly one written statement or WAV audio memo.");
-  }
-  if (submission.audio !== null && !isWavFile(submission.audio)) {
-    throw clientInputError("Only WAV audio is supported in this build.");
-  }
+  validateIntakeSubmission(submission);
 
   const form = new FormData();
   form.append("expectedVersion", String(submission.expectedVersion));
@@ -400,42 +267,158 @@ export async function submitIntake(
     `${claimDoneApiOrigin()}/api/cases/${encodeURIComponent(caseId)}/intake`,
     { body: form, method: "POST" },
   );
-  const parsed = parseFlowResponse(body, caseId);
-  if (parsed.phase !== "awaiting_clarification") {
-    throw invalidResponse("Intake did not return the required clarification phase.");
+  const snapshot = parseMutationSnapshot(body, caseId);
+  if (
+    !isInt002ClarificationSnapshot(snapshot)
+  ) {
+    throw invalidResponse(
+      "Intake did not return the required version-bound incident_time clarification.",
+    );
   }
-  return parsed;
+  return snapshot;
 }
 
 export async function answerClarification(
-  caseId: string,
-  clarificationId: string,
-  expectedVersion: number,
-  answer: string,
+  request: ClarificationAnswerRequest,
   fetcher: ClaimDoneFetch = fetch,
-): Promise<ReviewResponse> {
-  assertIdentifier(caseId, "caseId");
-  assertIdentifier(clarificationId, "clarificationId");
-  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
-    throw clientInputError("The clarification requires a valid case version.");
-  }
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(answer)) {
-    throw clientInputError("Enter the incident time as HH:MM.");
-  }
+): Promise<ReadyToFillResponse> {
+  validateClarificationAnswerRequest(request);
   const body = await requestJson(
     fetcher,
-    `${claimDoneApiOrigin()}/api/cases/${encodeURIComponent(caseId)}/clarifications/${encodeURIComponent(clarificationId)}/answer`,
+    `${claimDoneApiOrigin()}/api/cases/${encodeURIComponent(request.caseId)}/clarifications/${encodeURIComponent(request.clarificationId)}/answer`,
     {
-      body: JSON.stringify({ answer, expectedVersion }),
+      body: JSON.stringify(request),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     },
   );
-  const parsed = parseFlowResponse(body, caseId);
-  if (parsed.phase !== "review") {
-    throw invalidResponse("Clarification did not return the required review phase.");
+  const snapshot = parseMutationSnapshot(body, request.caseId);
+  if (
+    !isWorkflowSnapshotState(snapshot, "ready_to_fill") ||
+    snapshot.case.version !== INT002_READY_VERSION
+  ) {
+    throw invalidResponse(
+      "Clarification did not return the canonical ready_to_fill snapshot.",
+    );
   }
-  return parsed;
+  return snapshot;
+}
+
+export async function runClaimToReview(
+  caseId: string,
+  expectedVersion: number,
+  fetcher: ClaimDoneFetch = fetch,
+): Promise<ReviewResponse> {
+  assertIdentifier(caseId, "caseId");
+  assertExactVersion(
+    expectedVersion,
+    INT002_READY_VERSION,
+    "The INT-002 run requires the canonical ready version.",
+  );
+  const body = await requestJson(
+    fetcher,
+    `${claimDoneApiOrigin()}/api/cases/${encodeURIComponent(caseId)}/run`,
+    {
+      body: JSON.stringify({
+        contractVersion: "4.0.0",
+        expectedVersion,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+  );
+  const snapshot = parseMutationSnapshot(body, caseId);
+  assertInt002ReviewSnapshot(snapshot);
+  return snapshot;
+}
+
+export interface Int002ClarificationRunPorts {
+  readonly answer?: (
+    request: ClarificationAnswerRequest,
+  ) => Promise<ReadyToFillResponse>;
+  readonly onReady?: (snapshot: ReadyToFillResponse) => void;
+  readonly run?: (
+    caseId: string,
+    expectedVersion: number,
+  ) => Promise<ReviewResponse>;
+}
+
+/**
+ * The ready callback is deliberately synchronous and runs before /run starts.
+ * A caller can therefore commit READY authority and a distinct run request
+ * identity before any run response (including an immediate failure) is handled.
+ */
+export async function answerThenRunToReview(
+  request: ClarificationAnswerRequest,
+  ports: Int002ClarificationRunPorts = {},
+): Promise<ReviewResponse> {
+  const ready = await (ports.answer ?? answerClarification)(request);
+  ports.onReady?.(ready);
+  return (ports.run ?? runClaimToReview)(ready.case.caseId, ready.case.version);
+}
+
+export function assertInt002ReviewSnapshot(
+  snapshot: WorkflowSnapshot,
+): asserts snapshot is ReviewResponse {
+  if (
+    !isWorkflowSnapshotState(snapshot, "review") ||
+    snapshot.case.version !== INT002_REVIEW_VERSION ||
+    snapshot.receipt !== null ||
+    snapshot.portalSession.variant !== "A"
+  ) {
+    throw invalidResponse(
+      "The run did not stop at the verified local Portal A review boundary.",
+    );
+  }
+
+  const expectedGates = ["G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"];
+  const gates = snapshot.claimPacket.gateDecisions;
+  if (
+    gates.length !== expectedGates.length ||
+    gates.some(
+      (gate, index) =>
+        gate.gateId !== expectedGates[index] ||
+        !gate.passed ||
+        !gate.deterministicPassed ||
+        gate.modelBlocked ||
+        gate.reasonCodes.length !== 0,
+    )
+  ) {
+    throw invalidResponse("The final review snapshot does not prove green G0 through G8.");
+  }
+
+  const attempts = snapshot.verificationAttempts.attempts;
+  const first = attempts[0];
+  const second = attempts[1];
+  const firstNonMatches = first?.report.fieldResults.filter(
+    (field) => field.status !== "match",
+  );
+  if (
+    attempts.length !== 2 ||
+    first?.attemptNumber !== 1 ||
+    first.final ||
+    first.gateDecision !== null ||
+    first.report.status !== "mismatch" ||
+    first.report.deterministicMatch !== false ||
+    first.report.reviewAllowed ||
+    first.repair === null ||
+    firstNonMatches?.length !== 1 ||
+    firstNonMatches[0]?.field !== first.repair.field ||
+    second?.attemptNumber !== 2 ||
+    !second.final ||
+    second.report.status !== "verified" ||
+    second.report.deterministicMatch !== true ||
+    !second.report.reviewAllowed ||
+    second.gateDecision?.gateId !== "G8" ||
+    !second.gateDecision.passed ||
+    second.repairedFromAttemptId !== first.attemptId ||
+    second.portalVersion !== first.repair.toPortalVersion ||
+    snapshot.portalSession.version !== second.portalVersion
+  ) {
+    throw invalidResponse(
+      "The final review snapshot does not contain the required fault, narrow repair, and verified second attempt.",
+    );
+  }
 }
 
 export function isWavFile(file: Pick<File, "name" | "type">): boolean {
@@ -444,6 +427,47 @@ export function isWavFile(file: Pick<File, "name" | "type">): boolean {
     ["audio/wav", "audio/wave", "audio/x-wav"].includes(mimeType) ||
     (mimeType === "" && file.name.toLowerCase().endsWith(".wav"))
   );
+}
+
+function validateIntakeSubmission(submission: IntakeSubmission): void {
+  if (submission.images.length !== 3 || submission.exifDecisions.length !== 3) {
+    throw clientInputError("Exactly three images and EXIF decisions are required.");
+  }
+  assertExactVersion(
+    submission.expectedVersion,
+    INT002_CREATED_VERSION,
+    "The INT-002 intake requires the canonical created version.",
+  );
+  const hasText = submission.statementText !== null;
+  const hasAudio = submission.audio !== null;
+  if (hasText === hasAudio) {
+    throw clientInputError("Provide exactly one written statement or WAV audio memo.");
+  }
+  if (submission.audio !== null && !isWavFile(submission.audio)) {
+    throw clientInputError("Only WAV audio is supported in this build.");
+  }
+}
+
+function validateClarificationAnswerRequest(
+  request: ClarificationAnswerRequest,
+): void {
+  assertIdentifier(request.caseId, "caseId");
+  assertIdentifier(request.clarificationId, "clarificationId");
+  assertExactVersion(
+    request.expectedVersion,
+    INT002_CLARIFICATION_VERSION,
+    "The INT-002 clarification requires the canonical awaiting-clarification version.",
+  );
+  if (
+    request.contractVersion !== "4.0.0" ||
+    request.field !== "incident_time" ||
+    request.round !== 1 ||
+    !INCIDENT_TIME_PATTERN.test(request.answer)
+  ) {
+    throw clientInputError(
+      "The clarification must preserve incident time exactly as HH:MM:SS.",
+    );
+  }
 }
 
 async function requestJson(
@@ -477,291 +501,170 @@ async function requestJson(
   return body;
 }
 
-function parseErrorEnvelope(value: unknown, status: number): ClaimDoneApiError {
-  const envelope = asRecord(value);
-  const detail = asRecord(envelope?.error);
-  if (!detail || typeof detail.code !== "string" || typeof detail.message !== "string") {
-    return invalidResponse("The ClaimDone API returned an invalid error envelope.", status);
-  }
-  const reasonCodes = Array.isArray(detail.reasonCodes)
-    ? detail.reasonCodes.filter(isGateReasonCode)
-    : [];
-  const fieldErrors = Array.isArray(detail.fieldErrors)
-    ? detail.fieldErrors.flatMap((item): ApiFieldError[] => {
-        const fieldError = asRecord(item);
-        if (
-          !fieldError ||
-          typeof fieldError.field !== "string" ||
-          typeof fieldError.message !== "string"
-        ) {
-          return [];
-        }
-        return [
-          {
-            field: fieldError.field,
-            message: fieldError.message,
-            reasonCode: isGateReasonCode(fieldError.reasonCode)
-              ? fieldError.reasonCode
-              : null,
-          },
-        ];
-      })
-    : [];
-  return new ClaimDoneApiError(
-    {
-      code: detail.code,
-      currentVersion:
-        typeof detail.currentVersion === "number" &&
-        Number.isSafeInteger(detail.currentVersion)
-          ? detail.currentVersion
-          : null,
-      fieldErrors,
-      message: detail.message,
-      reasonCodes,
-    },
-    status,
-  );
-}
-
-function parseFlowResponse(value: unknown, expectedCaseId: string): IntakeFlowResponse {
-  const body = asRecord(value);
-  if (!body) throw invalidResponse("The workflow response must be an object.");
-  const requestId = requireIdentifier(body.requestId, "requestId");
-  const caseView = parseCaseView(body.case);
-  if (caseView.caseId !== expectedCaseId) {
-    throw invalidResponse("Workflow response caseId does not match the requested case.");
-  }
-  if (
-    typeof body.draftRevision !== "number" ||
-    !Number.isSafeInteger(body.draftRevision) ||
-    body.draftRevision !== caseView.version
-  ) {
-    throw invalidResponse("Draft revision does not match the authoritative case version.");
-  }
-  const gateHistory = parseGateHistory(body.gateHistory);
-
-  if (body.phase === "awaiting_clarification") {
-    if (caseView.state !== "awaiting_clarification" || caseView.portalState !== "draft") {
-      throw invalidResponse("Clarification phase does not match the case state.");
-    }
-    const clarification = parseClarification(body.clarification);
-    if (clarification.expectedVersion !== caseView.version || body.portal !== null) {
-      throw invalidResponse("Clarification is not bound to the current case version.");
-    }
-    assertGateOutcome(gateHistory, "awaiting_clarification");
-    return {
-      case: caseView,
-      clarification,
-      draftRevision: body.draftRevision,
-      gateHistory,
-      phase: "awaiting_clarification",
-      portal: null,
-      requestId,
-    };
-  }
-
-  if (body.phase === "review") {
-    if (
-      caseView.state !== "verifying" ||
-      caseView.portalState !== "review" ||
-      body.clarification !== null
-    ) {
-      throw invalidResponse("Review phase does not match the verifying case boundary.");
-    }
-    const portal = parsePortal(body.portal, caseView.caseId);
-    assertGateOutcome(gateHistory, "review");
-    return {
-      case: caseView,
-      clarification: null,
-      draftRevision: body.draftRevision,
-      gateHistory,
-      phase: "review",
-      portal,
-      requestId,
-    };
-  }
-  throw invalidResponse("The workflow response has an unknown phase.");
-}
-
-function parseCaseView(value: unknown): CaseView {
-  const body = asRecord(value);
-  if (!body) throw invalidResponse("The case response must be an object.");
-  const caseId = requireIdentifier(body.caseId, "caseId");
-  if (typeof body.version !== "number" || !Number.isSafeInteger(body.version) || body.version < 1) {
-    throw invalidResponse("The case version is invalid.");
-  }
-  if (!isCaseState(body.state) || !isPortalState(body.portalState)) {
-    throw invalidResponse("The case state is invalid.");
-  }
-  return {
-    activeClarification: requireNullableRecord(body.activeClarification, "activeClarification"),
-    caseId,
-    claimPacket: requireNullableRecord(body.claimPacket, "claimPacket"),
-    createdAt: requireNonemptyString(body.createdAt, "createdAt"),
-    intakeSummary: requireNullableRecord(body.intakeSummary, "intakeSummary"),
-    portalState: body.portalState,
-    redactedMetadata: requireStringRecord(body.redactedMetadata, "redactedMetadata"),
-    state: body.state,
-    updatedAt: requireNonemptyString(body.updatedAt, "updatedAt"),
-    version: body.version,
-  };
-}
-
-function parseClarification(value: unknown): ClarificationView {
-  const body = asRecord(value);
-  if (
-    !body ||
-    body.field !== "incident_time" ||
-    typeof body.question !== "string" ||
-    body.question.trim() === "" ||
-    typeof body.expectedVersion !== "number" ||
-    !Number.isSafeInteger(body.expectedVersion)
-  ) {
-    throw invalidResponse("The clarification payload is invalid.");
-  }
-  const round = body.round;
-  if (round !== undefined && (round !== 1 || !Number.isSafeInteger(round))) {
-    throw invalidResponse("Only one clarification round is allowed.");
-  }
-  return {
-    clarificationId: requireIdentifier(body.clarificationId, "clarificationId"),
-    expectedVersion: body.expectedVersion,
-    field: "incident_time",
-    question: body.question,
-    ...(round === undefined ? {} : { round: 1 }),
-  };
-}
-
-function parsePortal(value: unknown, caseId: string): PortalReviewView {
-  const body = asRecord(value);
-  const renderedValues = asRecord(body?.renderedValues);
-  if (
-    !body ||
-    typeof body.reviewUrl !== "string" ||
-    body.verificationState !== "pending" ||
-    !renderedValues
-  ) {
-    throw invalidResponse("The portal review payload is invalid.");
-  }
-  let url: URL;
+async function requestDelete(
+  fetcher: ClaimDoneFetch,
+  input: string,
+  networkMessage: string,
+  invalidJsonMessage: string,
+): Promise<void> {
+  let response: Response;
   try {
-    url = new URL(body.reviewUrl);
+    response = await fetcher(input, { cache: "no-store", method: "DELETE" });
   } catch {
-    throw invalidResponse("The portal review URL is invalid.");
+    throw new ClaimDoneApiError(
+      {
+        code: "CLIENT_NETWORK_ERROR",
+        currentVersion: null,
+        fieldErrors: [],
+        message: networkMessage,
+        reasonCodes: [],
+      },
+      0,
+    );
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw invalidResponse("The portal review URL uses an unsafe protocol.");
-  }
-  let allowedOrigin: URL;
+  if (response.ok) return;
+  let body: unknown;
   try {
-    allowedOrigin = new URL(claimDonePortalOrigin());
+    body = await response.json();
   } catch {
-    throw invalidResponse("The configured portal origin is invalid.");
+    throw invalidResponse(invalidJsonMessage, response.status);
   }
-  const expectedPath = `/sandbox/A/cases/${encodeURIComponent(caseId)}`;
-  if (
-    url.origin !== allowedOrigin.origin ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.pathname !== expectedPath ||
-    url.search !== "" ||
-    url.hash !== ""
-  ) {
-    throw invalidResponse("The portal review URL is outside the approved sandbox route.");
-  }
-  return {
-    renderedValues,
-    reviewUrl: url.toString(),
-    verificationState: "pending",
-  };
+  throw parseErrorEnvelope(body, response.status);
 }
 
-function parseGateHistory(value: unknown): readonly GateDecision[] {
-  if (!Array.isArray(value) || value.length !== FLOW_GATE_IDS.length) {
-    throw invalidResponse("The workflow must return exactly G0 through G5.");
-  }
-  return value.map((item, index) => {
-    const gate = asRecord(item);
-    const expectedGateId = FLOW_GATE_IDS[index];
-    if (!gate || !hasExactKeys(gate, GATE_DECISION_KEYS)) {
-      throw invalidResponse(`The ${expectedGateId ?? "unknown"} gate decision is not closed.`);
-    }
-    const reasonCodes = gate.reasonCodes;
-    const evidenceRefs = gate.evidenceRefs;
-    if (
-      gate.gateId !== expectedGateId ||
-      gate.contractVersion !== "4.0.0" ||
-      !isWireAwareDatetime(gate.decidedAt) ||
-      !Array.isArray(evidenceRefs) ||
-      !evidenceRefs.every(
-        (reference) =>
-          typeof reference === "string" && IDENTIFIER_PATTERN.test(reference),
-      ) ||
-      typeof gate.passed !== "boolean" ||
-      typeof gate.deterministicPassed !== "boolean" ||
-      typeof gate.modelBlocked !== "boolean" ||
-      !Array.isArray(reasonCodes) ||
-      !reasonCodes.every(isGateReasonCode)
-    ) {
-      throw invalidResponse(`The ${expectedGateId ?? "unknown"} gate decision is invalid.`);
-    }
-    const canonicalReasons = reasonCodes as GateReasonCode[];
-    const reasonsAreUnique = new Set(canonicalReasons).size === canonicalReasons.length;
-    const reasonsBelongToGate = canonicalReasons.every((reason) =>
-      reason.startsWith(`${expectedGateId}_`),
-    );
-    const modelReasonPresent = canonicalReasons.includes("G3_MODEL_UNCERTAIN");
-    const modelBlockIsCanonical = gate.modelBlocked
-      ? expectedGateId === "G3" && modelReasonPresent
-      : !modelReasonPresent;
-    const deterministicReasons = canonicalReasons.filter(
-      (reason) => reason !== "G3_MODEL_UNCERTAIN",
-    );
-    const deterministicFlagMatches =
-      gate.deterministicPassed === (deterministicReasons.length === 0);
-    const passedFlagMatches =
-      gate.passed === (gate.deterministicPassed && !gate.modelBlocked);
-    const reasonsMatchPass = gate.passed === (canonicalReasons.length === 0);
-    if (
-      !reasonsAreUnique ||
-      !reasonsBelongToGate ||
-      !modelBlockIsCanonical ||
-      !deterministicFlagMatches ||
-      !passedFlagMatches ||
-      !reasonsMatchPass
-    ) {
+function parseMutationSnapshot(
+  value: unknown,
+  expectedCaseId?: string,
+): WorkflowSnapshot {
+  try {
+    return parseWorkflowSnapshot(value, expectedCaseId);
+  } catch (error) {
+    if (error instanceof WorkflowPayloadError) {
       throw invalidResponse(
-        `The ${expectedGateId ?? "unknown"} gate decision violates authority semantics.`,
+        `The ClaimDone API returned an invalid canonical snapshot (${error.message}).`,
       );
     }
-    return gate as unknown as GateDecision;
-  });
+    throw error;
+  }
 }
 
-function assertGateOutcome(
-  gates: readonly GateDecision[],
-  phase: IntakeFlowResponse["phase"],
-): void {
-  const last = gates.at(-1);
-  const earlierPassed = gates.slice(0, -1).every((gate) => gate.passed);
-  const expectedG5Passed = phase === "review";
-  const earlierDeterministicPassed = gates
-    .slice(0, -1)
-    .every((gate) => gate.deterministicPassed && !gate.modelBlocked);
-  const expectedG5Reason = phase === "awaiting_clarification"
-    ? last?.reasonCodes.length === 1 && last.reasonCodes[0] === "G5_REQUIRED_FIELD_MISSING"
-    : last?.reasonCodes.length === 0;
-  if (
-    !earlierPassed ||
-    !earlierDeterministicPassed ||
-    last?.gateId !== "G5" ||
-    last.passed !== expectedG5Passed ||
-    last.deterministicPassed !== expectedG5Passed ||
-    last.modelBlocked ||
-    !expectedG5Reason
-  ) {
-    throw invalidResponse("Gate history does not authorize the returned workflow phase.");
+function parseErrorEnvelope(value: unknown, status: number): ClaimDoneApiError {
+  try {
+    const envelope = exactRecord(value, ["error"]);
+    const detail = exactRecord(envelope.error, [
+      "code",
+      "message",
+      "reasonCodes",
+      "fieldErrors",
+      "gateDecision",
+      "currentVersion",
+    ]);
+    if (
+      typeof detail.code !== "string" ||
+      !ERROR_CODE_PATTERN.test(detail.code) ||
+      !isSafeText(detail.message, 512)
+    ) {
+      throw new Error("invalid error identity");
+    }
+    const reasonCodes = parseReasonCodes(detail.reasonCodes);
+    if (!Array.isArray(detail.fieldErrors) || detail.fieldErrors.length > 64) {
+      throw new Error("invalid field errors");
+    }
+    const fieldErrors = detail.fieldErrors.map(parseClosedFieldError);
+    if (detail.gateDecision !== null) {
+      validateGateDecisionBoundary(detail.gateDecision);
+      const gateDecision = exactRecord(detail.gateDecision, [
+        "contractVersion",
+        "decidedAt",
+        "deterministicPassed",
+        "evidenceRefs",
+        "gateId",
+        "modelBlocked",
+        "passed",
+        "reasonCodes",
+      ]);
+      const gateReasonCodes = parseReasonCodes(gateDecision.reasonCodes);
+      if (
+        gateReasonCodes.length !== reasonCodes.length ||
+        gateReasonCodes.some((reason, index) => reason !== reasonCodes[index])
+      ) {
+        throw new Error("gate and envelope reasons disagree");
+      }
+    }
+    return new ClaimDoneApiError(
+      {
+        code: detail.code,
+        currentVersion: parseCurrentVersion(detail.currentVersion),
+        fieldErrors,
+        message: detail.message,
+        reasonCodes,
+      },
+      status,
+    );
+  } catch {
+    return invalidResponse("The ClaimDone API returned an invalid error envelope.", status);
   }
+}
+
+function parseReasonCodes(value: unknown): GateReasonCode[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 32 ||
+    !value.every(isGateReasonCode) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new Error("invalid reason codes");
+  }
+  return value as GateReasonCode[];
+}
+
+function parseClosedFieldError(value: unknown): ApiFieldError {
+  const item = exactRecord(value, ["field", "reasonCode", "message"]);
+  if (
+    !isSafeText(item.field, 256) ||
+    !isSafeText(item.message, 512) ||
+    (item.reasonCode !== null && !isGateReasonCode(item.reasonCode))
+  ) {
+    throw new Error("invalid field error");
+  }
+  return {
+    field: item.field,
+    message: item.message,
+    reasonCode: item.reasonCode,
+  };
+}
+
+function parseCurrentVersion(value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error("invalid current version");
+  }
+  return value;
+}
+
+function exactRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("expected object");
+  }
+  const item = value as Record<string, unknown>;
+  const actual = Object.keys(item).sort();
+  const expected = [...keys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error("unexpected object shape");
+  }
+  return item;
+}
+
+function isSafeText(value: unknown, maximumLength: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= maximumLength &&
+    !UNSAFE_CONTROL_PATTERN.test(value)
+  );
 }
 
 function invalidResponse(message: string, status = 502): ClaimDoneApiError {
@@ -791,76 +694,22 @@ function clientInputError(message: string): ClaimDoneApiError {
 }
 
 function assertIdentifier(value: string, label: string): void {
-  if (!IDENTIFIER_PATTERN.test(value)) throw clientInputError(`${label} is invalid.`);
-}
-
-function requireIdentifier(value: unknown, label: string): string {
-  if (typeof value !== "string" || !IDENTIFIER_PATTERN.test(value)) {
-    throw invalidResponse(`${label} is invalid.`);
+  if (!IDENTIFIER_PATTERN.test(value)) {
+    throw clientInputError(`${label} is invalid.`);
   }
-  return value;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+function assertVersion(value: number, message: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw clientInputError(message);
 }
 
-function requireNullableRecord(
-  value: unknown,
-  label: string,
-): Readonly<Record<string, unknown>> | null {
-  if (value === null) return null;
-  const record = asRecord(value);
-  if (!record) throw invalidResponse(`${label} must be an object or null.`);
-  return record;
-}
-
-function requireStringRecord(
-  value: unknown,
-  label: string,
-): Readonly<Record<string, string>> {
-  const record = asRecord(value);
-  if (!record || Object.values(record).some((item) => typeof item !== "string")) {
-    throw invalidResponse(`${label} must contain only string values.`);
-  }
-  return record as Readonly<Record<string, string>>;
-}
-
-function requireNonemptyString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw invalidResponse(`${label} must be a non-empty string.`);
-  }
-  return value;
-}
-
-function isCaseState(value: unknown): value is CaseState {
-  return [
-    "created",
-    "disclosed",
-    "analyzing",
-    "awaiting_transcript_confirmation",
-    "awaiting_clarification",
-    "ready_to_fill",
-    "filling",
-    "verifying",
-    "review",
-    "blocked",
-    "human_approved",
-    "receipt",
-    "emergency_stopped",
-    "abandoned",
-    "failed",
-  ].includes(value as CaseState);
-}
-
-function isPortalState(value: unknown): value is PortalState {
-  return ["draft", "review", "human_approved", "receipt"].includes(value as PortalState);
+function assertExactVersion(value: number, expected: number, message: string): void {
+  assertVersion(value, message);
+  if (value !== expected) throw clientInputError(message);
 }
 
 function isGateReasonCode(value: unknown): value is GateReasonCode {
-  return typeof value === "string" && GATE_REASON_CODE_SET.has(value as GateReasonCode);
+  return isKnownGateReasonCode(value);
 }
 
 function normalizeConfiguredOrigin(
@@ -880,7 +729,7 @@ function normalizeConfiguredOrigin(
     throw clientInputError(`The configured ${label} origin is invalid.`);
   }
   if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.protocol !== "http:" ||
     url.username !== "" ||
     url.password !== "" ||
     (url.pathname !== "" && url.pathname !== "/") ||
@@ -894,27 +743,3 @@ function normalizeConfiguredOrigin(
   }
   return url.origin;
 }
-
-function hasExactKeys(
-  value: Readonly<Record<string, unknown>>,
-  expectedKeys: readonly string[],
-): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...expectedKeys].sort();
-  return (
-    actual.length === expected.length &&
-    actual.every((key, index) => key === expected[index])
-  );
-}
-
-function isWireAwareDatetime(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    WIRE_AWARE_DATETIME_PATTERN.test(value) &&
-    !Number.isNaN(Date.parse(value))
-  );
-}
-
-// These imports are deliberately type-checked against the canonical contract.
-void (FLOW_GATE_IDS satisfies readonly GateId[]);
-void ("incident_time" satisfies RequiredClaimField);

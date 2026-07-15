@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ClarificationCard,
+  DemoAnalysisNotice,
   IntakeFlow,
-  MockDraftNotice,
 } from "../src/features/intake/intake-flow";
 
 describe("intake disclosure SSR surface", () => {
@@ -14,9 +14,9 @@ describe("intake disclosure SSR surface", () => {
     expect(html).toContain("Step 1 · Disclosure");
     expect(html).toContain("Before you add any evidence");
     expect(html).toContain("This is a local sandbox");
-    expect(html).toContain("No live AI extraction in this walking skeleton");
-    expect(html).toContain("fixed, versioned synthetic fixture draft");
-    expect(html).toContain("not claim facts inferred from your text");
+    expect(html).toContain("Deterministic INT-002 demo analysis");
+    expect(html).toContain("bounded local demo workflow");
+    expect(html).toContain("External provider calls remain disabled");
     expect(html).toContain('id="disclosure-acknowledgement"');
     expect(html).toContain('for="disclosure-acknowledgement"');
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Continue to intake/s);
@@ -31,13 +31,13 @@ describe("intake disclosure SSR surface", () => {
     expect(labelTargets.every((target) => ids.includes(target))).toBe(true);
   });
 
-  it("renders the mock-draft provenance notice as an accessible non-urgent note", () => {
-    const html = renderToStaticMarkup(<MockDraftNotice />);
+  it("renders the demo-analysis notice as an accessible non-urgent note", () => {
+    const html = renderToStaticMarkup(<DemoAnalysisNotice />);
 
     expect(html).toContain('role="note"');
-    expect(html).toContain("retained as evidence and safety-checked");
-    expect(html).toContain("fixed, versioned synthetic fixture draft");
-    expect(html).toContain("not claim facts inferred from your text");
+    expect(html).toContain("retained as evidence and processed");
+    expect(html).toContain("bounded local demo workflow");
+    expect(html).toContain("External provider calls remain disabled");
   });
 
   it("renders exactly one keyboard-native, labelled clarification question", () => {
@@ -67,6 +67,9 @@ describe("intake disclosure SSR surface", () => {
     expect(html).toContain('for="clarification-incident-time"');
     expect(html).toContain('aria-invalid="true"');
     expect(html).toContain('type="submit"');
-    expect(html).toContain("Press Enter to continue");
+    expect(html).toContain("exact HH:MM:SS format");
+    expect(html).toContain("14:30:00");
+    expect(html).toContain('step="1"');
+    expect(html).not.toContain("full deterministic G0–G5 rerun");
   });
 });
