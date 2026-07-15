@@ -538,6 +538,131 @@ def test_persisted_metrics_are_derived_once_without_retry_duration_double_count(
         ).fetchone() == (4,)
 
 
+@pytest.mark.parametrize("mutated_field", ("event_id", "occurred_at"))
+def test_metrics_reject_coherently_mutated_workflow_source_identity(
+    tmp_path: Path,
+    mutated_field: str,
+) -> None:
+    repository, cursors = _repository_with_metrics(tmp_path)
+    with sqlite3.connect(repository.database_path) as connection:
+        if mutated_field == "event_id":
+            replacement = f"event_{'a' * 32}"
+            connection.execute(
+                """
+                UPDATE audit_events
+                SET event_id = ?, event_json = json_set(event_json, '$.eventId', ?)
+                WHERE sequence = ?
+                """,
+                (replacement, replacement, cursors[0]),
+            )
+        else:
+            replacement = (NOW + timedelta(days=1)).isoformat()
+            connection.execute(
+                """
+                UPDATE audit_events
+                SET occurred_at = ?,
+                    event_json = json_set(event_json, '$.occurredAt', ?)
+                WHERE sequence = ?
+                """,
+                (replacement, replacement, cursors[0]),
+            )
+
+    with pytest.raises(
+        PersistedDataIntegrityError,
+        match="Persisted observability metrics are invalid",
+    ):
+        repository.get_observability_metrics(CASE_ID)
+
+
+def test_metrics_reject_missing_non_provider_workflow_projection(
+    tmp_path: Path,
+) -> None:
+    repository, cursors = _repository_with_metrics(tmp_path)
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "DELETE FROM workflow_events WHERE source_audit_sequence = ?",
+            (cursors[-1],),
+        )
+
+    with pytest.raises(
+        PersistedDataIntegrityError,
+        match="Persisted observability metrics are invalid",
+    ):
+        repository.get_observability_metrics(CASE_ID)
+
+
+def test_metrics_authority_validation_is_scoped_to_the_selected_case(
+    tmp_path: Path,
+) -> None:
+    repository, cursors = _repository_with_metrics(tmp_path)
+    other_case_id = "case-observability-corrupt-002"
+    repository.create_case(
+        case_id=other_case_id,
+        redacted_metadata={},
+        created_at=NOW,
+    )
+    with repository._write_connection() as connection:
+        other_envelope = repository._insert_redacted_workflow_event(
+            connection,
+            case_id=other_case_id,
+            event=_tool_event(),
+            actor=ActorType.AGENT,
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "DELETE FROM workflow_events WHERE source_audit_sequence = ?",
+            (other_envelope.source_audit_sequence,),
+        )
+
+    metrics = repository.get_observability_metrics(CASE_ID)
+
+    assert metrics.through_cursor == cursors[-1]
+    assert metrics.tool_call_count == 1
+
+
+def test_metrics_read_uses_one_wal_snapshot_then_rejects_new_corruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, cursors = _repository_with_metrics(tmp_path)
+    original_validate = SqliteCaseRepository._validate_case_workflow_source_bindings
+    did_mutate = False
+
+    def validate_then_mutate(
+        selected_repository: SqliteCaseRepository,
+        connection: sqlite3.Connection,
+        *,
+        case_id: str,
+    ) -> None:
+        nonlocal did_mutate
+        original_validate(selected_repository, connection, case_id=case_id)
+        if did_mutate:
+            return
+        did_mutate = True
+        with sqlite3.connect(selected_repository.database_path) as writer:
+            writer.execute(
+                "DELETE FROM workflow_events WHERE source_audit_sequence = ?",
+                (cursors[-1],),
+            )
+
+    monkeypatch.setattr(
+        SqliteCaseRepository,
+        "_validate_case_workflow_source_bindings",
+        validate_then_mutate,
+    )
+
+    first = repository.get_observability_metrics(CASE_ID)
+
+    assert first.through_cursor == cursors[-1]
+    assert first.tool_call_count == 1
+    with pytest.raises(
+        PersistedDataIntegrityError,
+        match="Persisted observability metrics are invalid",
+    ):
+        repository.get_observability_metrics(CASE_ID)
+
+
 def test_provider_metrics_reject_retry_after_terminal_attempt_zero_failure(
     tmp_path: Path,
 ) -> None:

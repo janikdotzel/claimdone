@@ -3909,6 +3909,14 @@ class SqliteCaseRepository:
                 (case_id,),
             ).fetchone() is None:
                 raise CaseRecordNotFoundError(case_id)
+            self._validate_all_receipt_authority(
+                connection,
+                selected_case_id=case_id,
+            )
+            self._validate_case_workflow_source_bindings(
+                connection,
+                case_id=case_id,
+            )
             workflow_rows = connection.execute(
                 """
                 SELECT source_audit_sequence, event_json
