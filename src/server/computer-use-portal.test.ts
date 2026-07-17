@@ -153,13 +153,12 @@ function fillActions(): ComputerAction[] {
   ]);
 }
 
-function completePortalActions(): ComputerAction[] {
-  return [
-    { button: "left", type: "click", x: 20, y: 10 },
-    { button: "left", type: "click", x: 20, y: 10 },
-    ...fillActions(),
-  ];
-}
+const navigationClick: ComputerAction = {
+  button: "left",
+  type: "click",
+  x: 20,
+  y: 10,
+};
 
 describe("executeSafeComputerAction", () => {
   it("allows only the ordered Claims and incident-claim navigation", async () => {
@@ -296,11 +295,19 @@ describe("executeSafeComputerAction", () => {
 });
 
 describe("ComputerUsePortalAutomator", () => {
-  it("executes batched actions, verifies exact values, and never submits", async () => {
+  it("refreshes after navigation, executes batched field actions, and never submits", async () => {
     const session = new FakeSession();
-    const createResponse = vi.fn<CreateComputerResponse>(async () =>
-      computerResponse("one", { actions: completePortalActions() }),
-    );
+    const createResponse = vi
+      .fn<CreateComputerResponse>()
+      .mockResolvedValueOnce(
+        computerResponse("home", { actions: [navigationClick] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("claims", { actions: [navigationClick] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("form", { actions: fillActions() }),
+      );
     const automator = new ComputerUsePortalAutomator({
       createResponse,
       createSession: async () => session,
@@ -313,7 +320,7 @@ describe("ComputerUsePortalAutomator", () => {
     });
     expect(session.values).toEqual(getPortalFieldValues(claim));
     expect(session.closed).toBe(true);
-    expect(createResponse).toHaveBeenCalledOnce();
+    expect(createResponse).toHaveBeenCalledTimes(3);
 
     const initialRequest = createResponse.mock.calls[0]?.[0];
     expect(initialRequest?.model).toBe(COMPUTER_USE_MODEL);
@@ -339,9 +346,17 @@ describe("ComputerUsePortalAutomator", () => {
 
   it("captures home, ordered navigation, each exact field fill, and final verification", async () => {
     const session = new FakeSession();
-    const createResponse = vi.fn<CreateComputerResponse>(async () =>
-      computerResponse("one", { actions: completePortalActions() }),
-    );
+    const createResponse = vi
+      .fn<CreateComputerResponse>()
+      .mockResolvedValueOnce(
+        computerResponse("home", { actions: [navigationClick] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("claims", { actions: [navigationClick] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("form", { actions: fillActions() }),
+      );
     const automator = new ComputerUsePortalAutomator({
       createResponse,
       createSession: async () => session,
@@ -377,15 +392,33 @@ describe("ComputerUsePortalAutomator", () => {
     expect(session.screenshotCount).toBeGreaterThanOrEqual(9);
   });
 
-  it("returns the screenshot through the computer-call loop and resends safeguards", async () => {
+  it("discards stale batched actions after each navigation", async () => {
     const session = new FakeSession();
+    const inspectPoint = session.inspectPoint.bind(session);
+    session.inspectPoint = vi.fn(async (x, y) => {
+      if (x > 100) return { kind: "other" } as const;
+      return inspectPoint(x, y);
+    });
+    const staleClick: ComputerAction = {
+      button: "left",
+      type: "click",
+      x: 1_000,
+      y: 600,
+    };
     const createResponse = vi
       .fn<CreateComputerResponse>()
       .mockResolvedValueOnce(
-        computerResponse("one", { actions: [{ type: "screenshot" }] }),
+        computerResponse("home", {
+          actions: [navigationClick, staleClick],
+        }),
       )
       .mockResolvedValueOnce(
-        computerResponse("two", { actions: completePortalActions() }),
+        computerResponse("claims", {
+          actions: [navigationClick, staleClick],
+        }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("form", { actions: fillActions() }),
       );
     const automator = new ComputerUsePortalAutomator({
       createResponse,
@@ -396,7 +429,36 @@ describe("ComputerUsePortalAutomator", () => {
       status: "prepared",
       submitted: false,
     });
-    expect(createResponse).toHaveBeenCalledTimes(2);
+    expect(session.inspectPoint).not.toHaveBeenCalledWith(1_000, 600);
+    expect(createResponse).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns the screenshot through the computer-call loop and resends safeguards", async () => {
+    const session = new FakeSession();
+    const createResponse = vi
+      .fn<CreateComputerResponse>()
+      .mockResolvedValueOnce(
+        computerResponse("one", { actions: [{ type: "screenshot" }] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("home", { actions: [navigationClick] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("claims", { actions: [navigationClick] }),
+      )
+      .mockResolvedValueOnce(
+        computerResponse("form", { actions: fillActions() }),
+      );
+    const automator = new ComputerUsePortalAutomator({
+      createResponse,
+      createSession: async () => session,
+    });
+
+    await expect(automator.prepare(claim)).resolves.toMatchObject({
+      status: "prepared",
+      submitted: false,
+    });
+    expect(createResponse).toHaveBeenCalledTimes(4);
 
     const followUp = createResponse.mock.calls[1]?.[0];
     expect(followUp?.model).toBe(COMPUTER_USE_MODEL);

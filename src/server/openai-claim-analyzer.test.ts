@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { AnalyzeResponse } from "@/lib/analysis-schema";
 
 import {
-  ANALYSIS_MODEL,
   OpenAIClaimAnalyzer,
   TRANSCRIPTION_MODEL,
 } from "./openai-claim-analyzer";
@@ -111,7 +110,7 @@ describe("OpenAIClaimAnalyzer", () => {
 
     expect(parse).toHaveBeenCalledOnce();
     expect(parse).toHaveBeenCalledWith(
-      expect.objectContaining({ model: ANALYSIS_MODEL }),
+      expect.objectContaining({ model: "gpt-5.6" }),
     );
     const request = JSON.stringify(parse.mock.calls[0]?.[0]);
     expect(request).toContain("Another car hit my bumper.");

@@ -890,6 +890,10 @@ export class ComputerUsePortalAutomator implements PortalAutomator {
             screenshot = navigationScreenshot;
           }
 
+          if (actionResult.kind === "navigated") {
+            break;
+          }
+
           if (options.captureReplay && action.type === "type") {
             const actionValues = await withDeadline(
               session.readValues(),
