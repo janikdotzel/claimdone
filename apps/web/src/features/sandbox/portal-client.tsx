@@ -271,37 +271,46 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
 
   return (
     <PortalFrame caseId={caseId} state={view.state} variant={variant}>
-      <div className={styles.toolbar}>
-        <div>
-          <span className={styles.eyebrow}>Developer tools</span>
-          <p>Reset to deterministic synthetic data. This never approves or submits a claim.</p>
+      <details className={styles.toolbar}>
+        <summary>
+          <span>
+            <strong>Demo controls</strong>
+            <small>Load or reset safe synthetic claim data</small>
+          </span>
+          <span aria-hidden="true">+</span>
+        </summary>
+        <div className={styles.toolbarBody}>
+          <p>
+            These controls change only the synthetic example. Nothing here approves or
+            submits a claim.
+          </p>
+          <div className={styles.fixtureControls}>
+            <label htmlFor="fixture-select">Example data</label>
+            <select
+              id="fixture-select"
+              onChange={(event) => setFixture(event.target.value as PortalFixture)}
+              value={fixture}
+            >
+              <option value="empty">Empty claim</option>
+              <option value="complete">Complete example claim</option>
+            </select>
+            <button
+              className={styles.secondaryButton}
+              disabled={busy}
+              onClick={() => void resetFixture()}
+              type="button"
+            >
+              Reset example
+            </button>
+            <Link
+              className={styles.variantLink}
+              href={`/sandbox/${otherVariant}/cases/${caseId}-${otherVariant.toLowerCase()}`}
+            >
+              Preview layout {otherVariant}
+            </Link>
+          </div>
         </div>
-        <div className={styles.fixtureControls}>
-          <label htmlFor="fixture-select">Fixture</label>
-          <select
-            id="fixture-select"
-            onChange={(event) => setFixture(event.target.value as PortalFixture)}
-            value={fixture}
-          >
-            <option value="empty">Empty draft</option>
-            <option value="complete">Complete demo</option>
-          </select>
-          <button
-            className={styles.secondaryButton}
-            disabled={busy}
-            onClick={() => void resetFixture()}
-            type="button"
-          >
-            Reset fixture
-          </button>
-          <Link
-            className={styles.variantLink}
-            href={`/sandbox/${otherVariant}/cases/${caseId}-${otherVariant.toLowerCase()}`}
-          >
-            Open layout {otherVariant}
-          </Link>
-        </div>
-      </div>
+      </details>
 
       {globalError ? (
         <div className={styles.inlineError} role="alert">
@@ -319,9 +328,9 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
           <div className={styles.sectionHeading}>
             <div>
               <span className={styles.eyebrow}>Claim details</span>
-              <h2>Review the prepared draft</h2>
+              <h2>Check the prepared claim</h2>
             </div>
-            <span className={styles.version}>Server version {view.version}</span>
+            <span className={styles.version}>Draft version {view.version}</span>
           </div>
           <div className={variant === "B" ? styles.fieldsVariantB : styles.fieldsVariantA}>
             {FIELD_ORDER[variant].map((field) => (
@@ -357,7 +366,7 @@ export function SandboxPortalClient({ caseId, variant }: SandboxPortalClientProp
       )}
 
       <footer className={styles.auditFooter}>
-        <span>{view.auditCount} redacted server audit events</span>
+        <span>{view.auditCount} redacted claim events</span>
         <span>Last updated {formatTimestamp(view.updatedAt)}</span>
       </footer>
     </PortalFrame>
@@ -440,8 +449,8 @@ function PortalField(props: PortalFieldProps) {
       <div className={`${styles.field} ${styles.wideField}`}>
         <label htmlFor={inputId}>{FIELD_LABELS[field]}</label>
         <span className={styles.hint}>
-          Server fills use approved asset IDs. This developer control creates synthetic
-          demo IDs only; file bytes are not uploaded.
+          This demo uses three approved example images. Only their safe synthetic
+          references are stored on this page.
         </span>
         <input
           accept="image/jpeg,image/png"
@@ -553,7 +562,7 @@ export function PortalStateView({
     <section className={styles.reviewPanel} aria-labelledby="portal-review-heading">
       <div className={styles.sectionHeading}>
         <div>
-          <span className={styles.eyebrow}>{isReceipt ? "Sandbox receipt" : "Read-only"}</span>
+          <span className={styles.eyebrow}>{isReceipt ? "Sandbox receipt" : "Insurance claim"}</span>
           <h2 id="portal-review-heading">
             {state === "review"
               ? "Ready for human review"
@@ -565,8 +574,8 @@ export function PortalStateView({
         <span className={styles.stateBadge}>{state.replaceAll("_", " ")}</span>
       </div>
       <div className={styles.boundaryNotice} role="note">
-        <strong>Agent boundary:</strong> this portal view cannot approve, submit, or create a
-        receipt. Human approval will use a separate one-time token in the secured workflow.
+        <strong>You stay in control.</strong> This review page cannot approve, submit, or
+        create a receipt. Any approval happens separately and requires an explicit human action.
       </div>
       <dl className={styles.reviewGrid}>
         <ReviewValue label="Incident" value={`${fields.incidentDate} at ${fields.incidentTime}`} />
@@ -628,12 +637,12 @@ function PortalFrame({
           CD
         </div>
         <div>
-          <span className={styles.eyebrow}>ClaimDone demo portal</span>
-          <h1>Vehicle incident form</h1>
+          <span className={styles.eyebrow}>ClaimDone secure review</span>
+          <h1>{state === "draft" ? "Vehicle incident form" : "Your insurance claim"}</h1>
         </div>
         <div className={styles.headerMeta}>
-          <span>Case {caseId}</span>
-          <span>Layout {variant}</span>
+          <span>Claim {caseId}</span>
+          <span>Review layout {variant}</span>
           <span className={styles.stateBadge}>{state.replaceAll("_", " ")}</span>
         </div>
       </header>

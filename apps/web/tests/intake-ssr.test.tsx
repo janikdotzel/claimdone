@@ -7,21 +7,25 @@ import {
   IntakeFlow,
 } from "../src/features/intake/intake-flow";
 
-describe("intake disclosure SSR surface", () => {
-  it("renders a separate disclosure with a keyboard-operable gated continuation", () => {
+describe("intake evidence SSR surface", () => {
+  it("starts directly with evidence and keeps the demo acknowledgement on the claim action", () => {
     const html = renderToStaticMarkup(<IntakeFlow />);
 
-    expect(html).toContain("Step 1 · Disclosure");
-    expect(html).toContain("Before you add any evidence");
-    expect(html).toContain("This is a local sandbox");
-    expect(html).toContain("Deterministic INT-002 demo analysis");
-    expect(html).toContain("bounded local demo workflow");
-    expect(html).toContain("External provider calls remain disabled");
-    expect(html).toContain('id="disclosure-acknowledgement"');
-    expect(html).toContain('for="disclosure-acknowledgement"');
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Continue to intake/s);
+    expect(html).toContain("Add three photos of the accident");
+    expect(html).toContain("Add a short text or voice memo");
+    expect(html).toContain("Your evidence stays traceable");
+    expect(html).toContain("keeps each detail connected");
+    expect(html).toContain("does not call an external provider");
+    expect(html).toContain(
+      "By selecting Create my claim, you confirm that you may use these staged photos",
+    );
+    expect(html).toContain("Nothing is submitted to an insurer");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Create my claim/s);
     expect(html).toContain('aria-current="step"');
     expect(html).toContain("Approval stays with you");
+    expect(html).not.toContain("Before you begin");
+    expect(html).not.toContain("Confirm the evidence is ready to check");
+    expect(html).not.toContain('type="checkbox"');
 
     const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
     expect(new Set(ids).size).toBe(ids.length);
@@ -35,9 +39,26 @@ describe("intake disclosure SSR surface", () => {
     const html = renderToStaticMarkup(<DemoAnalysisNotice />);
 
     expect(html).toContain('role="note"');
-    expect(html).toContain("retained as evidence and processed");
-    expect(html).toContain("bounded local demo workflow");
-    expect(html).toContain("External provider calls remain disabled");
+    expect(html).toContain("keeps each detail connected");
+    expect(html).toContain("photo or statement");
+    expect(html).toContain("does not call an external provider");
+  });
+
+  it("keeps an authoritative consent error visible without restoring the checkbox card", () => {
+    const html = renderToStaticMarkup(
+      <IntakeFlow
+        backendErrors={[
+          {
+            field: "consents.dataProcessing",
+            message: "The server could not confirm local demo processing.",
+          },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("ClaimDone could not confirm the demo permissions:");
+    expect(html).toContain("The server could not confirm local demo processing.");
+    expect(html).not.toContain("Confirm the evidence is ready to check");
   });
 
   it("renders exactly one keyboard-native, labelled clarification question", () => {
@@ -67,7 +88,7 @@ describe("intake disclosure SSR surface", () => {
     expect(html).toContain('for="clarification-incident-time"');
     expect(html).toContain('aria-invalid="true"');
     expect(html).toContain('type="submit"');
-    expect(html).toContain("exact HH:MM:SS format");
+    expect(html).toContain("24-hour time including seconds");
     expect(html).toContain("14:30:00");
     expect(html).toContain('step="1"');
     expect(html).not.toContain("full deterministic G0–G5 rerun");

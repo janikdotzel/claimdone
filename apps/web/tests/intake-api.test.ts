@@ -533,7 +533,7 @@ function int002ClarificationBody() {
   record(body.case).version = 4;
   clarification.clarificationId = "clarification-001";
   clarification.field = "incident_time";
-  clarification.question = "Wann ereignete sich der Vorfall?";
+  clarification.question = "What time did the incident happen?";
   clarification.expectedVersion = 4;
   return body;
 }

@@ -22,6 +22,7 @@ export interface WorkflowExperienceProps {
     request: ClarificationAnswerRequest,
   ) => void;
   readonly portalSurface?: ReactNode;
+  readonly showSandboxBanner?: boolean;
   readonly snapshot?: WorkflowSnapshot;
 }
 
@@ -31,6 +32,7 @@ export function WorkflowExperience({
   mode,
   onClarificationAnswer,
   portalSurface,
+  showSandboxBanner = true,
   snapshot,
 }: WorkflowExperienceProps) {
   let content: ReactNode;
@@ -104,7 +106,7 @@ export function WorkflowExperience({
 
   return (
     <section className={styles.experience} aria-label="ClaimDone workflow">
-      <SandboxBanner />
+      {showSandboxBanner ? <SandboxBanner /> : null}
       <div className={styles.experienceBody} aria-live="polite">
         {content}
       </div>
@@ -142,15 +144,17 @@ export function SplitViewShell({
     <div className={styles.shell}>
       <header className={styles.shellHeader}>
         <div>
-          <p className={styles.eyebrow}>Authoritative sandbox snapshot</p>
+          <p className={styles.eyebrow}>Your insurance claim</p>
           <h1>{stateTitle(state)}</h1>
         </div>
         <span className={styles.stateBadge}>{stateLabel(state)}</span>
       </header>
 
-      <HumanApprovalBoundary state={state} />
+      {snapshot.claimPacket === null ? null : (
+        <CompletedClaimDocument packet={snapshot.claimPacket} state={state} />
+      )}
 
-      <DeterministicGateTrail snapshot={snapshot} />
+      <HumanApprovalBoundary state={state} />
 
       {snapshot.clarification !== null ? (
         <ClarificationPanel
@@ -162,42 +166,124 @@ export function SplitViewShell({
         />
       ) : null}
 
-      <div className={styles.splitGrid}>
-        <section className={styles.portalPane} aria-labelledby={portalHeadingId}>
-          <div className={styles.sectionHeading}>
-            <div>
-              <p className={styles.eyebrow}>Left pane</p>
-              <h2 id={portalHeadingId}>Sandbox form surface</h2>
-            </div>
-            <span className={styles.readOnlyBadge}>Read only</span>
-          </div>
-          {portalSurface ?? <ReadOnlySandboxForm snapshot={snapshot} />}
-          {snapshot.claimPacket !== null ? (
-            <>
-              <FieldComparison packet={snapshot.claimPacket} />
-              <VerificationAttemptsPanel
-                attempts={snapshot.verificationAttempts}
-                packet={snapshot.claimPacket}
-              />
-            </>
-          ) : (
-            <EmptyPanel>No verified claim fields are available yet.</EmptyPanel>
-          )}
-        </section>
+      <details className={styles.auditDetails} open={state !== "review"}>
+        <summary>
+          <span>
+            <strong>See how ClaimDone checked this claim</strong>
+            <small>Evidence, deterministic checks, and agent activity</small>
+          </span>
+          <span aria-hidden="true">+</span>
+        </summary>
+        <div className={styles.auditBody}>
+          <DeterministicGateTrail snapshot={snapshot} />
+          <div className={styles.splitGrid}>
+            <section className={styles.portalPane} aria-labelledby={portalHeadingId}>
+              <div className={styles.sectionHeading}>
+                <div>
+                  <p className={styles.eyebrow}>Prepared claim</p>
+                  <h2 id={portalHeadingId}>Claim fields</h2>
+                </div>
+                <span className={styles.readOnlyBadge}>Read only</span>
+              </div>
+              {portalSurface ?? <ReadOnlySandboxForm snapshot={snapshot} />}
+              {snapshot.claimPacket !== null ? (
+                <>
+                  <FieldComparison packet={snapshot.claimPacket} />
+                  <VerificationAttemptsPanel
+                    attempts={snapshot.verificationAttempts}
+                    packet={snapshot.claimPacket}
+                  />
+                </>
+              ) : (
+                <EmptyPanel>No verified claim fields are available yet.</EmptyPanel>
+              )}
+            </section>
 
-        <aside className={styles.authorityPane} aria-label="Evidence and agent activity">
-          {snapshot.claimPacket !== null ? (
-            <>
-              <AgentPlan packet={snapshot.claimPacket} />
-              <EvidenceBoard packet={snapshot.claimPacket} />
-            </>
-          ) : (
-            <EmptyPanel>Evidence analysis has not produced a claim packet yet.</EmptyPanel>
-          )}
-          <AgentEventStrip events={events} />
-        </aside>
-      </div>
+            <aside className={styles.authorityPane} aria-label="Evidence and agent activity">
+              {snapshot.claimPacket !== null ? (
+                <>
+                  <AgentPlan packet={snapshot.claimPacket} />
+                  <EvidenceBoard packet={snapshot.claimPacket} />
+                </>
+              ) : (
+                <EmptyPanel>Evidence analysis has not produced a claim packet yet.</EmptyPanel>
+              )}
+              <AgentEventStrip events={events} />
+            </aside>
+          </div>
+        </div>
+      </details>
     </div>
+  );
+}
+
+function CompletedClaimDocument({
+  packet,
+  state,
+}: {
+  readonly packet: ClaimPacket;
+  readonly state: string;
+}) {
+  const claim = packet.claim;
+  const fieldStatuses = [
+    ["Incident date", claim.incidentDate],
+    ["Incident time", claim.incidentTime],
+    ["Location", claim.location],
+    ["Claimant", claim.claimantName],
+    ["Policy reference", claim.policyReference],
+    ["Vehicle registration", claim.vehicleRegistration],
+    ["Other driver", claim.counterpartyKnown === "unknown" ? null : claim.counterpartyKnown],
+    ["Incident statement", claim.narrative],
+  ] as const;
+  const completedCount = fieldStatuses.filter(([, value]) => value !== null).length;
+  const completeness = Math.round((completedCount / fieldStatuses.length) * 100);
+  const ready = state === "review" && claim.missingRequiredFields.length === 0;
+
+  return (
+    <article className={styles.claimDocument} aria-labelledby="prepared-claim-title">
+      <div className={styles.claimDocumentHeader}>
+        <div>
+          <p className={styles.eyebrow}>Insurance claim</p>
+          <h2 id="prepared-claim-title">
+            {ready ? "Your complete claim" : "Your claim in progress"}
+          </h2>
+        </div>
+        <span className={ready ? styles.completeBadge : styles.progressBadge}>
+          {ready ? "Ready to review" : "Being prepared"}
+        </span>
+      </div>
+
+      <div className={styles.completeness}>
+        <div>
+          <span>Completeness</span>
+          <strong>{completeness}%</strong>
+        </div>
+        <div
+          aria-label={`Claim completeness ${completeness} percent`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={completeness}
+          className={styles.completenessTrack}
+          role="progressbar"
+        >
+          <span style={{ width: `${completeness}%` }} />
+        </div>
+      </div>
+
+      <dl className={styles.claimFieldGrid}>
+        {fieldStatuses.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value === null ? "Needs one detail" : "Complete · source linked"}</dd>
+          </div>
+        ))}
+      </dl>
+
+      <div className={styles.claimDocumentFooter}>
+        <span>Created from {claim.attachments.length} photos + your statement</span>
+        <strong>{packet.gateDecisions.filter(({ passed }) => passed).length} checks passed</strong>
+      </div>
+    </article>
   );
 }
 

@@ -37,10 +37,9 @@ export function ProductChrome({ children }: { children: ReactNode }) {
             <span>ClaimDone</span>
           </Link>
           <nav aria-label="Primary navigation" className="product-nav">
-            <Link href="/">Overview</Link>
-            <Link href="/components">Components</Link>
+            <Link href="/#how-it-works">How it works</Link>
             <Link className="product-nav__cta" href="/claim/new">
-              Start sandbox claim
+              Start a claim
             </Link>
           </nav>
         </div>
@@ -75,7 +74,7 @@ export function PageShell({
       </header>
       <div className="page-shell__grid">
         <div className="page-shell__main">{children}</div>
-        <aside aria-label="Context and safety" className="page-shell__aside">
+        <aside aria-label="Checks and control" className="page-shell__aside">
           {aside}
         </aside>
       </div>

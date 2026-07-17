@@ -8,31 +8,30 @@ import {
 } from "./types";
 import type { GateReasonCode } from "../../../../../contracts/generated/claimdone";
 
+export const DEMO_INTAKE_ACKNOWLEDGEMENTS = {
+  dataProcessing: true,
+  imageRights: true,
+  sandbox: true,
+} as const;
+
 export const initialIntakeState: IntakeState = {
   audio: null,
   backendErrors: {},
   clientErrors: {},
-  consents: {
-    dataProcessing: false,
-    imageRights: false,
-    sandbox: false,
-  },
-  disclosureAccepted: false,
+  consents: DEMO_INTAKE_ACKNOWLEDGEMENTS,
   images: [],
   inputRevision: 0,
   pendingCaseId: null,
   serverAuthority: null,
   serverError: null,
   serverRequest: null,
-  stage: "disclosure",
+  stage: "intake",
   statementMode: "text",
   textStatement: "",
 };
 
 function isInputMutation(action: IntakeAction): boolean {
   return [
-    "SET_DISCLOSURE_ACCEPTED",
-    "BEGIN_INTAKE",
     "ADD_IMAGES",
     "REMOVE_IMAGE",
     "COMPLETE_IMAGE_INSPECTION",
@@ -58,7 +57,7 @@ function withInputMutation(
     serverAuthority: null,
     serverError: null,
     serverRequest: null,
-    stage: state.stage === "disclosure" ? "disclosure" : "intake",
+    stage: "intake",
   };
 }
 
@@ -212,23 +211,6 @@ export function intakeReducer(state: IntakeState, action: IntakeAction): IntakeS
   if (state.serverRequest !== null && isInputMutation(action)) return state;
 
   switch (action.type) {
-    case "SET_DISCLOSURE_ACCEPTED":
-      return state.stage === "disclosure"
-        ? withInputMutation(state, { disclosureAccepted: action.value })
-        : state;
-
-    case "BEGIN_INTAKE":
-      return state.stage === "disclosure" && state.disclosureAccepted
-        ? {
-            ...state,
-            inputRevision: state.inputRevision + 1,
-            serverAuthority: null,
-            serverError: null,
-            serverRequest: null,
-            stage: "intake",
-          }
-        : state;
-
     case "ADD_IMAGES": {
       if (state.stage !== "intake") return state;
       const existing = new Set(state.images.map((image) => image.fingerprint));

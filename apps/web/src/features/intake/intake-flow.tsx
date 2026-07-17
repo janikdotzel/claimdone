@@ -22,7 +22,6 @@ import {
   CardFooter,
   CardHeader,
   CardTitle,
-  CheckboxField,
   GateBadge,
   HumanBoundaryCard,
   PageShell,
@@ -70,24 +69,34 @@ import {
 
 const intakeSteps = [
   {
-    description: "Understand the sandbox boundary",
-    id: "disclosure",
-    label: "Disclosure",
-  },
-  {
-    description: "Add staged evidence and choices",
+    description: "Three photos and a short statement",
     id: "intake",
-    label: "Intake",
+    label: "Add evidence",
   },
   {
-    description: "One bounded server question",
+    description: "We organize, check, and fill gaps",
     id: "clarification",
-    label: "Clarify",
+    label: "Claim Agent",
   },
   {
-    description: "Portal A awaits human review",
+    description: "Your complete claim, ready to check",
     id: "review",
     label: "Review",
+  },
+] as const;
+
+const photoRequirements = [
+  {
+    description: "Show both vehicles and their positions.",
+    label: "Overview",
+  },
+  {
+    description: "Move close enough to show the damaged area clearly.",
+    label: "Damage",
+  },
+  {
+    description: "Include the road, signs, lights, or surrounding scene.",
+    label: "Context",
   },
 ] as const;
 
@@ -127,70 +136,10 @@ function FieldErrorList({
 
 export function DemoAnalysisNotice() {
   return (
-    <Alert title="Deterministic INT-002 demo analysis" tone="warning">
-      Your staged evidence is retained as evidence and processed by the bounded local
-      demo workflow. External provider calls remain disabled for this V1 path.
+    <Alert title="Your evidence stays traceable" tone="info">
+      ClaimDone keeps each detail connected to the photo or statement it came from.
+      This demo runs locally and does not call an external provider.
     </Alert>
-  );
-}
-
-function disclosureView({
-  accepted,
-  onAcceptedChange,
-  onContinue,
-}: Readonly<{
-  accepted: boolean;
-  onAcceptedChange: (value: boolean) => void;
-  onContinue: () => void;
-}>) {
-  return (
-    <Card aria-labelledby="disclosure-title">
-      <CardHeader>
-        <p className="section-heading__eyebrow">Step 1 · Disclosure</p>
-        <CardTitle id="disclosure-title">Before you add any evidence</CardTitle>
-      </CardHeader>
-      <CardContent className="stack stack--large">
-        <Alert title="This is a local sandbox" tone="info">
-          ClaimDone prepares a staged draft. It does not contact an insurer, submit a
-          claim, approve a payment, or perform a real-world action.
-        </Alert>
-        <DemoAnalysisNotice />
-        <div className="disclosure-grid">
-          <div>
-            <h3>What happens here</h3>
-            <ul className="check-list">
-              <li>Three staged images are checked locally before analysis.</li>
-              <li>Your statement is preserved exactly as entered.</li>
-              <li>Every image gets its own metadata privacy choice.</li>
-            </ul>
-          </div>
-          <div>
-            <h3>Where automation stops</h3>
-            <ul className="check-list">
-              <li>Deterministic gates can stop the flow at any time.</li>
-              <li>The agent can prepare a draft only up to verified review.</li>
-              <li>A separate human action is required for approval.</li>
-            </ul>
-          </div>
-        </div>
-        <CheckboxField
-          checked={accepted}
-          description="You will provide the required consents again with the staged evidence."
-          id="disclosure-acknowledgement"
-          label="I understand the sandbox and human-approval boundary"
-          onChange={(event) => onAcceptedChange(event.currentTarget.checked)}
-        />
-      </CardContent>
-      <CardFooter>
-        <Button
-          disabled={!accepted}
-          leadingIcon={<ArrowRightIcon />}
-          onClick={onContinue}
-        >
-          Continue to intake
-        </Button>
-      </CardFooter>
-    </Card>
   );
 }
 
@@ -229,15 +178,15 @@ export function ClarificationCard({
     <Card aria-labelledby="clarification-title">
       <form onSubmit={onSubmit}>
         <CardHeader>
-          <p className="section-heading__eyebrow">One bounded clarification</p>
-          <CardTitle id="clarification-title">One detail is still required</CardTitle>
+          <p className="section-heading__eyebrow">One quick question</p>
+          <CardTitle id="clarification-title">We need one detail to complete your claim</CardTitle>
           <p className="card__description">
-            The authoritative server gates stopped before portal fill. Answer this one
-            question to recompute only G4 and G5 before the separate portal run.
+            ClaimDone paused instead of guessing. Your answer is checked before the
+            draft continues.
           </p>
         </CardHeader>
         <CardContent className="stack stack--medium">
-          <Alert title="Server question" tone="info">
+          <Alert title="Missing detail" tone="info">
             {clarification.question}
           </Alert>
           <div className="field">
@@ -247,8 +196,8 @@ export function ClarificationCard({
               </label>
             </div>
             <p className="field__description" id="clarification-time-help">
-              Use 24-hour time in exact HH:MM:SS format, for example 14:30:00. Press
-              Enter to continue.
+              Use 24-hour time including seconds, for example 14:30:00. Press Enter
+              to continue.
             </p>
             <input
               aria-describedby={
@@ -275,7 +224,7 @@ export function ClarificationCard({
             ) : null}
           </div>
           <p className="server-binding">
-            Bound to server version {clarification.expectedVersion} · field {clarification.field}
+            Securely bound to claim version {clarification.expectedVersion} · field {clarification.field}
           </p>
         </CardContent>
         <CardFooter>
@@ -284,7 +233,7 @@ export function ClarificationCard({
             leadingIcon={<ArrowRightIcon />}
             type="submit"
           >
-            {busy ? "Answering and running verified Portal A…" : "Answer and continue"}
+            {busy ? "Checking your answer and completing the draft…" : "Save answer and continue"}
           </Button>
           <Button
             disabled={busy || resetting}
@@ -292,7 +241,7 @@ export function ClarificationCard({
             type="button"
             variant="secondary"
           >
-            {resetting ? "Deleting server case…" : "Start over"}
+            {resetting ? "Clearing the claim…" : "Start over"}
           </Button>
         </CardFooter>
       </form>
@@ -850,20 +799,22 @@ export function IntakeFlow({
   };
 
   const imageSectionError =
-    state.clientErrors.images ?? gateResult.fieldErrors.images;
-  const statementError =
-    gateResult.fieldErrors.statement ??
-    gateResult.fieldErrors[
-      state.statementMode === "text" ? "statement.text" : "statement.audio"
-    ];
+    state.clientErrors.images ??
+    (state.images.length > 0 ? gateResult.fieldErrors.images : undefined);
+  const statementStarted =
+    state.statementMode === "audio" || state.textStatement.length > 0;
+  const statementError = statementStarted
+    ? gateResult.fieldErrors.statement ??
+      gateResult.fieldErrors[
+        state.statementMode === "text" ? "statement.text" : "statement.audio"
+      ]
+    : undefined;
   const currentIndex =
-    state.stage === "disclosure"
+    state.stage === "intake"
       ? 0
-      : state.stage === "intake"
+      : state.stage === "awaiting_clarification"
         ? 1
-        : state.stage === "awaiting_clarification"
-          ? 2
-          : 3;
+        : 2;
   const authoritativeG0 = state.serverAuthority?.claimPacket?.gateDecisions.find(
     (decision) => decision.gateId === "G0",
   );
@@ -923,12 +874,12 @@ export function IntakeFlow({
           <HumanBoundaryCard />
           <Card tone="soft">
             <CardHeader>
-              <CardTitle>Deterministic gate status</CardTitle>
+              <CardTitle>Claim checks</CardTitle>
             </CardHeader>
             <CardContent className="stack stack--medium">
               <GateBadge
                 gateId="G0"
-                label="Intake"
+                label="Evidence"
                 reason={
                   authoritativeG0?.passed
                     ? `Confirmed by server request ${state.serverAuthority?.requestId ?? ""}`
@@ -936,14 +887,14 @@ export function IntakeFlow({
                         .map((code) => gateReasonLabels[code] ?? code)
                         .join("; ") ||
                       (gateResult.g0.passed
-                        ? "Local preflight passed; awaiting server confirmation"
+                        ? "Initial check passed; awaiting final confirmation"
                         : undefined)
                 }
                 status={g0Status}
               />
               <GateBadge
                 gateId="G1"
-                label="Privacy"
+                label="Photo privacy"
                 reason={
                   authoritativeG1?.passed
                     ? `Confirmed at case version ${state.serverAuthority?.case.version ?? ""}`
@@ -951,22 +902,22 @@ export function IntakeFlow({
                         .map((code) => gateReasonLabels[code] ?? code)
                         .join("; ") ||
                       (gateResult.g1.passed
-                        ? "Local preflight passed; awaiting server confirmation"
+                        ? "Initial check passed; awaiting final confirmation"
                         : undefined)
                 }
                 status={g1Status}
               />
               <p className="aside-note">
-                Local checks are preflight only. Passed badges appear only after a
-                request-ID and version-bound server response.
+                A check is shown as passed only after the server confirms the exact
+                claim version. The agent cannot overrule a failed check.
               </p>
             </CardContent>
           </Card>
         </div>
       }
-      description="Add staged evidence, choose privacy handling per image, and pass the local G0/G1 preflight before analysis can begin."
-      eyebrow="Sandbox claim preparation"
-      title="Prepare a traceable intake"
+      description="Add three incident photos and tell us what happened. ClaimDone will organize the details, run the required checks, and prepare one clear claim for your review."
+      eyebrow="Three photos + one short statement"
+      title="Build your claim in a few clear steps"
     >
       <div className="stack stack--large">
         <Card tone="soft">
@@ -982,23 +933,14 @@ export function IntakeFlow({
             role="alert"
             tabIndex={-1}
           >
-            <strong>Server cleanup did not complete.</strong>
+                <strong>We could not clear the previous claim.</strong>
             <p>{cleanupError}</p>
             {state.pendingCaseId !== null ? (
               <p>Pending cleanup case: {state.pendingCaseId}</p>
             ) : null}
-            <p>The local view and evidence remain available so you can try again.</p>
+            <p>Your current view and evidence remain available so you can try again.</p>
           </div>
         ) : null}
-
-        {state.stage === "disclosure"
-          ? disclosureView({
-              accepted: state.disclosureAccepted,
-              onAcceptedChange: (value) =>
-                dispatch({ type: "SET_DISCLOSURE_ACCEPTED", value }),
-              onContinue: () => dispatch({ type: "BEGIN_INTAKE" }),
-            })
-          : null}
 
         {state.stage === "intake" ? (
           <form className="intake-form" noValidate onSubmit={submit}>
@@ -1010,7 +952,7 @@ export function IntakeFlow({
                 role="alert"
                 tabIndex={-1}
               >
-                <strong>Server workflow blocked this request.</strong>
+                <strong>ClaimDone paused this request.</strong>
                 <p>{state.serverError.message}</p>
                 <p>
                   Code {state.serverError.code}
@@ -1033,15 +975,15 @@ export function IntakeFlow({
             >
             <FieldErrorList
               errors={generalBackendErrors}
-              label="The server returned additional validation errors:"
+              label="Please review these additional details:"
             />
             <Card aria-labelledby="images-title">
               <CardHeader>
-                <p className="section-heading__eyebrow">Evidence</p>
-                <CardTitle id="images-title">Add exactly three images</CardTitle>
+                <p className="section-heading__eyebrow">1 · Incident photos</p>
+                <CardTitle id="images-title">Add three photos of the accident</CardTitle>
                 <p className="card__description">
-                  JPG or PNG only, up to 10 MB each. File signatures and EXIF markers
-                  are checked locally.
+                  Include an overview, a close-up of the damage, and the surrounding
+                  road context. JPG or PNG, up to 10 MB each.
                 </p>
               </CardHeader>
               <CardContent className="stack stack--medium">
@@ -1061,9 +1003,9 @@ export function IntakeFlow({
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={handleDrop}
                 >
-                  <p className="drop-zone__title">Drag staged images here</p>
+                  <p className="drop-zone__title">Drop your three photos here</p>
                   <p className="drop-zone__description">
-                    {state.images.length} of {REQUIRED_IMAGE_COUNT} selected
+                    {state.images.length} of {REQUIRED_IMAGE_COUNT} photos added
                   </p>
                   <input
                     accept="image/jpeg,image/png,.jpg,.jpeg,.png"
@@ -1078,7 +1020,7 @@ export function IntakeFlow({
                     type="file"
                   />
                   <label className="button button--secondary" htmlFor="claim-images">
-                    Choose images
+                    Choose photos
                   </label>
                   <span className="visually-hidden" id="images-help">
                     Select exactly three JPG or PNG files, maximum 10 MB per file.
@@ -1092,15 +1034,19 @@ export function IntakeFlow({
                 ) : null}
                 <FieldErrorList
                   errors={imageBackendErrors}
-                  label="The server rejected image or privacy fields:"
+                  label="Please review these photo or privacy details:"
                 />
 
                 {state.images.length === 0 ? (
-                  <StateView
-                    description="Choose or drop three staged JPG or PNG images to begin."
-                    title="No images selected"
-                    variant="empty"
-                  />
+                  <div className="photo-slot-grid" aria-label="Required incident photos">
+                    {photoRequirements.map(({ description, label }, index) => (
+                      <article className="photo-slot" key={label}>
+                        <span className="photo-slot__number">{index + 1}</span>
+                        <strong>{label}</strong>
+                        <p>{description}</p>
+                      </article>
+                    ))}
+                  </div>
                 ) : (
                   <div className="image-grid">
                     {state.images.map((image, index) => {
@@ -1112,7 +1058,7 @@ export function IntakeFlow({
                         <article className="image-card" key={image.id}>
                           <div className="image-card__preview">
                             {image.inspectionStatus === "error" ? (
-                              <span className="image-card__fallback">Invalid image</span>
+                              <span className="image-card__fallback">Photo could not be read</span>
                             ) : (
                               <Image
                                 alt={`Preview ${index + 1}: ${image.name}`}
@@ -1126,9 +1072,12 @@ export function IntakeFlow({
                           <div className="image-card__body">
                             <div className="image-card__heading">
                               <div>
+                                <span className="image-card__role">
+                                  {photoRequirements[index]?.label ?? `Photo ${index + 1}`}
+                                </span>
                                 <p className="image-card__name">{image.name}</p>
                                 <p className="image-card__meta">
-                                  Image {index + 1} · {formatBytes(image.size)}
+                                  Photo {index + 1} · {formatBytes(image.size)}
                                 </p>
                               </div>
                               <Button
@@ -1160,7 +1109,7 @@ export function IntakeFlow({
                               className="choice-fieldset"
                               disabled={image.inspectionStatus !== "complete"}
                             >
-                              <legend>Metadata choice for image {index + 1}</legend>
+                              <legend>Photo {index + 1} privacy</legend>
                               <label>
                                 <input
                                   checked={image.decision === "strip"}
@@ -1174,7 +1123,7 @@ export function IntakeFlow({
                                   }
                                   type="radio"
                                 />
-                                Strip before analysis
+                                Remove metadata before checking
                               </label>
                               <label>
                                 <input
@@ -1189,7 +1138,7 @@ export function IntakeFlow({
                                   }
                                   type="radio"
                                 />
-                                Retain for this sandbox
+                                Keep metadata for this demo
                               </label>
                             </fieldset>
                             {privacyError !== undefined ? (
@@ -1203,7 +1152,7 @@ export function IntakeFlow({
                             ) : null}
                             {image.decision === "retain" ? (
                               <p className="privacy-warning">
-                                Retained metadata may include device or location details.
+                                Kept metadata may include device or location details.
                               </p>
                             ) : null}
                           </div>
@@ -1217,17 +1166,17 @@ export function IntakeFlow({
 
             <Card aria-labelledby="statement-title">
               <CardHeader>
-                <p className="section-heading__eyebrow">Statement</p>
-                <CardTitle id="statement-title">Use written text or one audio memo</CardTitle>
+                <p className="section-heading__eyebrow">2 · What happened?</p>
+                <CardTitle id="statement-title">Add a short text or voice memo</CardTitle>
               </CardHeader>
               <CardContent className="stack stack--medium">
                 <DemoAnalysisNotice />
                 <FieldErrorList
                   errors={statementBackendErrors}
-                  label="The server rejected the statement:"
+                  label="Please review your statement:"
                 />
                 <fieldset className="mode-switch">
-                  <legend>Statement format</legend>
+                  <legend>How would you like to tell us?</legend>
                   <label>
                     <input
                       checked={state.statementMode === "text"}
@@ -1235,7 +1184,7 @@ export function IntakeFlow({
                       onChange={() => changeStatementMode("text")}
                       type="radio"
                     />
-                    Written text
+                    Text
                   </label>
                   <label>
                     <input
@@ -1244,13 +1193,13 @@ export function IntakeFlow({
                       onChange={() => changeStatementMode("audio")}
                       type="radio"
                     />
-                    Audio memo
+                    Voice memo
                   </label>
                 </fieldset>
 
                 {state.statementMode === "text" ? (
                   <TextArea
-                    description="German and English input is preserved exactly—no client-side translation or rewriting."
+                    description="Write naturally. Your words are kept exactly as entered and remain linked to the claim."
                     error={statementError}
                     id="claim-statement"
                     label="What happened?"
@@ -1260,18 +1209,18 @@ export function IntakeFlow({
                         value: event.currentTarget.value,
                       })
                     }
-                    placeholder="Describe the staged incident in your own words."
+                    placeholder="For example: I was stopped at the light when the other car turned into the front-left side of my car. No one was injured."
                     rows={7}
                     value={state.textStatement}
                   />
                 ) : (
                   <div className="audio-field">
                     <label className="field__label" htmlFor="claim-audio">
-                      Audio memo
+                      Voice memo
                     </label>
                     <p className="field__description">
-                      Choose one WAV file. Its duration is checked locally and must not
-                      exceed {MAX_AUDIO_SECONDS} seconds.
+                      Choose one WAV file up to {MAX_AUDIO_SECONDS} seconds. Its duration
+                      is checked before processing.
                     </p>
                     <input
                       accept=".wav,audio/wav,audio/x-wav"
@@ -1304,7 +1253,7 @@ export function IntakeFlow({
                           </audio>
                         ) : null}
                         <Button onClick={removeAudio} size="small" variant="ghost">
-                          Remove audio
+                          Remove memo
                         </Button>
                       </div>
                     ) : null}
@@ -1316,71 +1265,16 @@ export function IntakeFlow({
                   </div>
                 )}
               </CardContent>
-            </Card>
-
-            <Card aria-labelledby="consents-title">
-              <CardHeader>
-                <p className="section-heading__eyebrow">Required consents</p>
-                <CardTitle id="consents-title">Confirm all three before continuing</CardTitle>
-              </CardHeader>
-              <CardContent className="consent-list">
+              <CardFooter className="analysis-footer">
                 <FieldErrorList
                   errors={consentBackendErrors}
-                  label="The server rejected one or more consent fields:"
+                  label="ClaimDone could not confirm the demo permissions:"
                 />
-                <CheckboxField
-                  checked={state.consents.sandbox}
-                  error={gateResult.fieldErrors["consents.sandbox"]}
-                  id="consent-sandbox"
-                  label="I understand this is a sandbox and no real claim is submitted"
-                  onChange={(event) =>
-                    dispatch({
-                      consent: "sandbox",
-                      type: "SET_CONSENT",
-                      value: event.currentTarget.checked,
-                    })
-                  }
-                />
-                <CheckboxField
-                  checked={state.consents.imageRights}
-                  error={gateResult.fieldErrors["consents.imageRights"]}
-                  id="consent-image-rights"
-                  label="I have permission to use these staged images"
-                  onChange={(event) =>
-                    dispatch({
-                      consent: "imageRights",
-                      type: "SET_CONSENT",
-                      value: event.currentTarget.checked,
-                    })
-                  }
-                />
-                <CheckboxField
-                  checked={state.consents.dataProcessing}
-                  error={gateResult.fieldErrors["consents.dataProcessing"]}
-                  id="consent-data-processing"
-                  label="I consent to processing this staged evidence for the demo"
-                  onChange={(event) =>
-                    dispatch({
-                      consent: "dataProcessing",
-                      type: "SET_CONSENT",
-                      value: event.currentTarget.checked,
-                    })
-                  }
-                />
-              </CardContent>
-              <CardFooter className="analysis-footer">
                 <p className="analysis-note" id="analysis-notice">
-                  This runs the bounded local INT-002 analysis and deterministic gates.
-                  External provider calls remain disabled for this V1 path.
+                  By selecting Create my claim, you confirm that you may use these
+                  staged photos and allow ClaimDone to process them for this local
+                  demo. Nothing is submitted to an insurer.
                 </p>
-                <div aria-live="polite" className="gate-summary">
-                  <span>
-                    Local G0 preflight {gateResult.g0.passed ? "passed" : "pending"}
-                  </span>
-                  <span>
-                    Local G1 preflight {gateResult.g1.passed ? "passed" : "pending"}
-                  </span>
-                </div>
                 <Button
                   aria-describedby="analysis-notice continue-requirements"
                   disabled={!gateResult.canContinue || state.serverRequest !== null}
@@ -1388,14 +1282,15 @@ export function IntakeFlow({
                   type="submit"
                 >
                   {state.serverRequest?.kind === "intake"
-                    ? "Running deterministic intake analysis…"
+                    ? "Checking and organizing your claim…"
                     : state.serverError === null
-                      ? "Analyze staged claim"
-                      : "Retry intake analysis"}
+                      ? "Create my claim"
+                      : "Try claim checks again"}
                 </Button>
                 <span className="visually-hidden" id="continue-requirements">
-                  Continue is available only after deterministic G0 and G1 preflight
-                  checks pass. The canonical server snapshot remains authoritative.
+                  Continue is available only after the fixed local demo acknowledgements
+                  and deterministic G0 and G1 preflight checks pass. The canonical
+                  server snapshot remains authoritative.
                 </span>
               </CardFooter>
             </Card>
@@ -1424,29 +1319,29 @@ export function IntakeFlow({
         readyAuthority !== null ? (
           <div className="stack stack--medium">
             <StateView
-              description="The exact clarification answer was committed once and only G4/G5 were recomputed. The separate, version-bound Portal A run is still required."
-              title="Claim data is ready for the portal run"
+              description="ClaimDone has everything it needs. It will now complete the draft and compare every prepared field with its source."
+              title="Your details are ready for the final checks"
               variant="success"
             />
             {state.serverError !== null ? (
-              <Alert title="Portal A run did not complete" tone="warning">
-                {state.serverError.message} The clarification will not be sent again;
-                retry calls only the version-bound run endpoint.
+              <Alert title="The final checks did not complete" tone="warning">
+                {state.serverError.message} Your answer is already saved and will not
+                be sent again when you retry.
               </Alert>
             ) : null}
             <Card>
               <CardContent className="ready-summary server-review-summary">
                 <div>
-                  <span>Case</span>
+                  <span>Claim reference</span>
                   <strong>{readyAuthority.case.caseId}</strong>
                 </div>
                 <div>
-                  <span>Ready version</span>
+                  <span>Secure claim version</span>
                   <strong>{readyAuthority.case.version}</strong>
                 </div>
                 <div>
-                  <span>Next authority call</span>
-                  <strong>POST /run only</strong>
+                  <span>Next step</span>
+                  <strong>Complete and verify the draft</strong>
                 </div>
               </CardContent>
               <CardFooter>
@@ -1455,17 +1350,17 @@ export function IntakeFlow({
                   onClick={retryRun}
                 >
                   {state.serverRequest?.kind === "run"
-                    ? "Running Portal A and verification…"
+                    ? "Completing and verifying your claim…"
                     : state.serverError === null
-                      ? "Run Portal A"
-                      : "Retry Portal A run"}
+                      ? "Complete my claim"
+                      : "Try final checks again"}
                 </Button>
                 <Button
                   disabled={isResetting || state.serverRequest !== null}
                   onClick={reset}
                   variant="secondary"
                 >
-                  {isResetting ? "Deleting server case…" : "Start over"}
+                  {isResetting ? "Clearing the claim…" : "Start over"}
                 </Button>
               </CardFooter>
             </Card>
@@ -1476,13 +1371,13 @@ export function IntakeFlow({
         reviewAuthority !== null ? (
           <div className="stack stack--medium">
             <StateView
-              description="Deterministic G0–G8 passed. The first rendered-field check found one bounded fault, one narrow repair was applied, and the second verification attempt passed reproducibly."
-              title="Verified Portal A review is ready"
+              description="Your evidence, required details, privacy choices, and prepared fields passed every required check. Review the claim before anything moves forward."
+              title="Your complete claim is ready to review"
               variant="success"
             />
-            <Alert title="Human boundary preserved" tone="warning">
-              ClaimDone stopped in backend state review after verification. The agent
-              cannot approve or submit this sandbox claim, and no receipt exists.
+            <Alert title="Nothing has been submitted" tone="warning">
+              ClaimDone stops at review. The agent cannot approve or submit this demo
+              claim; the next action always belongs to you.
             </Alert>
             {workflowStore.failedClosed === null ? null : (
               <Alert title="Redacted activity stream unavailable" tone="warning">
@@ -1493,24 +1388,27 @@ export function IntakeFlow({
             <WorkflowExperience
               events={workflowStore.events}
               mode="ready"
+              showSandboxBanner={false}
               snapshot={reviewAuthority}
             />
-            <Card>
-              <CardContent className="ready-summary server-review-summary">
+            <details className="technical-details">
+              <summary>Technical claim record</summary>
+              <Card>
+                <CardContent className="ready-summary server-review-summary">
                 <div>
-                  <span>Case</span>
+                  <span>Claim reference</span>
                   <strong>{reviewAuthority.case.caseId}</strong>
                 </div>
                 <div>
-                  <span>Authoritative revision</span>
+                  <span>Verified revision</span>
                   <strong>{reviewAuthority.case.version}</strong>
                 </div>
                 <div>
-                  <span>Server request</span>
+                  <span>Verification request</span>
                   <strong>{reviewAuthority.requestId}</strong>
                 </div>
                 <div>
-                  <span>Deterministic gates</span>
+                  <span>Completed checks</span>
                   <strong>
                     {reviewAuthority.claimPacket.gateDecisions
                       .map(({ gateId }) => gateId)
@@ -1518,17 +1416,20 @@ export function IntakeFlow({
                   </strong>
                 </div>
                 <div>
-                  <span>Portal state</span>
+                  <span>Claim state</span>
                   <strong>{reviewAuthority.portalSession.state}</strong>
                 </div>
                 <div>
-                  <span>Verification</span>
+                  <span>Field comparison</span>
                   <strong>
                     {reviewAuthority.verificationAttempts.attempts.length} attempts ·
                     verified
                   </strong>
                 </div>
-              </CardContent>
+                </CardContent>
+              </Card>
+            </details>
+            <Card className="review-actions">
               <CardFooter>
                 <a
                   className="button button--primary"
@@ -1536,10 +1437,10 @@ export function IntakeFlow({
                   rel="noopener noreferrer"
                   target="_blank"
                 >
-                  Open Portal A review
+                  Open secure claim review
                 </a>
                 <Button disabled={isResetting} onClick={reset} variant="secondary">
-                  {isResetting ? "Deleting server case…" : "Start over"}
+                  {isResetting ? "Clearing the claim…" : "Start over"}
                 </Button>
               </CardFooter>
             </Card>

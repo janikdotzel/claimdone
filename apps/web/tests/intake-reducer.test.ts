@@ -36,14 +36,10 @@ function image(id: string, decision: "strip" | "retain" | null = null): IntakeIm
 }
 
 function beginIntake() {
-  const accepted = intakeReducer(initialIntakeState, {
-    type: "SET_DISCLOSURE_ACCEPTED",
-    value: true,
-  });
-  return intakeReducer(accepted, { type: "BEGIN_INTAKE" });
+  return initialIntakeState;
 }
 
-function validTextState(): IntakeState {
+function validEvidenceState(): IntakeState {
   let state = beginIntake();
   state = intakeReducer(state, {
     error: null,
@@ -54,9 +50,6 @@ function validTextState(): IntakeState {
     type: "SET_TEXT_STATEMENT",
     value: "Ich stand an der Ampel, als das andere Fahrzeug auffuhr.",
   });
-  for (const consent of ["sandbox", "imageRights", "dataProcessing"] as const) {
-    state = intakeReducer(state, { consent, type: "SET_CONSENT", value: true });
-  }
   for (const current of state.images) {
     state = intakeReducer(state, {
       decision: current.id === "two" ? "retain" : "strip",
@@ -65,6 +58,10 @@ function validTextState(): IntakeState {
     });
   }
   return state;
+}
+
+function validTextState(): IntakeState {
+  return validEvidenceState();
 }
 
 function awaitingResponse(): AwaitingClarificationResponse {
@@ -85,7 +82,7 @@ function awaitingResponse(): AwaitingClarificationResponse {
   clarification.clarificationId = "clarification-001";
   clarification.expectedVersion = 4;
   clarification.field = "incident_time";
-  clarification.question = "Wann ereignete sich der Vorfall?";
+  clarification.question = "What time did the incident happen?";
   body.requestId = "request-intake-001";
   const parsed = parseWorkflowSnapshot(body, "case-intake-001");
   if (!isInt002ClarificationSnapshot(parsed)) {
@@ -109,13 +106,21 @@ function readyResponse(): ReadyToFillResponse {
 }
 
 describe("intake reducer authority and validation", () => {
-  it("keeps disclosure separate and cannot skip its acknowledgement", () => {
-    const skipped = intakeReducer(initialIntakeState, { type: "BEGIN_INTAKE" });
-    expect(skipped.stage).toBe("disclosure");
+  it("starts directly at evidence with the fixed local-demo acknowledgements", () => {
+    expect(initialIntakeState.stage).toBe("intake");
+    expect(initialIntakeState.consents).toEqual({
+      dataProcessing: true,
+      imageRights: true,
+      sandbox: true,
+    });
 
-    const started = beginIntake();
-    expect(started.stage).toBe("intake");
-    expect(evaluateIntakeGates(started).canContinue).toBe(false);
+    const incomplete = intakeReducer(initialIntakeState, {
+      kind: "intake",
+      token: 1,
+      type: "BEGIN_SERVER_REQUEST",
+    });
+    expect(incomplete.serverRequest).toBeNull();
+    expect(incomplete.consents).toEqual(initialIntakeState.consents);
   });
 
   it("preserves German and English statement text byte-for-byte", () => {
@@ -202,6 +207,25 @@ describe("intake reducer authority and validation", () => {
         type: "BEGIN_SERVER_REQUEST",
       }).stage,
     ).toBe("intake");
+
+    const consentReadyState = validTextState();
+    const missingConsent = {
+      ...consentReadyState,
+      consents: {
+        ...consentReadyState.consents,
+        dataProcessing: false,
+      },
+    };
+    expect(evaluateIntakeGates(missingConsent).g0.reasonCodes).toContain(
+      "G0_CONSENT_MISSING",
+    );
+    expect(
+      intakeReducer(missingConsent, {
+        kind: "intake",
+        token: 2,
+        type: "BEGIN_SERVER_REQUEST",
+      }).serverRequest,
+    ).toBeNull();
   });
 
   it("does not let a local pass override a server failure", () => {

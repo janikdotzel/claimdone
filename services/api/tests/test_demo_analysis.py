@@ -236,7 +236,7 @@ def test_first_round_emits_exactly_one_incident_time_clarification() -> None:
     assert result.packet.claim.missing_required_fields == (RequiredClaimField.INCIDENT_TIME,)
     assert result.clarification is not None
     assert result.clarification.view.field is RequiredClaimField.INCIDENT_TIME
-    assert result.clarification.view.question == "Wann ereignete sich der Vorfall?"
+    assert result.clarification.view.question == "What time did the incident happen?"
     assert result.clarification.view.question == INT002_CLARIFICATION_QUESTION
     assert result.clarification.view.round == 1
     assert result.clarification.view.expected_version == RESOLVED_VERSION

@@ -4,7 +4,7 @@
 }
 
 .experienceBody {
-  width: min(1400px, calc(100% - 2rem));
+  width: min(1200px, calc(100% - 2rem));
   margin: 0 auto;
   padding: 1.5rem 0 4rem;
 }
@@ -16,10 +16,11 @@
   justify-content: center;
   gap: 0.65rem;
   padding: 0.45rem 1rem;
-  background: var(--color-accent-100);
-  color: var(--color-navy-950);
+  border-block: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
   font-size: 0.82rem;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: 0.02em;
   text-align: center;
 }
@@ -29,12 +30,12 @@
   height: 0.55rem;
   border-radius: 999px;
   background: var(--color-teal-700);
-  box-shadow: 0 0 0 4px rgb(15 118 110 / 14%);
+  box-shadow: 0 0 0 4px rgb(37 99 79 / 12%);
 }
 
 .shell {
   display: grid;
-  gap: 1rem;
+  gap: 1.25rem;
 }
 
 .shellHeader {
@@ -42,10 +43,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  border: 1px solid var(--color-border);
-  border-radius: 1rem;
-  padding: 1.25rem 1.4rem;
-  background: var(--color-surface);
+  padding: 0.25rem 0 0;
 }
 
 .shellHeader h1,
@@ -61,14 +59,16 @@
 
 .shellHeader h1 {
   margin-top: 0.25rem;
-  font-size: clamp(1.45rem, 3vw, 2.1rem);
+  font-size: clamp(2rem, 4vw, 3.25rem);
+  letter-spacing: -0.045em;
 }
 
 .eyebrow {
   margin: 0;
   color: var(--color-teal-700);
   font-size: 0.7rem;
-  font-weight: 850;
+  font-family: var(--font-mono);
+  font-weight: 600;
   letter-spacing: 0.11em;
   text-transform: uppercase;
 }
@@ -223,7 +223,183 @@
   border: 1px solid var(--color-border);
   border-radius: 1rem;
   background: var(--color-surface);
-  box-shadow: 0 16px 45px rgb(7 26 43 / 6%);
+  box-shadow: none;
+}
+
+.claimDocument {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 1.125rem;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
+}
+
+.claimDocumentHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.claimDocumentHeader h2 {
+  margin: 0.3rem 0 0;
+  font-size: clamp(1.65rem, 3vw, 2.35rem);
+}
+
+.completeBadge,
+.progressBadge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.completeBadge {
+  border-color: #b8d8c8;
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.progressBadge {
+  border-color: var(--color-border);
+  background: var(--color-surface-soft);
+  color: var(--color-text-muted);
+}
+
+.completeness {
+  display: grid;
+  gap: 0.6rem;
+  padding: 1.1rem clamp(1.25rem, 3vw, 2rem);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-soft);
+}
+
+.completeness > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+}
+
+.completeness > div:first-child strong {
+  color: var(--color-teal-700);
+}
+
+.completenessTrack {
+  height: 0.35rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+
+.completenessTrack span {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: var(--color-teal-700);
+}
+
+.claimFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  padding: clamp(0.5rem, 2vw, 1rem) clamp(1.25rem, 3vw, 2rem);
+}
+
+.claimFieldGrid div {
+  min-width: 0;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.claimFieldGrid div:nth-child(odd) {
+  padding-right: 1.5rem;
+}
+
+.claimFieldGrid div:nth-child(even) {
+  padding-left: 1.5rem;
+  border-left: 1px solid var(--color-border);
+}
+
+.claimFieldGrid dt {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+
+.claimFieldGrid dd {
+  margin: 0.25rem 0 0;
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.claimDocumentFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem clamp(1.25rem, 3vw, 2rem);
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+}
+
+.claimDocumentFooter strong {
+  color: var(--color-teal-700);
+}
+
+.auditDetails {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 1rem;
+  background: var(--color-surface);
+}
+
+.auditDetails > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  padding: 1rem 1.2rem;
+  list-style: none;
+}
+
+.auditDetails > summary::-webkit-details-marker {
+  display: none;
+}
+
+.auditDetails > summary span:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.auditDetails > summary small {
+  color: var(--color-text-muted);
+}
+
+.auditDetails > summary > span:last-child {
+  color: var(--color-teal-700);
+  font-size: 1.4rem;
+  transition: transform 140ms ease;
+}
+
+.auditDetails[open] > summary > span:last-child {
+  transform: rotate(45deg);
+}
+
+.auditBody {
+  display: grid;
+  gap: 1rem;
+  border-top: 1px solid var(--color-border);
+  padding: 1rem;
+  background: var(--color-surface-soft);
 }
 
 .portalPane,
@@ -644,6 +820,28 @@
 
   .eventList time {
     grid-column: 2;
+  }
+
+  .claimDocumentHeader,
+  .claimDocumentFooter {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .claimFieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .claimFieldGrid div:nth-child(odd),
+  .claimFieldGrid div:nth-child(even) {
+    padding-inline: 0;
+    border-left: 0;
+  }
+
+  .sectionHeading,
+  .evidenceCard {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

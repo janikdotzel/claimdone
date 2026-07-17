@@ -39,7 +39,7 @@ INT002_IMAGE_FIXTURES: Final = (
     ),
 )
 INT002_INCIDENT_TIME = "14:30:00"
-INT002_CLARIFICATION_QUESTION = "Wann ereignete sich der Vorfall?"
+INT002_CLARIFICATION_QUESTION = "What time did the incident happen?"
 INT002_SYNTHETIC_STATEMENT_TEXT = (
     "Synthetic ClaimDone Build Week demo. On 2026-07-14 at Demo Street 1, Berlin, "
     "a staged second vehicle contacted the rear of the demo vehicle. Demo claimant: "

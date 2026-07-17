@@ -42,7 +42,6 @@ export type IntakeConsents = Readonly<{
 }>;
 
 export type IntakeStage =
-  | "disclosure"
   | "intake"
   | "awaiting_clarification"
   | "ready_to_fill"
@@ -68,7 +67,6 @@ export type IntakeState = Readonly<{
   backendErrors: Readonly<Record<string, string>>;
   clientErrors: Readonly<Record<string, string>>;
   consents: IntakeConsents;
-  disclosureAccepted: boolean;
   images: ReadonlyArray<IntakeImage>;
   inputRevision: number;
   pendingCaseId: string | null;
@@ -86,8 +84,6 @@ export type BackendValidationError = Readonly<{
 }>;
 
 export type IntakeAction =
-  | Readonly<{ type: "SET_DISCLOSURE_ACCEPTED"; value: boolean }>
-  | Readonly<{ type: "BEGIN_INTAKE" }>
   | Readonly<{
       error: string | null;
       images: ReadonlyArray<IntakeImage>;

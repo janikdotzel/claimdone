@@ -19,6 +19,7 @@ import {
 } from "../../../components/ui";
 
 export const metadata: Metadata = {
+  robots: { index: false },
   title: "Component showcase",
 };
 

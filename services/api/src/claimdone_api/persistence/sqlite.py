@@ -328,13 +328,13 @@ _READY_TO_FILL_PLAN = (
     ),
 )
 _QUESTION_BY_FIELD = {
-    RequiredClaimField.INCIDENT_DATE: "An welchem Datum ereignete sich der Vorfall?",
-    RequiredClaimField.INCIDENT_TIME: "Wann ereignete sich der Vorfall?",
-    RequiredClaimField.LOCATION: "Wo ereignete sich der Vorfall?",
-    RequiredClaimField.CLAIMANT_NAME: "Wie lautet der Name der anspruchstellenden Person?",
-    RequiredClaimField.POLICY_REFERENCE: "Wie lautet die Demo-Policennummer?",
-    RequiredClaimField.VEHICLE_REGISTRATION: "Wie lautet das Demo-Kennzeichen?",
-    RequiredClaimField.COUNTERPARTY_KNOWN: "Ist eine Gegenpartei bekannt?",
+    RequiredClaimField.INCIDENT_DATE: "What was the date of the incident?",
+    RequiredClaimField.INCIDENT_TIME: "What time did the incident happen?",
+    RequiredClaimField.LOCATION: "Where did the incident happen?",
+    RequiredClaimField.CLAIMANT_NAME: "What is the claimant's name?",
+    RequiredClaimField.POLICY_REFERENCE: "What is the demo policy number?",
+    RequiredClaimField.VEHICLE_REGISTRATION: "What is the demo vehicle registration?",
+    RequiredClaimField.COUNTERPARTY_KNOWN: "Is the other party known?",
 }
 _TEXT_CLARIFIABLE_FIELDS = frozenset(_QUESTION_BY_FIELD)
 _WORKFLOW_KIND_BY_AUDIT_EVENT_TYPE = {

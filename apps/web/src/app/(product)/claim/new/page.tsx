@@ -4,8 +4,8 @@ import { IntakeFlow } from "../../../../features/intake/intake-flow";
 
 export const metadata: Metadata = {
   description:
-    "Prepare a staged claim intake with local image, statement, consent, and metadata checks.",
-  title: "New sandbox intake",
+    "Turn three incident photos and a short statement into a complete, reviewable insurance claim.",
+  title: "Start your claim",
 };
 
 export default function NewClaimPage() {
