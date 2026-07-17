@@ -93,12 +93,16 @@ npm run build
 npm run start
 ```
 
+Use the production build for a live or recorded presentation. It avoids
+development-only Fast Refresh interruptions while the isolated browser opens the
+local portal routes.
+
 ## Quick judge walkthrough
 
 1. Open `/demo`; the synthetic evidence is already staged and the activity history is intentionally empty.
 2. Select **Analyze accident**. The presenter panel shows the validated photo and statement review, then identifies the missing date and time.
 3. Add a date and time and save the claim. The activity panel records the customer correction and the completed decision.
-4. Select **Fill insurer portal sandbox**. Computer Use opens the local Demo Mutual home page, follows the two permitted links, fills the five approved fields, and stops before submission.
+4. Select **Run Computer Use in insurer sandbox**. Computer Use opens the local Demo Mutual home page, follows the two permitted links, fills the five approved fields, and stops before submission.
 5. Review the captured browser replay and final sandbox result. No real insurer is contacted and no claim is submitted.
 
 ## Routes and models

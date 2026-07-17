@@ -2,7 +2,12 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import type { StatementMode } from "@/lib/analysis-schema";
 import type {
@@ -45,6 +50,18 @@ const fieldLabels = {
   location: "Location",
   whatHappened: "What happened",
 } as const;
+
+const demoStages = [
+  { id: "evidence", label: "Evidence" },
+  { id: "agent", label: "Agent review" },
+  { id: "portal", label: "Portal handoff" },
+] as const;
+
+type DemoStage = (typeof demoStages)[number]["id"];
+
+type ActivityItemStyle = CSSProperties & {
+  "--activity-delay": string;
+};
 
 function sourceLabel(event: AgentActivityEvent): string {
   switch (event.source.kind) {
@@ -144,6 +161,9 @@ function ActivityLedger({
           event.source.kind === "photo"
             ? photos[event.source.photoIndex - 1]
             : undefined;
+        const itemStyle: ActivityItemStyle = {
+          "--activity-delay": `${event.sequence * 90}ms`,
+        };
 
         return (
           <li
@@ -153,6 +173,7 @@ function ActivityLedger({
                 : styles.activityComplete
             }
             key={`${event.sequence}-${event.title}`}
+            style={itemStyle}
           >
             <span aria-hidden="true" className={styles.ledgerDot}>
               {event.status === "attention" ? "!" : "✓"}
@@ -290,18 +311,26 @@ function ComputerUseReplay({ replay }: { replay: ComputerUseReplay }) {
         </button>
       </div>
 
-      <ol className={styles.replaySteps}>
-        {replay.steps.map((replayStep, index) => (
-          <li
-            aria-current={index === stepIndex ? "step" : undefined}
-            className={index <= stepIndex ? styles.replayStepComplete : undefined}
-            key={`${replayStep.sequence}-${replayStep.kind}`}
-          >
-            <span aria-hidden="true">{index < stepIndex ? "✓" : index + 1}</span>
-            {replayTitle(replayStep)}
-          </li>
-        ))}
-      </ol>
+      <details className={styles.replayHistory}>
+        <summary>
+          <span>Full browser action log</span>
+          <strong>{replay.steps.length} captured steps</strong>
+        </summary>
+        <ol className={styles.replaySteps}>
+          {replay.steps.map((replayStep, index) => (
+            <li
+              aria-current={index === stepIndex ? "step" : undefined}
+              className={index <= stepIndex ? styles.replayStepComplete : undefined}
+              key={`${replayStep.sequence}-${replayStep.kind}`}
+            >
+              <span aria-hidden="true">
+                {index < stepIndex ? "✓" : index + 1}
+              </span>
+              {replayTitle(replayStep)}
+            </li>
+          ))}
+        </ol>
+      </details>
 
       <div className={styles.stopBoundary}>
         <span aria-hidden="true">■</span>
@@ -329,7 +358,37 @@ export function DemoLens({
   replay,
   statementMode,
 }: DemoLensProps) {
-  const latestActivity = activity?.events.at(-1)?.title;
+  const latestEvent = activity?.events.at(-1);
+  const latestActivity = latestEvent?.title;
+  const portalStageActive = Boolean(isPreparingPortal || replay || portalError);
+  const activeStage: DemoStage = portalStageActive
+    ? "portal"
+    : flowState === "input"
+      ? "evidence"
+      : "agent";
+  const activeStageIndex = demoStages.findIndex(
+    (stage) => stage.id === activeStage,
+  );
+  const outcome =
+    flowState === "analyzing"
+      ? activity
+        ? "Reviewing the customer update…"
+        : "Reviewing evidence…"
+      : latestActivity
+        ? latestActivity
+        : flowState === "needs_information"
+          ? "One more detail needed"
+          : flowState === "ready"
+            ? "Claim ready for review"
+            : "Waiting for analysis";
+  const outcomeTone =
+    flowState === "analyzing"
+      ? "active"
+      : latestEvent?.status === "attention" || flowState === "needs_information"
+        ? "attention"
+        : latestEvent || flowState === "ready"
+          ? "complete"
+          : "idle";
 
   return (
     <aside aria-labelledby="agent-activity-title" className={styles.panel}>
@@ -347,6 +406,39 @@ export function DemoLens({
         Observable checks and decisions — not private model reasoning.
       </p>
 
+      <ol aria-label="Demo progress" className={styles.stageRail}>
+        {demoStages.map((stage, index) => {
+          const isActive = index === activeStageIndex;
+          const isComplete = index < activeStageIndex;
+          const stageStatus = isActive
+            ? "Current step"
+            : isComplete
+              ? "Complete"
+              : "Upcoming";
+
+          return (
+            <li
+              aria-current={isActive ? "step" : undefined}
+              className={`${styles.stageItem} ${
+                isActive
+                  ? styles.stageActive
+                  : isComplete
+                    ? styles.stageComplete
+                    : styles.stageUpcoming
+              }`}
+              data-stage={stage.id}
+              key={stage.id}
+            >
+              <span aria-hidden="true" className={styles.stageMark}>
+                {isComplete ? "✓" : index + 1}
+              </span>
+              <span className={styles.stageLabel}>{stage.label}</span>
+              <span className={styles.visuallyHidden}>{stageStatus}</span>
+            </li>
+          );
+        })}
+      </ol>
+
       <section aria-labelledby="claim-agent-title" className={styles.agentSection}>
         <div className={styles.sectionHeading}>
           <span aria-hidden="true" className={styles.agentGlyph}>✦</span>
@@ -355,19 +447,48 @@ export function DemoLens({
             <h3 id="claim-agent-title">Evidence to decision</h3>
           </div>
         </div>
-        <span aria-live="polite" className={styles.visuallyHidden}>
-          {latestActivity ??
-            (flowState === "analyzing"
-              ? "The claim agent is reviewing the evidence"
-              : "The claim agent is waiting for analysis")}
-        </span>
-        <ActivityLedger
-          activity={activity}
-          flowState={flowState}
-          photoCount={photoCount}
-          photos={photos}
-          statementMode={statementMode}
-        />
+        <div
+          aria-live="polite"
+          className={`${styles.agentOutcome} ${
+            outcomeTone === "attention"
+              ? styles.agentOutcomeAttention
+              : outcomeTone === "active"
+                ? styles.agentOutcomeActive
+                : outcomeTone === "complete"
+                  ? styles.agentOutcomeComplete
+                  : styles.agentOutcomeIdle
+          }`}
+        >
+          <span aria-hidden="true" className={styles.outcomeMark} />
+          <div>
+            <span>Current outcome</span>
+            <strong>{outcome}</strong>
+          </div>
+        </div>
+
+        {portalStageActive && activity ? (
+          <details className={styles.agentHistory}>
+            <summary>
+              <span>Agent review complete</span>
+              <strong>{activity.events.length} observable checks</strong>
+            </summary>
+            <ActivityLedger
+              activity={activity}
+              flowState={flowState}
+              photoCount={photoCount}
+              photos={photos}
+              statementMode={statementMode}
+            />
+          </details>
+        ) : (
+          <ActivityLedger
+            activity={activity}
+            flowState={flowState}
+            photoCount={photoCount}
+            photos={photos}
+            statementMode={statementMode}
+          />
+        )}
       </section>
 
       <section aria-labelledby="computer-use-title" className={styles.computerSection}>

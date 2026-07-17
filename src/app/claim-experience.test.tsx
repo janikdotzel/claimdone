@@ -142,6 +142,18 @@ describe("ClaimExperience", () => {
     expect(
       screen.getByText("Activity will appear when you start the analysis."),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: "Demo progress" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Evidence", { selector: "span" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Agent review", { selector: "span" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Portal handoff", { selector: "span" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Evidence staged")).not.toBeInTheDocument();
     expect(
       screen.queryByText("Image and statement review"),
@@ -269,7 +281,9 @@ describe("ClaimExperience", () => {
     await user.click(screen.getByRole("button", { name: "Analyze accident" }));
     await screen.findByRole("heading", { name: "Your claim is ready" });
     await user.click(
-      screen.getByRole("button", { name: "Fill insurer portal sandbox" }),
+      screen.getByRole("button", {
+        name: "Run Computer Use in insurer sandbox",
+      }),
     );
 
     expect(await screen.findByText("Captured from this run")).toBeInTheDocument();
@@ -424,7 +438,9 @@ describe("ClaimExperience", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Your claim is ready" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Preparing insurer portal…");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Opening the insurer portal and preparing the form…",
+    );
     expect(
       screen.getByRole("button", { name: "Preparing insurer portal…" }),
     ).toBeDisabled();
@@ -653,7 +669,10 @@ describe("ClaimExperience", () => {
       new File(["damage"], "damage.jpg", { type: "image/jpeg" }),
     ];
 
-    await user.upload(screen.getByLabelText("Add accident photos"), photos);
+    await user.upload(
+      screen.getByLabelText("Use your own accident photos"),
+      photos,
+    );
 
     expect(screen.getByAltText("Preview of overview.png")).toBeInTheDocument();
     expect(screen.getByAltText("Preview of damage.jpg")).toBeInTheDocument();
@@ -753,7 +772,7 @@ describe("ClaimExperience", () => {
     renderMockExperience();
 
     await user.upload(
-      screen.getByLabelText("Add accident photos"),
+      screen.getByLabelText("Use your own accident photos"),
       new File(["not-an-image"], "claim.pdf", { type: "application/pdf" }),
     );
 
@@ -764,7 +783,7 @@ describe("ClaimExperience", () => {
   it("enforces the photo count and size limits", async () => {
     const user = userEvent.setup();
     renderMockExperience();
-    const photoInput = screen.getByLabelText("Add accident photos");
+    const photoInput = screen.getByLabelText("Use your own accident photos");
 
     await user.upload(
       photoInput,

@@ -213,12 +213,39 @@ export function ClaimExperience({
     ? getMissingClaimDetailFields(claim)
     : [];
   const hasMissingClaimDetails = missingClaimFields.length > 0;
+  const isUsingSampleEvidence =
+    photos.length === samplePhotos.length &&
+    photos.every((photo) => photo.id.startsWith("sample-"));
 
   useEffect(() => {
-    if (flowState !== "input") {
+    if (flowState === "needs_information" || flowState === "ready") {
       window.requestAnimationFrame(() => stateHeadingRef.current?.focus());
     }
   }, [flowState, isEditingClaim]);
+
+  useEffect(() => {
+    if (!isPresenter || flowState === "input") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const heading = stateHeadingRef.current;
+
+      if (!heading || typeof heading.scrollIntoView !== "function") {
+        return;
+      }
+
+      const reduceMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      heading.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [flowState, isPresenter]);
 
   useEffect(() => {
     if (analysisError) {
@@ -386,7 +413,9 @@ export function ClaimExperience({
 
   async function performAnalysis(answer?: string) {
     setAnalysisError(false);
-    setAgentActivity(null);
+    if (!answer) {
+      setAgentActivity(null);
+    }
     setComputerReplay(null);
     setFlowState("analyzing");
 
@@ -636,18 +665,28 @@ export function ClaimExperience({
             isPresenter ? demoStyles.workspace : demoStyles.standardWorkspace
           }
         >
-          <section aria-labelledby="page-title" className={styles.hero}>
-          <div className={styles.intro}>
-            <h1 id="page-title">Turn accident photos into a claim.</h1>
-            <p className={styles.lead}>
-              Add 1–3 photos and tell us what happened. ClaimDone will prepare a clear
-              claim for you to review.
-            </p>
-          </div>
+          <section
+            aria-labelledby="page-title"
+            className={`${styles.hero} ${
+              isPresenter && flowState !== "input"
+                ? demoStyles.presenterFlowActive
+                : ""
+            }`}
+          >
+            <div className={styles.intro}>
+              <h1 id="page-title">Turn accident photos into a claim.</h1>
+              <p className={styles.lead}>
+                Add 1–3 photos and tell us what happened. ClaimDone will prepare a
+                clear claim for you to review.
+              </p>
+            </div>
 
-          <div className={styles.flowPreview}>
-            {flowState === "input" ? (
-              <section aria-labelledby="evidence-title" className={styles.evidenceCard}>
+            <div className={styles.flowPreview}>
+              {flowState === "input" ? (
+                <section
+                  aria-labelledby="evidence-title"
+                  className={styles.evidenceCard}
+                >
                 <div className={styles.cardHeader}>
                   <h2 id="evidence-title">Add evidence</h2>
                   <div className={styles.fileAction}>
@@ -657,7 +696,13 @@ export function ClaimExperience({
                         hasPhotoValidationError ? " evidence-validation-error" : ""
                       }`}
                       aria-invalid={hasPhotoValidationError || undefined}
-                      aria-label="Add accident photos"
+                      aria-label={
+                        isUsingSampleEvidence
+                          ? "Use your own accident photos"
+                          : photos.length > 0
+                            ? "Replace accident photos"
+                            : "Add accident photos"
+                      }
                       className={styles.fileInput}
                       id="accident-photos"
                       multiple
@@ -666,13 +711,24 @@ export function ClaimExperience({
                     />
                     <label className={styles.addPhotos} htmlFor="accident-photos">
                       <span aria-hidden="true">+</span>
-                      Add photos
+                      {isUsingSampleEvidence
+                        ? "Use your own photos"
+                        : photos.length > 0
+                          ? "Replace photos"
+                          : "Add photos"}
                     </label>
                   </div>
                 </div>
 
                 <div className={styles.fieldHeading}>
-                  <h3>Accident photos</h3>
+                  <div className={styles.fieldTitleRow}>
+                    <h3>Accident photos</h3>
+                    {isUsingSampleEvidence ? (
+                      <span className={styles.sampleEvidenceBadge}>
+                        Sample evidence
+                      </span>
+                    ) : null}
+                  </div>
                   <p id="photo-requirements">1–3 photos · JPG or PNG · 8 MB each</p>
                 </div>
 
@@ -847,7 +903,7 @@ export function ClaimExperience({
                 role="status"
               >
                 <span aria-hidden="true" className={styles.spinner} />
-                <h2 ref={stateHeadingRef} tabIndex={-1}>
+                <h2 ref={stateHeadingRef}>
                   Analyzing your photos and preparing your claim…
                 </h2>
               </section>
@@ -1037,12 +1093,12 @@ export function ClaimExperience({
                         )}
                       </dd>
                     </div>
-                    <div>
-                      <dt>Attached photos</dt>
-                      <dd>{pluralizePhotos(claim.photoCount)}</dd>
-                    </div>
                   </dl>
 
+                  <div className={styles.attachmentHeader}>
+                    <span>Attached photos</span>
+                    <strong>{pluralizePhotos(claim.photoCount)}</strong>
+                  </div>
                   <div
                     className={styles.attachmentStrip}
                     data-count={photos.length}
@@ -1112,10 +1168,14 @@ export function ClaimExperience({
                           type="button"
                         >
                           {isPreparingPortal
-                            ? "Preparing insurer portal…"
+                            ? isPresenter
+                              ? "Computer Use is running…"
+                              : "Preparing insurer portal…"
                             : portalError
                               ? "Try portal again"
-                              : "Fill insurer portal sandbox"}
+                              : isPresenter
+                                ? "Run Computer Use in insurer sandbox"
+                                : "Fill insurer portal sandbox"}
                           <span aria-hidden="true">→</span>
                         </button>
                       </>
@@ -1125,7 +1185,9 @@ export function ClaimExperience({
                   {isPreparingPortal ? (
                     <p aria-live="polite" className={styles.portalProgress} role="status">
                       <span aria-hidden="true" className={styles.portalProgressMark} />
-                      Preparing insurer portal…
+                      {isPresenter
+                        ? "Computer Use is opening Demo Mutual and filling the form…"
+                        : "Opening the insurer portal and preparing the form…"}
                     </p>
                   ) : null}
 
