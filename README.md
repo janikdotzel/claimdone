@@ -4,15 +4,7 @@ ClaimDone is a deliberately minimal hackathon demo. A user adds one to three syn
 
 This project never submits a real insurance claim. Use synthetic data only.
 
-## Hackathon reference material
-
-- [`BUILD_WEEK_SPEC.md`](BUILD_WEEK_SPEC.md) preserves the original brief, rules, and submission logistics.
-- [`CLAIMDONE_BUILD_WEEK_PLAN.md`](CLAIMDONE_BUILD_WEEK_PLAN.md) is the historical implementation plan.
-- [`buildweek-diary.md`](buildweek-diary.md) is the dated development diary.
-
-The historical documents intentionally remain in the repository, but may describe
-the superseded monorepo architecture. This README is the canonical guide for the
-current standalone demo.
+Build Week logistics, the demo outline, and the remaining submission checklist live in [`HACKATHON_SUBMISSION.md`](HACKATHON_SUBMISSION.md). This README is the canonical guide to the current app.
 
 ## What the demo does
 
@@ -73,6 +65,16 @@ browser profile. The captured replay remains available either way.
 
 The port is intentionally fixed. The Computer Use safety boundary only permits the three exact local sandbox paths under `http://127.0.0.1:3001/portal/sandbox`, so changing the dev or start port will break the portal handoff.
 
+## Bundled sample data
+
+Both customer and presenter views start with a synthetic description and three synthetic accident photos, so a judge can run the demo immediately. The images live in [`public/images/claim-flow`](public/images/claim-flow):
+
+- `accident-overview.jpg`
+- `accident-damage.jpg`
+- `accident-context.jpg`
+
+Replacing the sample photos through the upload control keeps the same 1–3 photo flow. Do not use real accident or customer data.
+
 ## Verify the demo
 
 ```bash
@@ -91,6 +93,14 @@ npm run build
 npm run start
 ```
 
+## Quick judge walkthrough
+
+1. Open `/demo`; the synthetic evidence is already staged and the activity history is intentionally empty.
+2. Select **Analyze accident**. The presenter panel shows the validated photo and statement review, then identifies the missing date and time.
+3. Add a date and time and save the claim. The activity panel records the customer correction and the completed decision.
+4. Select **Fill insurer portal sandbox**. Computer Use opens the local Demo Mutual home page, follows the two permitted links, fills the five approved fields, and stops before submission.
+5. Review the captured browser replay and final sandbox result. No real insurer is contacted and no claim is submitted.
+
 ## Routes and models
 
 - `/` contains the complete four-state flow: input, analyzing, needs information, and ready.
@@ -104,7 +114,19 @@ npm run start
 - `/portal/sandbox/claims/new` contains the five-field incident form.
 - `/portal` displays the final sandbox screenshot held in browser memory.
 
-The demo uses `gpt-5.4-mini` for image analysis and Computer Use, and `gpt-4o-mini-transcribe` for voice memos. Provider output is validated with strict Zod schemas before it reaches the UI.
+The demo uses `gpt-5.6` for the core image-analysis and claim-preparation path, `gpt-5.4-mini` for Computer Use, and `gpt-4o-mini-transcribe` for voice memos. Provider output is validated with strict Zod schemas before it reaches the UI.
+
+## How Codex shaped the build
+
+Codex was used to turn a production-oriented prototype into this focused demo, implement and test the complete flow, review the responsive UI in a browser, and harden the local Computer Use boundary. The main decisions were:
+
+- one standalone Next.js app instead of a multi-service architecture;
+- four customer-facing states with at most one follow-up question;
+- a separate `/demo` presenter lens that reveals validated agent activity without complicating the customer view;
+- a local, synthetic insurer portal with an allowlisted navigation and form-filling policy;
+- memory-only state, synthetic evidence, and a hard stop before submission.
+
+For a clear before-and-after record, commit `4c3fb1b` snapshots the legacy implementation, commit `ec14e06` introduces the minimal demo, and pull request #1 merges it into `main`.
 
 ## Data and safety boundaries
 

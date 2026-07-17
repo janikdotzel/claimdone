@@ -20,7 +20,7 @@ import {
   type ClaimAnalyzer,
 } from "./claim-analyzer";
 
-export const ANALYSIS_MODEL = "gpt-5.4-mini";
+export const ANALYSIS_MODEL = "gpt-5.6";
 export const TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
 
 const PhotoIndexSchema = z.union([
