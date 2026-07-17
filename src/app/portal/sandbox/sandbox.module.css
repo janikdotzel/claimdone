@@ -1,0 +1,514 @@
+.page {
+  --portal-canvas: #f6f7fc;
+  --portal-surface: #ffffff;
+  --portal-ink: #20233a;
+  --portal-muted: #62677e;
+  --portal-line: #d9dcef;
+  --portal-line-strong: #b8bce0;
+  --portal-primary: #4338ca;
+  --portal-primary-dark: #3730a3;
+  --portal-soft: #eef0ff;
+
+  min-height: 100vh;
+  border-left: 0.35rem solid var(--portal-primary);
+  background: var(--portal-canvas);
+  color: var(--portal-ink);
+  font-family: var(--font-body);
+}
+
+.header {
+  border-bottom: 1px solid var(--portal-line);
+  background: var(--portal-surface);
+}
+
+.headerInner {
+  width: min(calc(100% - 3rem), 68rem);
+  min-height: 3.75rem;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.portalBrand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.portalMark {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.42rem;
+  display: grid;
+  place-items: center;
+  background: var(--portal-primary);
+  color: #ffffff;
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.sandboxBadge,
+.draftBadge {
+  border: 1px solid #c7cbf5;
+  border-radius: 999px;
+  background: var(--portal-soft);
+  color: var(--portal-primary-dark);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 0.48rem 0.68rem;
+  text-transform: uppercase;
+}
+
+.main {
+  width: min(calc(100% - 3rem), 68rem);
+  margin: 0 auto;
+  padding: clamp(1.6rem, 4vw, 3rem) 0 2.5rem;
+}
+
+.portalHome,
+.claimsPage {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+.pageIntro {
+  max-width: 36rem;
+}
+
+.pageIntro h1 {
+  margin-top: 0.28rem;
+  font-size: clamp(2rem, 5vw, 3.15rem);
+  line-height: 1.02;
+}
+
+.pageIntro > p:not(.eyebrow) {
+  margin-top: 0.65rem;
+  color: var(--portal-muted);
+  font-size: 1rem;
+}
+
+.homeGrid {
+  margin-top: 2rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(15rem, 0.75fr);
+  gap: 1rem;
+}
+
+.policyCard,
+.actionCard,
+.newClaimCard {
+  border: 1px solid var(--portal-line);
+  border-radius: 0.9rem;
+  background: var(--portal-surface);
+  box-shadow: 0 14px 36px rgb(32 35 58 / 7%);
+}
+
+.policyCard {
+  overflow: hidden;
+}
+
+.cardTopline {
+  padding: 1.35rem 1.4rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+}
+
+.cardLabel {
+  color: var(--portal-primary);
+  font-size: 0.68rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.policyCard h2,
+.actionCard h2,
+.newClaimCard h2 {
+  margin-top: 0.22rem;
+  color: var(--portal-ink);
+  font-size: 1.28rem;
+  line-height: 1.12;
+}
+
+.policyBadge {
+  flex: 0 0 auto;
+  border: 1px solid #c7cbf5;
+  border-radius: 999px;
+  background: var(--portal-soft);
+  color: var(--portal-primary-dark);
+  padding: 0.42rem 0.62rem;
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+
+.policyDetails {
+  border-top: 1px solid var(--portal-line);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.policyDetails > div {
+  min-width: 0;
+  padding: 1rem 1.4rem 1.1rem;
+}
+
+.policyDetails > div + div {
+  border-left: 1px solid var(--portal-line);
+}
+
+.policyDetails dt {
+  color: var(--portal-muted);
+  font-size: 0.7rem;
+  font-weight: 750;
+}
+
+.policyDetails dd {
+  margin-top: 0.2rem;
+  color: var(--portal-ink);
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.actionCard {
+  padding: 1.25rem;
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.actionGlyph {
+  width: 2.15rem;
+  height: 2.15rem;
+  margin-bottom: 1rem;
+  border-radius: 0.58rem;
+  display: grid;
+  place-items: center;
+  background: var(--portal-primary);
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+.actionCard > p:not(.cardLabel),
+.newClaimCopy p:not(.cardLabel) {
+  margin-top: 0.45rem;
+  color: var(--portal-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.portalAction {
+  min-height: 2.7rem;
+  margin-top: 1.25rem;
+  border-radius: 0.58rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  background: var(--portal-primary);
+  color: #ffffff;
+  padding: 0.7rem 0.95rem;
+  font-size: 0.8rem;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.actionCard .portalAction {
+  width: 100%;
+  margin-top: auto;
+}
+
+.portalAction:hover {
+  background: var(--portal-primary-dark);
+}
+
+.sandboxNotice {
+  margin-top: 1rem;
+  border: 1px solid #d7daf0;
+  border-radius: 0.68rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: rgb(255 255 255 / 58%);
+  color: var(--portal-muted);
+  padding: 0.72rem 0.85rem;
+  font-size: 0.76rem;
+}
+
+.sandboxNotice > span {
+  color: var(--portal-primary);
+  font-weight: 900;
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--portal-muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.breadcrumb strong {
+  color: var(--portal-primary-dark);
+}
+
+.claimsPage > .pageIntro {
+  margin-top: 1.25rem;
+}
+
+.newClaimCard {
+  margin-top: 2rem;
+  padding: 1.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.newClaimCopy {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.newClaimCopy .actionGlyph {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+.newClaimCard .portalAction {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+.emptyClaims {
+  margin: 1rem 0 0;
+  border: 1px dashed var(--portal-line-strong);
+  border-radius: 0.68rem;
+  color: var(--portal-muted);
+  padding: 0.8rem 1rem;
+  font-size: 0.78rem;
+}
+
+.formCard {
+  overflow: hidden;
+  border: 1px solid var(--portal-line);
+  border-radius: 0.9rem;
+  background: var(--portal-surface);
+  box-shadow: 0 14px 36px rgb(32 35 58 / 8%);
+}
+
+.formIntro {
+  border-bottom: 1px solid var(--portal-line);
+  padding: 1.2rem 1.5rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.eyebrow {
+  color: var(--portal-primary);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.formIntro h1 {
+  margin-top: 0.2rem;
+  font-size: clamp(1.65rem, 3vw, 2.15rem);
+  line-height: 1.05;
+}
+
+.formIntro p:not(.eyebrow) {
+  margin-top: 0.35rem;
+  color: var(--portal-muted);
+  font-size: 0.85rem;
+}
+
+.formIntro .breadcrumb {
+  margin-top: 0;
+  margin-bottom: 0.45rem;
+  color: var(--portal-muted);
+  font-size: 0.66rem;
+  font-weight: 650;
+}
+
+.form {
+  padding: 1.2rem 1.5rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem 1.25rem;
+}
+
+.field {
+  min-width: 0;
+}
+
+.field label {
+  display: block;
+  color: #393c58;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.field input,
+.field textarea {
+  width: 100%;
+  margin-top: 0.32rem;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 0.52rem;
+  background: #fbfbfe;
+  color: var(--portal-ink);
+  line-height: 1.4;
+  padding: 0.65rem 0.75rem;
+}
+
+.field input {
+  min-height: 2.65rem;
+}
+
+.field textarea {
+  min-height: 5.8rem;
+  resize: none;
+}
+
+.field input::placeholder,
+.field textarea::placeholder {
+  color: var(--portal-muted);
+}
+
+.field input:hover,
+.field textarea:hover {
+  border-color: #7770d8;
+}
+
+.field input:focus-visible,
+.field textarea:focus-visible {
+  border-color: var(--portal-primary);
+  outline-color: var(--portal-primary);
+}
+
+.wideField {
+  grid-column: 1 / -1;
+}
+
+.formFooter {
+  border-top: 1px solid var(--portal-line);
+  background: var(--portal-soft);
+  padding: 0.8rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--portal-muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.formFooter span {
+  flex: 0 0 auto;
+  color: var(--portal-primary);
+  font-weight: 900;
+}
+
+@media (max-width: 38rem) {
+  .page {
+    border-left: 0;
+    background: var(--portal-canvas);
+  }
+
+  .headerInner,
+  .main {
+    width: min(calc(100% - 2rem), 68rem);
+  }
+
+  .headerInner {
+    min-height: 3.5rem;
+  }
+
+  .sandboxBadge {
+    max-width: 7.5rem;
+    line-height: 1.2;
+    text-align: center;
+  }
+
+  .main {
+    padding-top: 1rem;
+  }
+
+  .homeGrid {
+    margin-top: 1.4rem;
+    grid-template-columns: 1fr;
+  }
+
+  .pageIntro h1 {
+    font-size: clamp(2rem, 11vw, 2.65rem);
+  }
+
+  .cardTopline,
+  .newClaimCard {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .policyBadge {
+    align-self: flex-start;
+  }
+
+  .policyDetails {
+    grid-template-columns: 1fr;
+  }
+
+  .policyDetails > div + div {
+    border-top: 1px solid var(--portal-line);
+    border-left: 0;
+  }
+
+  .newClaimCopy {
+    display: block;
+  }
+
+  .newClaimCopy .actionGlyph {
+    margin-bottom: 1rem;
+  }
+
+  .newClaimCard .portalAction {
+    width: 100%;
+  }
+
+  .formIntro,
+  .form,
+  .formFooter {
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+
+  .formIntro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .form {
+    grid-template-columns: 1fr;
+  }
+
+  .wideField {
+    grid-column: auto;
+  }
+}

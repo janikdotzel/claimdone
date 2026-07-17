@@ -1,0 +1,116 @@
+:root {
+  color-scheme: light;
+
+  --canvas: #f4f7f5;
+  --surface: #ffffff;
+  --ink: #17211d;
+  --muted: #66736d;
+  --line: #dce4df;
+  --line-strong: #afbeb6;
+  --green: #25634f;
+  --green-dark: #1c4d3d;
+  --green-soft: #e7f0ec;
+  --focus: #1769d2;
+  --error: #b42318;
+  --font-display: "Familjen Grotesk", "Avenir Next", "Helvetica Neue", sans-serif;
+  --font-body: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  --radius: 1.125rem;
+  --radius-sm: 0.75rem;
+  --shadow: 0 18px 50px rgb(23 33 29 / 9%);
+  --content-width: 70rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--canvas);
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.55;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea {
+  color: inherit;
+  font: inherit;
+}
+
+button,
+a,
+label {
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: inherit;
+}
+
+img,
+svg {
+  display: block;
+}
+
+h1,
+h2,
+h3,
+p,
+figure,
+dl,
+dd {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 550;
+  letter-spacing: -0.03em;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: #d8e7e0;
+  color: var(--ink);
+}
+
+.skip-link {
+  position: fixed;
+  top: -5rem;
+  left: 1rem;
+  z-index: 100;
+  border-radius: 0.5rem;
+  background: var(--ink);
+  color: #ffffff;
+  font-weight: 700;
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

@@ -1,19 +1,39 @@
 {
   "name": "claimdone",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "ClaimDone Build Week monorepo",
-  "packageManager": "pnpm@11.7.0",
+  "description": "A deliberately minimal ClaimDone hackathon demo.",
   "engines": {
-    "node": "24.14.0",
-    "pnpm": "11.7.0"
+    "node": "24.14.0"
   },
+  "packageManager": "npm@11.9.0",
   "scripts": {
-    "build:web": "pnpm --filter @claimdone/web build",
-    "dev:web": "pnpm --filter @claimdone/web dev",
-    "lint:web": "pnpm --filter @claimdone/web lint",
-    "start:web": "pnpm --filter @claimdone/web start",
-    "test:web": "pnpm --filter @claimdone/web test",
-    "typecheck:web": "pnpm --filter @claimdone/web typecheck"
+    "build": "next build",
+    "dev": "next dev --hostname 127.0.0.1 --port 3001",
+    "lint": "eslint . --max-warnings 0",
+    "start": "next start --hostname 127.0.0.1 --port 3001",
+    "test": "vitest run",
+    "typecheck": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.2.10",
+    "openai": "6.47.0",
+    "playwright-core": "1.57.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.2.10",
+    "jsdom": "29.1.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
   }
 }

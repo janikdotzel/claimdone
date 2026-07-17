@@ -1,27 +1,9 @@
-# JavaScript
-node_modules/
 .next/
+node_modules/
+out/
 coverage/
-*.tsbuildinfo
-apps/web/next-env.d.ts
-
-# Python
-.venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-*.py[cod]
-evals/generated/
-
-# Environment and local state
-.env
-.env.local
-*.sqlite3
-.local/
-.tools/
-
-# Editors and operating systems
 .DS_Store
-.idea/
-.vscode/
+*.log
+*.tsbuildinfo
+.env*
+!.env.example
