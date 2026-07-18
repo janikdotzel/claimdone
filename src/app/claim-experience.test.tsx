@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Claim, ClaimDetailField } from "@/lib/analysis-schema";
+import { AnalysisRequestError } from "@/lib/analysis-client";
 import { createDemoReplay, demoActivity } from "@/test/demo-fixtures";
 
 import { ClaimExperience } from "./claim-experience";
@@ -844,6 +845,30 @@ describe("ClaimExperience", () => {
       "My saved description in Berlin.",
     );
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("explains when local analysis is not configured", async () => {
+    const user = userEvent.setup();
+    const analyze = vi
+      .fn()
+      .mockRejectedValue(new AnalysisRequestError("not_configured"));
+    renderWithHandoffProvider(
+      <ClaimExperience analyze={analyze} analysisDelayMs={0} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Analyze accident" }));
+
+    expect(
+      await screen.findByText("Analysis isn’t configured for this demo"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Check the local API setup, restart ClaimDone, and try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("We couldn’t analyze these photos"),
+    ).not.toBeInTheDocument();
   });
 
   it("rejects unsupported photos without replacing the current evidence", async () => {

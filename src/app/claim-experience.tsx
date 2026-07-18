@@ -13,6 +13,7 @@ import {
 } from "react";
 
 import {
+  AnalysisRequestError,
   requestDemoAnalysis,
   requestAnalysis,
   type ClientAnalysisInput,
@@ -200,7 +201,9 @@ export function ClaimExperience({
   const [isEditingClaim, setIsEditingClaim] = useState(false);
   const [claimEditError, setClaimEditError] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [analysisError, setAnalysisError] = useState(false);
+  const [analysisError, setAnalysisError] = useState<
+    AnalysisRequestError["code"] | null
+  >(null);
   const [isPreparingPortal, setIsPreparingPortal] = useState(false);
   const [portalError, setPortalError] = useState(false);
   const [agentActivity, setAgentActivity] = useState<AgentActivity | null>(null);
@@ -306,7 +309,7 @@ export function ClaimExperience({
       return;
     }
 
-    setAnalysisError(false);
+    setAnalysisError(null);
     setValidationError(null);
     replacePhotos(files);
   }
@@ -328,7 +331,7 @@ export function ClaimExperience({
   function selectStatementMode(mode: StatementMode) {
     setStatementMode(mode);
     setValidationError(null);
-    setAnalysisError(false);
+    setAnalysisError(null);
   }
 
   function handleVoiceChange(event: ChangeEvent<HTMLInputElement>) {
@@ -363,7 +366,7 @@ export function ClaimExperience({
     setVoiceFile(file);
     setVoicePreviewUrl(nextPreviewUrl);
     setValidationError(null);
-    setAnalysisError(false);
+    setAnalysisError(null);
   }
 
   function validateEvidence(): boolean {
@@ -412,7 +415,7 @@ export function ClaimExperience({
   }
 
   async function performAnalysis(answer?: string) {
-    setAnalysisError(false);
+    setAnalysisError(null);
     if (!answer) {
       setAgentActivity(null);
     }
@@ -449,8 +452,10 @@ export function ClaimExperience({
       setIsEditingClaim(false);
       setQuestionField(null);
       setFlowState("ready");
-    } catch {
-      setAnalysisError(true);
+    } catch (error) {
+      setAnalysisError(
+        error instanceof AnalysisRequestError ? error.code : "analysis_failed",
+      );
       setFlowState("input");
     }
   }
@@ -826,7 +831,7 @@ export function ClaimExperience({
                         onChange={(event) => {
                           setStatementText(event.currentTarget.value);
                           setValidationError(null);
-                          setAnalysisError(false);
+                          setAnalysisError(null);
                         }}
                         placeholder="Example: I was stopped at a red light when another car hit the front-left side of my car."
                         rows={4}
@@ -892,10 +897,15 @@ export function ClaimExperience({
                     role="alert"
                     tabIndex={-1}
                   >
-                    <strong>We couldn’t analyze these photos</strong>
+                    <strong>
+                      {analysisError === "not_configured"
+                        ? "Analysis isn’t configured for this demo"
+                        : "We couldn’t analyze these photos"}
+                    </strong>
                     <p>
-                      Try a clearer damage photo or add a short description of what
-                      happened.
+                      {analysisError === "not_configured"
+                        ? "Check the local API setup, restart ClaimDone, and try again."
+                        : "Try a clearer damage photo or add a short description of what happened."}
                     </p>
                   </div>
                 ) : null}
