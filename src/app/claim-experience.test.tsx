@@ -103,6 +103,10 @@ describe("ClaimExperience", () => {
   it("keeps the four approved M1 removals out of the interface", () => {
     renderMockExperience();
 
+    const homeLink = screen.getByRole("link", { name: "ClaimDone home" });
+
+    expect(homeLink.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(homeLink).not.toHaveTextContent("✓");
     expect(screen.queryByText("Accident claim demo")).not.toBeInTheDocument();
     expect(screen.queryByText(/Demo only\./)).not.toBeInTheDocument();
     expect(screen.queryByText(/^Demo$/)).not.toBeInTheDocument();

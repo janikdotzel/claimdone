@@ -40,6 +40,7 @@ import type {
   DemoPortalHandoffSuccess,
   PortalHandoffSuccess,
 } from "@/lib/portal-handoff-schema";
+import { BrandMark } from "./brand-mark";
 import { DemoLens } from "./demo/demo-lens";
 import demoStyles from "./demo/demo.module.css";
 import styles from "./page.module.css";
@@ -643,9 +644,7 @@ export function ClaimExperience({
             className={styles.brand}
             href={isPresenter ? "/demo" : "/"}
           >
-            <span aria-hidden="true" className={styles.brandMark}>
-              ✓
-            </span>
+            <BrandMark className={styles.brandMark} />
             ClaimDone
           </Link>
           {isPresenter ? (

@@ -3,6 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 
+import { BrandMark } from "../brand-mark";
 import styles from "../page.module.css";
 import { usePortalHandoff } from "./portal-handoff-context";
 
@@ -14,9 +15,7 @@ export default function PortalHandoffPage() {
       <header className={styles.header}>
         <div className={styles.headerInner}>
           <Link aria-label="ClaimDone home" className={styles.brand} href="/">
-            <span aria-hidden="true" className={styles.brandMark}>
-              ✓
-            </span>
+            <BrandMark className={styles.brandMark} />
             ClaimDone
           </Link>
         </div>
