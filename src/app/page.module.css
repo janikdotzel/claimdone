@@ -109,6 +109,7 @@
 .stateCard h2 {
   font-size: clamp(1.35rem, 2.4vw, 1.75rem);
   line-height: 1.12;
+  scroll-margin-top: 5rem;
 }
 
 .fileAction {
@@ -175,6 +176,27 @@
   font-size: 0.95rem;
   font-weight: 800;
   letter-spacing: 0;
+}
+
+.fieldTitleRow {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.sampleEvidenceBadge {
+  border: 1px solid #cadbd4;
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: var(--green-dark);
+  padding: 0.28rem 0.48rem;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .fieldHeading p {
@@ -533,6 +555,56 @@
   border-left-color: var(--error);
 }
 
+.claimCardAssembling .claimHeader,
+.claimCardAssembling .claimFields > div,
+.claimCardAssembling .attachmentHeader,
+.claimCardAssembling .attachmentStrip,
+.claimCardAssembling .claimActions,
+.claimCardAssembling .submissionNotice {
+  animation: claimPieceIn 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.claimCardAssembling .claimHeader {
+  animation-delay: 40ms;
+}
+
+.claimCardAssembling .claimFields > div:nth-child(1) {
+  animation-delay: 140ms;
+}
+
+.claimCardAssembling .claimFields > div:nth-child(2) {
+  animation-delay: 210ms;
+}
+
+.claimCardAssembling .claimFields > div:nth-child(3) {
+  animation-delay: 280ms;
+}
+
+.claimCardAssembling .claimFields > div:nth-child(4) {
+  animation-delay: 350ms;
+}
+
+.claimCardAssembling .attachmentHeader {
+  animation-delay: 430ms;
+}
+
+.claimCardAssembling .attachmentStrip {
+  animation-delay: 500ms;
+}
+
+.claimCardAssembling .claimActions {
+  animation-delay: 590ms;
+}
+
+.claimCardAssembling .submissionNotice {
+  animation-delay: 650ms;
+}
+
+.claimCardAssembling .readyStatusBadge {
+  animation: readySeal 680ms cubic-bezier(0.2, 1.45, 0.35, 1) 520ms both;
+  transform-origin: center;
+}
+
 .claimHeader {
   align-items: flex-start;
   border-bottom: 1px solid var(--line);
@@ -663,8 +735,28 @@
   resize: vertical;
 }
 
+.attachmentHeader {
+  margin: 1rem clamp(1.25rem, 3vw, 2rem) 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.attachmentHeader span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.attachmentHeader strong {
+  font-size: 0.8rem;
+}
+
 .attachmentStrip {
-  padding: 1.2rem clamp(1.25rem, 3vw, 2rem) 0;
+  padding: 0.65rem clamp(1.25rem, 3vw, 2rem) 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.6rem;
@@ -1008,6 +1100,10 @@
     margin-top: 1rem;
   }
 
+  .analyzingCard {
+    min-height: 20rem;
+  }
+
   .evidenceCard {
     padding: 1.1rem;
   }
@@ -1113,9 +1209,42 @@
   }
 }
 
+@keyframes claimPieceIn {
+  from {
+    opacity: 0;
+    transform: translateY(0.65rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes readySeal {
+  from {
+    opacity: 0;
+    transform: rotate(-5deg) scale(0.72);
+  }
+
+  to {
+    opacity: 1;
+    transform: rotate(0) scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .spinner,
-  .portalProgressMark {
+  .portalProgressMark,
+  .claimCardAssembling .claimHeader,
+  .claimCardAssembling .claimFields > div,
+  .claimCardAssembling .attachmentHeader,
+  .claimCardAssembling .attachmentStrip,
+  .claimCardAssembling .claimActions,
+  .claimCardAssembling .submissionNotice,
+  .claimCardAssembling .readyStatusBadge {
     animation: none;
+    opacity: 1;
+    transform: none;
   }
 }

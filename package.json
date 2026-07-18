@@ -4,7 +4,7 @@
   "private": true,
   "description": "A deliberately minimal ClaimDone hackathon demo.",
   "engines": {
-    "node": "24.14.0"
+    "node": ">=24.14.0 <25"
   },
   "packageManager": "npm@11.9.0",
   "scripts": {

@@ -76,9 +76,27 @@ function PreparedHandoffProbe() {
   );
 }
 
+function mockReducedMotion(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      addEventListener: vi.fn(),
+      addListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      matches: matches && query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      removeEventListener: vi.fn(),
+      removeListener: vi.fn(),
+    })),
+    writable: true,
+  });
+}
+
 describe("ClaimExperience", () => {
   beforeEach(() => {
     pushMock.mockReset();
+    mockReducedMotion(false);
   });
 
   it("keeps the four approved M1 removals out of the interface", () => {
@@ -142,12 +160,33 @@ describe("ClaimExperience", () => {
     expect(
       screen.getByText("Activity will appear when you start the analysis."),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: "Demo progress" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Evidence", { selector: "span" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Agent review", { selector: "span" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Portal handoff", { selector: "span" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Evidence", { selector: "span" }).closest("li"),
+    ).toHaveAttribute("aria-current", "step");
+    expect(
+      screen.getByText("Agent review", { selector: "span" }).closest("li"),
+    ).not.toHaveAttribute("aria-current");
     expect(screen.queryByText("Evidence staged")).not.toBeInTheDocument();
     expect(
       screen.queryByText("Image and statement review"),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Completeness and decision"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Claim to insurer portal" }),
     ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Analyze accident" }));
@@ -156,6 +195,9 @@ describe("ClaimExperience", () => {
     expect(
       screen.getAllByText("Decision: Prepare the claim"),
     ).not.toHaveLength(0);
+    expect(
+      screen.getByText("Agent review", { selector: "span" }).closest("li"),
+    ).toHaveAttribute("aria-current", "step");
     expect(analyzeDemo).toHaveBeenCalledOnce();
   });
 
@@ -240,6 +282,9 @@ describe("ClaimExperience", () => {
     expect(
       screen.getByRole("heading", { name: "Your claim is ready" }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Claim to insurer portal" }),
+    ).not.toBeInTheDocument();
   });
 
   it("replays the captured Computer Use run without leaving presenter view", async () => {
@@ -268,11 +313,22 @@ describe("ClaimExperience", () => {
 
     await user.click(screen.getByRole("button", { name: "Analyze accident" }));
     await screen.findByRole("heading", { name: "Your claim is ready" });
+    expect(
+      screen.queryByRole("heading", { name: "Claim to insurer portal" }),
+    ).not.toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "Fill insurer portal sandbox" }),
+      screen.getByRole("button", {
+        name: "Run Computer Use in insurer sandbox",
+      }),
     );
 
     expect(await screen.findByText("Captured from this run")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Claim to insurer portal" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Portal handoff", { selector: "span" }).closest("li"),
+    ).toHaveAttribute("aria-current", "step");
     expect(screen.getAllByText("Opened Demo Mutual home")).not.toHaveLength(0);
     expect(screen.getAllByText("Clicked “View claims”")).not.toHaveLength(0);
     expect(
@@ -286,6 +342,43 @@ describe("ClaimExperience", () => {
       screen.getByRole("link", { name: "Open filled Demo Mutual portal" }),
     ).toHaveAttribute("href", "/portal/sandbox/claims/new");
     expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Computer Use replay paused when reduced motion is requested", async () => {
+    mockReducedMotion(true);
+    const screenshotDataUrl = "data:image/png;base64,cHJlcGFyZWQ=";
+    const replay = createDemoReplay(screenshotDataUrl);
+    const user = userEvent.setup();
+
+    renderWithHandoffProvider(
+      <ClaimExperience
+        analyzeDemo={vi.fn().mockResolvedValue({
+          activity: demoActivity,
+          result: { claim: completeClaim, status: "ready" as const },
+        })}
+        analysisDelayMs={0}
+        prepareDemoPortal={vi.fn().mockResolvedValue({
+          replay,
+          screenshotDataUrl,
+          status: "prepared" as const,
+          submitted: false as const,
+        })}
+        variant="presenter"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Analyze accident" }));
+    await screen.findByRole("heading", { name: "Your claim is ready" });
+    await user.click(
+      screen.getByRole("button", {
+        name: "Run Computer Use in insurer sandbox",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Play Computer Use replay" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Opened Demo Mutual home")).not.toHaveLength(0);
   });
 
   it.each(requiredClaimFields)(
@@ -424,7 +517,9 @@ describe("ClaimExperience", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Your claim is ready" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Preparing insurer portal…");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Opening the insurer portal and preparing the form…",
+    );
     expect(
       screen.getByRole("button", { name: "Preparing insurer portal…" }),
     ).toBeDisabled();
@@ -653,7 +748,10 @@ describe("ClaimExperience", () => {
       new File(["damage"], "damage.jpg", { type: "image/jpeg" }),
     ];
 
-    await user.upload(screen.getByLabelText("Add accident photos"), photos);
+    await user.upload(
+      screen.getByLabelText("Use your own accident photos"),
+      photos,
+    );
 
     expect(screen.getByAltText("Preview of overview.png")).toBeInTheDocument();
     expect(screen.getByAltText("Preview of damage.jpg")).toBeInTheDocument();
@@ -753,7 +851,7 @@ describe("ClaimExperience", () => {
     renderMockExperience();
 
     await user.upload(
-      screen.getByLabelText("Add accident photos"),
+      screen.getByLabelText("Use your own accident photos"),
       new File(["not-an-image"], "claim.pdf", { type: "application/pdf" }),
     );
 
@@ -764,7 +862,7 @@ describe("ClaimExperience", () => {
   it("enforces the photo count and size limits", async () => {
     const user = userEvent.setup();
     renderMockExperience();
-    const photoInput = screen.getByLabelText("Add accident photos");
+    const photoInput = screen.getByLabelText("Use your own accident photos");
 
     await user.upload(
       photoInput,
