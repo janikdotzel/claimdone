@@ -1,5 +1,5 @@
 .presenterPage {
-  --presenter-width: 94rem;
+  --presenter-width: 76rem;
 }
 
 .presenterHeader {
@@ -1200,6 +1200,13 @@
   to {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+@media (min-width: 88.0625rem) {
+  .presenterPage .presenterHeader,
+  .presenterPage .presenterMain {
+    width: min(calc(100% - 3rem), var(--presenter-width));
   }
 }
 
