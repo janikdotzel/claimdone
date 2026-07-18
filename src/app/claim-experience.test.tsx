@@ -76,9 +76,27 @@ function PreparedHandoffProbe() {
   );
 }
 
+function mockReducedMotion(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      addEventListener: vi.fn(),
+      addListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      matches: matches && query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      removeEventListener: vi.fn(),
+      removeListener: vi.fn(),
+    })),
+    writable: true,
+  });
+}
+
 describe("ClaimExperience", () => {
   beforeEach(() => {
     pushMock.mockReset();
+    mockReducedMotion(false);
   });
 
   it("keeps the four approved M1 removals out of the interface", () => {
@@ -154,6 +172,12 @@ describe("ClaimExperience", () => {
     expect(
       screen.getByText("Portal handoff", { selector: "span" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("Evidence", { selector: "span" }).closest("li"),
+    ).toHaveAttribute("aria-current", "step");
+    expect(
+      screen.getByText("Agent review", { selector: "span" }).closest("li"),
+    ).not.toHaveAttribute("aria-current");
     expect(screen.queryByText("Evidence staged")).not.toBeInTheDocument();
     expect(
       screen.queryByText("Image and statement review"),
@@ -171,6 +195,9 @@ describe("ClaimExperience", () => {
     expect(
       screen.getAllByText("Decision: Prepare the claim"),
     ).not.toHaveLength(0);
+    expect(
+      screen.getByText("Agent review", { selector: "span" }).closest("li"),
+    ).toHaveAttribute("aria-current", "step");
     expect(analyzeDemo).toHaveBeenCalledOnce();
   });
 
@@ -299,6 +326,9 @@ describe("ClaimExperience", () => {
     expect(
       screen.getByRole("heading", { name: "Claim to insurer portal" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("Portal handoff", { selector: "span" }).closest("li"),
+    ).toHaveAttribute("aria-current", "step");
     expect(screen.getAllByText("Opened Demo Mutual home")).not.toHaveLength(0);
     expect(screen.getAllByText("Clicked “View claims”")).not.toHaveLength(0);
     expect(
@@ -312,6 +342,43 @@ describe("ClaimExperience", () => {
       screen.getByRole("link", { name: "Open filled Demo Mutual portal" }),
     ).toHaveAttribute("href", "/portal/sandbox/claims/new");
     expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Computer Use replay paused when reduced motion is requested", async () => {
+    mockReducedMotion(true);
+    const screenshotDataUrl = "data:image/png;base64,cHJlcGFyZWQ=";
+    const replay = createDemoReplay(screenshotDataUrl);
+    const user = userEvent.setup();
+
+    renderWithHandoffProvider(
+      <ClaimExperience
+        analyzeDemo={vi.fn().mockResolvedValue({
+          activity: demoActivity,
+          result: { claim: completeClaim, status: "ready" as const },
+        })}
+        analysisDelayMs={0}
+        prepareDemoPortal={vi.fn().mockResolvedValue({
+          replay,
+          screenshotDataUrl,
+          status: "prepared" as const,
+          submitted: false as const,
+        })}
+        variant="presenter"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Analyze accident" }));
+    await screen.findByRole("heading", { name: "Your claim is ready" });
+    await user.click(
+      screen.getByRole("button", {
+        name: "Run Computer Use in insurer sandbox",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Play Computer Use replay" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Opened Demo Mutual home")).not.toHaveLength(0);
   });
 
   it.each(requiredClaimFields)(

@@ -673,7 +673,11 @@ export function ClaimExperience({
                 : ""
             }`}
           >
-            <div className={styles.intro}>
+            <div
+              className={`${styles.intro} ${
+                isPresenter ? demoStyles.presenterIntro : ""
+              }`}
+            >
               <h1 id="page-title">Turn accident photos into a claim.</h1>
               <p className={styles.lead}>
                 Add 1–3 photos and tell us what happened. ClaimDone will prepare a
@@ -685,7 +689,9 @@ export function ClaimExperience({
               {flowState === "input" ? (
                 <section
                   aria-labelledby="evidence-title"
-                  className={styles.evidenceCard}
+                  className={`${styles.evidenceCard} ${
+                    isPresenter ? demoStyles.presenterEvidenceCard : ""
+                  }`}
                 >
                 <div className={styles.cardHeader}>
                   <h2 id="evidence-title">Add evidence</h2>
@@ -738,7 +744,12 @@ export function ClaimExperience({
                       const label = PHOTO_LABELS[index] ?? `Photo ${index + 1}`;
 
                       return (
-                        <figure className={styles.photoCard} key={photo.id}>
+                        <figure
+                          className={`${styles.photoCard} ${
+                            isPresenter ? demoStyles.presenterPhotoCard : ""
+                          }`}
+                          key={photo.id}
+                        >
                           <div className={styles.photoFrame}>
                             <Image
                               alt={photo.alt}
@@ -902,6 +913,33 @@ export function ClaimExperience({
                 className={`${styles.stateCard} ${styles.analyzingCard}`}
                 role="status"
               >
+                {isPresenter && !agentActivity ? (
+                  <div
+                    aria-hidden="true"
+                    className={demoStyles.analysisEvidenceStrip}
+                  >
+                    {photos.map((photo, index) => (
+                      <div
+                        className={demoStyles.analysisEvidenceItem}
+                        key={photo.id}
+                      >
+                        <Image
+                          alt=""
+                          fill
+                          sizes="96px"
+                          src={photo.src}
+                          unoptimized={Boolean(photo.file)}
+                        />
+                        <span>{PHOTO_LABELS[index] ?? `Photo ${index + 1}`}</span>
+                      </div>
+                    ))}
+                    <div className={demoStyles.analysisStatementToken}>
+                      <span>{statementMode === "voice" ? "Voice" : "Text"}</span>
+                      <i />
+                      <i />
+                    </div>
+                  </div>
+                ) : null}
                 <span aria-hidden="true" className={styles.spinner} />
                 <h2 ref={stateHeadingRef}>
                   Analyzing your photos and preparing your claim…
@@ -946,6 +984,8 @@ export function ClaimExperience({
                 aria-busy={isPreparingPortal}
                 className={`${styles.claimCard} ${
                   hasMissingClaimDetails ? styles.claimCardNeedsDetails : ""
+                } ${
+                  isPresenter ? styles.claimCardAssembling : ""
                 }`}
                 id="claim-preview"
               >
@@ -973,6 +1013,8 @@ export function ClaimExperience({
                     }`}
                     className={`${styles.statusBadge} ${
                       hasMissingClaimDetails ? styles.needsDetailsBadge : ""
+                    } ${
+                      !hasMissingClaimDetails ? styles.readyStatusBadge : ""
                     }`}
                   >
                     <span aria-hidden="true">
@@ -1208,16 +1250,31 @@ export function ClaimExperience({
           </div>
           </section>
           {isPresenter ? (
-            <DemoLens
-              activity={agentActivity}
-              flowState={flowState}
-              isPreparingPortal={isPreparingPortal}
-              photoCount={photos.length}
-              photos={photos}
-              portalError={portalError}
-              replay={computerReplay}
-              statementMode={statementMode}
-            />
+            <div
+              className={demoStyles.presenterPanelSlot}
+              data-flow-state={flowState}
+              data-handoff-active={
+                flowState === "analyzing" && agentActivity === null
+              }
+              data-portal-active={Boolean(
+                isPreparingPortal || computerReplay || portalError,
+              )}
+            >
+              <span
+                aria-hidden="true"
+                className={demoStyles.evidenceHandoff}
+              />
+              <DemoLens
+                activity={agentActivity}
+                flowState={flowState}
+                isPreparingPortal={isPreparingPortal}
+                photoCount={photos.length}
+                photos={photos}
+                portalError={portalError}
+                replay={computerReplay}
+                statementMode={statementMode}
+              />
+            </div>
           ) : null}
         </div>
       </main>

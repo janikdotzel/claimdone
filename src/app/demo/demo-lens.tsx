@@ -249,7 +249,10 @@ function ComputerUseReplay({ replay }: { replay: ComputerUseReplay }) {
         </span>
       </div>
 
-      <div className={styles.browserFrame}>
+      <div
+        className={styles.browserFrame}
+        key={`browser-frame-${step.sequence}`}
+      >
         <div className={styles.browserBar}>
           <span aria-hidden="true" className={styles.browserDots}>
             <i />
@@ -271,7 +274,10 @@ function ComputerUseReplay({ replay }: { replay: ComputerUseReplay }) {
         </div>
       </div>
 
-      <p aria-live="polite" className={styles.replayCurrent}>
+      <p
+        aria-live="polite"
+        className={styles.replayCurrent}
+      >
         <span aria-hidden="true">{step.kind === "verified" ? "✓" : "→"}</span>
         {latestAnnouncement}
       </p>
@@ -332,7 +338,13 @@ function ComputerUseReplay({ replay }: { replay: ComputerUseReplay }) {
         </ol>
       </details>
 
-      <div className={styles.stopBoundary}>
+      <div
+        className={`${styles.stopBoundary} ${
+          stepIndex >= lastIndex
+            ? styles.stopBoundaryComplete
+            : styles.stopBoundaryPending
+        }`}
+      >
         <span aria-hidden="true">■</span>
         <div>
           <strong>Stopped before submission</strong>
