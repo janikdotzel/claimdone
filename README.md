@@ -44,7 +44,6 @@ ClaimDone does not persist photos, audio, claim data, or captured screenshots. I
 ```bash
 git clone https://github.com/janikdotzel/claimdone.git
 cd claimdone
-nvm install
 npm ci
 cp .env.example .env.local
 ```
