@@ -491,42 +491,43 @@ export function DemoLens({
         )}
       </section>
 
-      <section aria-labelledby="computer-use-title" className={styles.computerSection}>
-        <div className={styles.sectionHeading}>
-          <span aria-hidden="true" className={styles.computerGlyph}>↗</span>
-          <div>
-            <p>Computer Use</p>
-            <h3 id="computer-use-title">Claim to insurer portal</h3>
-          </div>
-        </div>
-
-        {replay ? <ComputerUseReplay replay={replay} /> : null}
-
-        {!replay && isPreparingPortal ? (
-          <div aria-live="polite" className={styles.computerWaiting} role="status">
-            <span aria-hidden="true" className={styles.computerPulse} />
+      {portalStageActive ? (
+        <section
+          aria-labelledby="computer-use-title"
+          className={styles.computerSection}
+        >
+          <div className={styles.sectionHeading}>
+            <span aria-hidden="true" className={styles.computerGlyph}>↗</span>
             <div>
-              <strong>Operating an isolated browser…</strong>
-              <p>The captured run will appear here after verification.</p>
+              <p>Computer Use</p>
+              <h3 id="computer-use-title">Claim to insurer portal</h3>
             </div>
           </div>
-        ) : null}
 
-        {!replay && !isPreparingPortal && portalError ? (
-          <div className={styles.computerError} role="alert">
-            <strong>Browser run stopped</strong>
-            <p>The claim remains ready. Retry from the claim card.</p>
-          </div>
-        ) : null}
+          {replay ? <ComputerUseReplay replay={replay} /> : null}
 
-        {!replay && !isPreparingPortal && !portalError ? (
-          <p className={styles.computerEmpty}>
-            {flowState === "ready"
-              ? "Ready when you choose Fill insurer portal sandbox."
-              : "Starts after the claim is complete and reviewed."}
-          </p>
-        ) : null}
-      </section>
+          {!replay && isPreparingPortal ? (
+            <div
+              aria-live="polite"
+              className={styles.computerWaiting}
+              role="status"
+            >
+              <span aria-hidden="true" className={styles.computerPulse} />
+              <div>
+                <strong>Operating an isolated browser…</strong>
+                <p>The captured run will appear here after verification.</p>
+              </div>
+            </div>
+          ) : null}
+
+          {!replay && !isPreparingPortal && portalError ? (
+            <div className={styles.computerError} role="alert">
+              <strong>Browser run stopped</strong>
+              <p>The claim remains ready. Retry from the claim card.</p>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
     </aside>
   );
 }

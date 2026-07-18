@@ -161,6 +161,9 @@ describe("ClaimExperience", () => {
     expect(
       screen.queryByText("Completeness and decision"),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Claim to insurer portal" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Analyze accident" }));
 
@@ -252,6 +255,9 @@ describe("ClaimExperience", () => {
     expect(
       screen.getByRole("heading", { name: "Your claim is ready" }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Claim to insurer portal" }),
+    ).not.toBeInTheDocument();
   });
 
   it("replays the captured Computer Use run without leaving presenter view", async () => {
@@ -280,6 +286,9 @@ describe("ClaimExperience", () => {
 
     await user.click(screen.getByRole("button", { name: "Analyze accident" }));
     await screen.findByRole("heading", { name: "Your claim is ready" });
+    expect(
+      screen.queryByRole("heading", { name: "Claim to insurer portal" }),
+    ).not.toBeInTheDocument();
     await user.click(
       screen.getByRole("button", {
         name: "Run Computer Use in insurer sandbox",
@@ -287,6 +296,9 @@ describe("ClaimExperience", () => {
     );
 
     expect(await screen.findByText("Captured from this run")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Claim to insurer portal" }),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("Opened Demo Mutual home")).not.toHaveLength(0);
     expect(screen.getAllByText("Clicked “View claims”")).not.toHaveLength(0);
     expect(

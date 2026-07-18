@@ -55,7 +55,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(22rem, 26rem);
   align-items: start;
-  gap: clamp(1.5rem, 2.8vw, 2.75rem);
+  gap: clamp(2.5rem, 4.5vw, 5rem);
 }
 
 .standardWorkspace {
@@ -542,16 +542,6 @@
 
 .computerSection .sectionHeading p {
   color: #686f9e;
-}
-
-.computerEmpty {
-  margin-top: 1rem;
-  border: 1px dashed #ccd0e7;
-  border-radius: 0.8rem;
-  color: #68708e;
-  padding: 0.85rem;
-  font-size: 0.78rem;
-  line-height: 1.5;
 }
 
 .computerWaiting,
