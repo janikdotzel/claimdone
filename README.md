@@ -1,32 +1,45 @@
 # ClaimDone
 
-ClaimDone is a deliberately minimal hackathon demo. A user adds one to three synthetic accident photos and a short text or voice description. AI either asks for exactly one missing detail or prepares an editable insurance-claim preview. Computer Use can then fill a local insurer-portal sandbox for review.
+ClaimDone turns one to three accident photos and a short written or spoken description into a reviewed insurance-claim handoff. It is a focused OpenAI Build Week demo for a stressful, repetitive task: translating unstructured accident evidence into the fields an insurer needs.
 
-This project never submits a real insurance claim. Use synthetic data only.
+> **Sandbox only:** use synthetic data. ClaimDone never submits a real insurance claim or contacts a real insurer.
 
-Build Week logistics, the demo outline, and the remaining submission checklist live in [`HACKATHON_SUBMISSION.md`](HACKATHON_SUBMISSION.md). This README is the canonical guide to the current app.
+## Demo highlights
 
-## What the demo does
+- **Multimodal claim agent:** GPT-5.6 reviews every supplied photo and the customer statement, then prepares a structured claim or asks for one essential detail.
+- **Observable agent activity:** `/demo` shows validated evidence checks and decisions without exposing private chain-of-thought.
+- **Human review:** the customer can complete missing fields and edit the claim before any portal handoff.
+- **Restricted Computer Use:** GPT-5.4-mini navigates a local synthetic insurer portal, fills only approved values, verifies them, and stops before submission.
+- **Visible replay:** the presenter view replays screenshots captured during the isolated browser run.
 
-1. Add 1–3 JPG or PNG accident photos.
-2. Describe what happened with text or a voice memo.
-3. Analyze the evidence with AI.
-4. Answer at most one missing-information question.
-5. Review and edit the generated claim.
-6. Let Computer Use navigate the local synthetic portal and fill its incident form.
-7. Review the final sandbox screenshot. Nothing is submitted.
+## How it works
 
-## Requirements
+```mermaid
+flowchart LR
+    A["1–3 photos + text or voice"] --> B["GPT-5.6 evidence analysis"]
+    B --> C{"Essential detail missing?"}
+    C -->|Yes| D["Ask one question"]
+    D --> E["Editable claim preview"]
+    C -->|No| E
+    E --> F["Human review"]
+    F --> G["Computer Use fills local insurer sandbox"]
+    G --> H["Stop before submission"]
+```
 
-- Node.js `24.14.0`
-- npm `11.9.0`
-- Google Chrome installed locally for the Computer Use sandbox
-- An OpenAI API key
-- Internet access for live OpenAI requests
+ClaimDone does not persist photos, audio, claim data, or captured screenshots. Its local state stays in memory, and reloading the app resets the flow. Live analysis sends evidence to the configured OpenAI API as described under [Safety boundaries](#safety-boundaries).
 
-`playwright-core` controls an existing local Chrome installation; it does not download a browser.
+## Run locally
 
-## Quick start
+### Requirements
+
+- Node.js 24 (`.nvmrc` pins `24.14.0`; supported range is `>=24.14.0 <25`)
+- npm 11
+- An OpenAI API key and internet access for the live AI flows
+- Google Chrome for the Computer Use portal handoff
+
+`playwright-core` controls a locally installed Chrome browser and does not download one.
+
+### Setup
 
 ```bash
 git clone https://github.com/janikdotzel/claimdone.git
@@ -36,46 +49,72 @@ npm ci
 cp .env.example .env.local
 ```
 
-Add your API key to `.env.local`:
+Configure `.env.local`:
 
-```dotenv
-OPENAI_API_KEY=your_key_here
-```
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | For live AI flows | Server-only key used for image analysis, voice transcription, and Computer Use. |
+| `CLAIMDONE_SHOW_COMPUTER_USE_BROWSER` | No | Set to `true` to show the isolated Chrome window during Computer Use. Defaults to `false`. |
 
-Then start the app:
+Keep the API key only in `.env.local`. That file is ignored by Git and its values stay out of the client bundle.
+
+The optional browser flag is still implemented. It changes the isolated Chrome run from headless to visible and adds a short presentation delay. The captured replay in `/demo` is available either way.
+
+Start the app:
 
 ```bash
 npm run dev
 ```
 
-Open [http://127.0.0.1:3001](http://127.0.0.1:3001) for the customer view or
-[http://127.0.0.1:3001/demo](http://127.0.0.1:3001/demo) for the presenter view.
+Open:
 
-The presenter view shows validated evidence checks and replays screenshots captured
-during the real Computer Use run. To additionally show the isolated Chrome window
-while Computer Use operates, set this local-only option in `.env.local` and restart
-the app:
+- [http://127.0.0.1:3001](http://127.0.0.1:3001) for the customer view
+- [http://127.0.0.1:3001/demo](http://127.0.0.1:3001/demo) for the presenter view
 
-```dotenv
-CLAIMDONE_SHOW_COMPUTER_USE_BROWSER=true
-```
+The port is intentionally fixed. Computer Use permits only the three local sandbox pages under `http://127.0.0.1:3001/portal/sandbox`; changing the port prevents the portal handoff.
 
-The visible window is a separate isolated Chrome process, not the user’s personal
-browser profile. The captured replay remains available either way.
+## Quick judge walkthrough
 
-The port is intentionally fixed. The Computer Use safety boundary only permits the three exact local sandbox paths under `http://127.0.0.1:3001/portal/sandbox`, so changing the dev or start port will break the portal handoff.
+Both views start with three synthetic accident photos and a synthetic description, so the demo is ready immediately.
 
-## Bundled sample data
+1. Open `/demo` and introduce the staged evidence. The agent activity history is intentionally empty before analysis starts.
+2. Select **Analyze accident** and follow the validated photo, statement, and completeness checks in the presenter panel.
+3. If the agent asks one question, answer it and continue. If the preview contains a required field, complete it. Then review or edit the claim.
+4. Select **Run Computer Use in insurer sandbox**. The agent opens the Demo Mutual home page, follows the two permitted links, fills the reviewed values, and verifies the form.
+5. Review the captured browser replay and completed sandbox form. The run stops before submission.
 
-Both customer and presenter views start with a synthetic description and three synthetic accident photos, so a judge can run the demo immediately. The images live in [`public/images/claim-flow`](public/images/claim-flow):
+The bundled photos live in [`public/images/claim-flow`](public/images/claim-flow). Replace them through the upload control to test any one-to-three-photo combination, but continue to use synthetic data.
 
-- `accident-overview.jpg`
-- `accident-damage.jpg`
-- `accident-context.jpg`
+## Architecture and AI models
 
-Replacing the sample photos through the upload control keeps the same 1–3 photo flow. Do not use real accident or customer data.
+| Area | Implementation |
+| --- | --- |
+| Application | Next.js 16, React 19, TypeScript, CSS Modules |
+| Claim analysis | `gpt-5.6` with text and image input |
+| Voice transcription | `gpt-4o-mini-transcribe` |
+| Portal handoff | `gpt-5.4-mini` Computer Use with `playwright-core` |
+| Validation | Strict Zod schemas for provider, API, activity, and handoff output |
+| State | Browser and server memory only; no database or persistence |
 
-## Verify the demo
+The main entry points are `/` for the customer flow, `/demo` for presenter-only observability, and `/portal/sandbox` for the synthetic insurer portal. The API exposes one analysis path and one restricted portal-handoff path, with demo variants that also return observable activity or replay frames.
+
+## Safety boundaries
+
+- Evidence sent for live analysis is processed through the configured OpenAI API; use synthetic inputs only.
+- Computer Use may visit only three exact local routes and click only **View claims**, followed by **Start a motor claim**.
+- It may fill only Damage, Date and time, Location, What happened, and Attached photos using the reviewed claim values.
+- Arbitrary navigation, other clicks, downloads, uploads, popups, and submit actions are blocked.
+- The server verifies every field before reporting success; unexpected actions, timeouts, and action limits stop the run.
+- The sandbox has no submit control and cannot send data to an insurer.
+
+### Input limits
+
+- Photos: 1–3 JPG or PNG files, up to 8 MB each
+- Description: 1–1,500 characters
+- Voice memo: M4A, MP3, WAV, or WebM, up to 60 seconds and 10 MB in the customer flow
+- Missing information: at most one follow-up question
+
+## Verify the project
 
 ```bash
 npm run lint
@@ -84,7 +123,7 @@ npm test
 npm run build
 ```
 
-The automated tests use controlled provider and browser doubles. They do not need an API key, make live OpenAI requests, or launch Chrome. A complete live run requires the configured key, network access, Chrome, and the app running on port `3001`.
+The automated tests use controlled provider and browser doubles. They do not need an API key, make live OpenAI requests, or launch Chrome.
 
 To run the production build locally:
 
@@ -93,73 +132,12 @@ npm run build
 npm run start
 ```
 
-Use the production build for a live or recorded presentation. It avoids
-development-only Fast Refresh interruptions while the isolated browser opens the
-local portal routes.
+## Built with Codex
 
-## Quick judge walkthrough
+Codex helped turn a production-oriented prototype into this focused demo, implement the customer and presenter experiences, build the restricted Computer Use handoff, review the responsive UI, and verify the complete flow.
 
-1. Open `/demo`; the synthetic evidence is already staged and the activity history is intentionally empty.
-2. Select **Analyze accident**. The presenter panel shows the validated photo and statement review, then identifies the missing date and time.
-3. Add a date and time and save the claim. The activity panel records the customer correction and the completed decision.
-4. Select **Run Computer Use in insurer sandbox**. Computer Use opens the local Demo Mutual home page, follows the two permitted links, fills the five approved fields, and stops before submission.
-5. Review the captured browser replay and final sandbox result. No real insurer is contacted and no claim is submitted.
+The demo narrative, build provenance, official deadline, and remaining submission checklist live in [`HACKATHON_SUBMISSION.md`](HACKATHON_SUBMISSION.md).
 
-## Routes and models
+## Scope
 
-- `/` contains the complete four-state flow: input, analyzing, needs information, and ready.
-- `/demo` runs the same flow with presenter-only agent activity and Computer Use replay.
-- `POST /api/analyze` validates the evidence and returns either a ready claim or one question.
-- `POST /api/demo/analyze` returns the same result plus validated observable activity.
-- `POST /api/portal-handoff` runs the restricted Computer Use loop.
-- `POST /api/demo/portal-handoff` returns the verified result plus captured replay frames.
-- `/portal/sandbox` is the synthetic portal home page.
-- `/portal/sandbox/claims` is the synthetic claims overview.
-- `/portal/sandbox/claims/new` contains the five-field incident form.
-- `/portal` displays the final sandbox screenshot held in browser memory.
-
-The demo uses `gpt-5.6` for the core image-analysis and claim-preparation path, `gpt-5.4-mini` for Computer Use, and `gpt-4o-mini-transcribe` for voice memos. Provider output is validated with strict Zod schemas before it reaches the UI.
-
-## How Codex shaped the build
-
-Codex was used to turn a production-oriented prototype into this focused demo, implement and test the complete flow, review the responsive UI in a browser, and harden the local Computer Use boundary. The main decisions were:
-
-- one standalone Next.js app instead of a multi-service architecture;
-- four customer-facing states with at most one follow-up question;
-- a separate `/demo` presenter lens that reveals validated agent activity without complicating the customer view;
-- a local, synthetic insurer portal with an allowlisted navigation and form-filling policy;
-- memory-only state, synthetic evidence, and a hard stop before submission.
-
-For a clear before-and-after record, commit `4c3fb1b` snapshots the legacy implementation, commit `ec14e06` introduces the minimal demo, and pull request #1 merges it into `main`.
-
-## Data and safety boundaries
-
-- The API key is server-only and `.env.local` is ignored by Git.
-- Photos, audio, claim data, and screenshots are not stored in a database by this app.
-- Client state and the prepared screenshot exist in memory only; a reload resets the flow.
-- Evidence sent for live analysis is processed through the configured OpenAI API. Use synthetic inputs only.
-- Computer Use is restricted to three exact local paths, two ordered navigation links, and five known fields.
-- Only `View claims` followed by `Start a motor claim` may be clicked. All other links, buttons, downloads, arbitrary navigation, file uploads, and submit actions are blocked.
-- The server verifies every filled field against the reviewed claim before reporting success.
-- Safety checks, unexpected actions, timeouts, and turn or action limits stop the handoff.
-- The sandbox contains no submit control and cannot send data to an insurer.
-
-## Input limits
-
-- Photos: 1–3 files, JPG or PNG, up to 8 MB each.
-- Text: 1–1,500 characters.
-- Voice memo: M4A, MP3, WAV, or WebM, up to 60 seconds and 10 MB.
-- Missing information: at most one follow-up question.
-
-## Deliberate non-goals
-
-- No real insurer integration, real portal automation, or claim submission
-- No arbitrary portal URL
-- No authentication, user accounts, dashboard, sidebar, or KPI surfaces
-- No database, persistence, queues, background jobs, SSE, or WebSockets
-- No separate backend, FastAPI service, or generated cross-runtime contracts
-- No custom audio recorder
-- No upload of photo files into the insurer sandbox; the portal receives only the attachment count
-- No deployment configuration or production hosting assumptions
-
-This is a local hackathon demonstration, not a production insurance system.
+ClaimDone is a local hackathon demonstration, not a production insurance system. It intentionally has no authentication, accounts, database, persistence, real insurer integration, arbitrary portal automation, or claim submission.
