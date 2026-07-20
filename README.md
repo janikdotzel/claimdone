@@ -140,3 +140,7 @@ The demo narrative, build provenance, official deadline, and remaining submissio
 ## Scope
 
 ClaimDone is a local hackathon demonstration, not a production insurance system. It intentionally has no authentication, accounts, database, persistence, real insurer integration, arbitrary portal automation, or claim submission.
+
+## License
+
+ClaimDone is available under the [MIT License](LICENSE).

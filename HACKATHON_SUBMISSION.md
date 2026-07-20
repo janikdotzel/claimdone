@@ -2,7 +2,7 @@
 
 This document is the single source of truth for hackathon logistics and the demo narrative. Product setup and technical behavior are documented in [`README.md`](README.md).
 
-Last reviewed: July 17, 2026.
+Last reviewed: July 20, 2026.
 
 ## Product story
 
@@ -46,32 +46,9 @@ Codex was used for product simplification, implementation, visual browser review
 - deterministic restrictions around Computer Use;
 - no real submission, insurer integration, or customer data.
 
-## Official submission requirements
+## Submission status
 
-The official deadline is **July 21, 2026 at 5:00 PM PDT**, which is **July 22 at 02:00 CEST**.
-
-Before submitting:
-
-- [ ] Select one eligible track in Devpost. “Apps for Your Life” is the likely fit, but the final choice is still open.
-- [x] Use GPT-5.6 for the app’s meaningful image-analysis and claim-preparation path.
-- [ ] Record a public YouTube video under three minutes with audio or voiceover.
-- [ ] Show the working product and explain how Codex and GPT-5.6 were used.
-- [ ] Write the Devpost project description in English.
-- [ ] Add the repository URL.
-- [ ] Provide judges with free, unrestricted access to a working website, functioning demo, or test build, including all required testing instructions.
-- [ ] If the repository is public, add a relevant open-source license. If it remains private, share it with `testing@devpost.com` and `build-week-event@openai.com`.
-- [ ] Confirm that the video, screenshots, music, logos, and other submission assets are original or properly licensed and do not misuse third-party trademarks.
-- [ ] Run the setup and judge walkthrough from a clean checkout.
-- [ ] Submit the primary build task’s Codex Session ID through `/feedback` and record it in the private submission notes.
-- [ ] Recheck the final entry against the official rules immediately before submission.
-
-Already covered in the repository:
-
-- [x] Reproducible npm setup and verification commands.
-- [x] Bundled synthetic sample data and a documented judge path.
-- [x] Codex usage, build decisions, and before-and-after provenance.
-- [x] All customer-facing product copy is English.
-- [x] No real insurer submission or identifying data.
+The working, up-to-date submission checklist lives in [`SUBMISSION_CHECKLIST.md`](SUBMISSION_CHECKLIST.md). It includes the uploaded demo video, repository work, `/feedback` Session ID, Devpost fields, final verification, and submission status.
 
 Official sources:
 
